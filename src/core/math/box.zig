@@ -381,3 +381,247 @@ test "Box.empty" {
     try std.testing.expect(empty2.empty());
     try std.testing.expect(!not_empty.empty());
 }
+
+test "Box - negative dimensions" {
+    const box = Box.init(0, 0, -100, -100);
+    
+    // Negative dimensions are technically non-empty (just inverted)
+    try std.testing.expectEqual(@as(f32, -100), box.width);
+    try std.testing.expectEqual(@as(f32, -100), box.height);
+    
+    // noNegativeSize should fix it
+    const fixed = box.noNegativeSize();
+    try std.testing.expectEqual(@as(f32, -100), fixed.x);
+    try std.testing.expectEqual(@as(f32, -100), fixed.y);
+    try std.testing.expectEqual(@as(f32, 100), fixed.width);
+    try std.testing.expectEqual(@as(f32, 100), fixed.height);
+    
+    // Fixed box should not be empty
+    try std.testing.expect(!fixed.empty());
+}
+
+test "Box - infinity coordinates" {
+    const inf = std.math.inf(f32);
+    const box = Box.init(inf, 0, 100, 100);
+    
+    try std.testing.expect(std.math.isInf(box.x));
+    try std.testing.expect(std.math.isFinite(box.width));
+    
+    // Operations should handle infinity gracefully
+    const translated = box.translate(Vector2D.init(10, 10));
+    try std.testing.expect(std.math.isInf(translated.x));
+    
+    // Middle with infinity
+    const mid = box.middle();
+    try std.testing.expect(std.math.isInf(mid.x));
+}
+
+test "Box - NaN coordinates" {
+    const nan_val = std.math.nan(f32);
+    const box = Box.init(nan_val, 0, 100, 100);
+    
+    try std.testing.expect(std.math.isNan(box.x));
+    
+    // Operations with NaN propagate NaN
+    const translated = box.translate(Vector2D.init(10, 10));
+    try std.testing.expect(std.math.isNan(translated.x));
+    
+    // containsPoint with NaN should return false
+    const contains = box.containsPoint(Vector2D.init(50, 50));
+    try std.testing.expect(!contains);
+}
+
+test "Box - overflow on large coordinates" {
+    const very_large = std.math.floatMax(f32) - 10;
+    const box = Box.init(very_large, 0, 100, 100);
+    
+    // Translate should handle overflow
+    const translated = box.translate(Vector2D.init(100, 0));
+    
+    // Result may be infinity due to overflow, but should not crash
+    try std.testing.expect(std.math.isFinite(translated.x) or std.math.isInf(translated.x));
+}
+
+test "Box - zero-area box containment at boundary" {
+    // Zero-width box
+    const zero_width = Box.init(10, 10, 0, 100);
+    
+    // Point exactly at x=10 (left edge)
+    const point_at_edge = Vector2D.init(10, 50);
+    
+    // Zero-width box should not contain points (empty)
+    try std.testing.expect(zero_width.empty());
+    try std.testing.expect(!zero_width.containsPoint(point_at_edge));
+    
+    // Zero-height box
+    const zero_height = Box.init(10, 10, 100, 0);
+    const point_at_y = Vector2D.init(50, 10);
+    
+    try std.testing.expect(zero_height.empty());
+    try std.testing.expect(!zero_height.containsPoint(point_at_y));
+}
+
+test "Box - empty box operations" {
+    const empty = Box.init(10, 10, 0, 0);
+    const normal = Box.init(0, 0, 100, 100);
+    
+    try std.testing.expect(empty.empty());
+    
+    // Intersection with empty
+    const intersect1 = empty.intersection(normal);
+    try std.testing.expect(intersect1.empty());
+    
+    // Overlaps with empty
+    try std.testing.expect(!empty.overlaps(normal));
+    try std.testing.expect(!normal.overlaps(empty));
+    
+    // Contains with empty
+    try std.testing.expect(!empty.contains(normal));
+    try std.testing.expect(normal.contains(empty)); // Technically contains a zero-area region
+    
+    // Empty inside normal
+    try std.testing.expect(empty.inside(normal));
+}
+
+test "Box.scaleFromCenter - zero scale factor" {
+    const box = Box.init(10, 10, 100, 50);
+    const scaled = box.scaleFromCenter(0.0);
+    
+    // Should result in zero-area box at center
+    try std.testing.expectEqual(@as(f32, 0), scaled.width);
+    try std.testing.expectEqual(@as(f32, 0), scaled.height);
+    
+    // Center should remain the same
+    const orig_center = box.middle();
+    const new_center = scaled.middle();
+    
+    // With zero size, middle is just the position
+    try std.testing.expectApproxEqAbs(orig_center.x, new_center.x, 0.01);
+    try std.testing.expectApproxEqAbs(orig_center.y, new_center.y, 0.01);
+}
+
+test "Box.scaleFromCenter - negative scale factor" {
+    const box = Box.init(10, 10, 100, 50);
+    const scaled = box.scaleFromCenter(-1.0);
+    
+    // Negative scale creates negative dimensions
+    try std.testing.expectEqual(@as(f32, -100), scaled.width);
+    try std.testing.expectEqual(@as(f32, -50), scaled.height);
+    
+    // Should be fixable with noNegativeSize
+    const fixed = scaled.noNegativeSize();
+    try std.testing.expectEqual(@as(f32, 100), fixed.width);
+    try std.testing.expectEqual(@as(f32, 50), fixed.height);
+}
+
+test "Box - intersection with non-overlapping boxes" {
+    const box1 = Box.init(0, 0, 50, 50);
+    const box2 = Box.init(100, 100, 50, 50);
+    
+    const intersect = box1.intersection(box2);
+    
+    // Non-overlapping boxes produce empty intersection
+    try std.testing.expect(intersect.empty());
+    try std.testing.expectEqual(@as(f32, 0), intersect.width);
+    try std.testing.expectEqual(@as(f32, 0), intersect.height);
+}
+
+test "Box - intersection of box with itself" {
+    const box = Box.init(10, 20, 100, 80);
+    const intersect = box.intersection(box);
+    
+    // Box intersected with itself should be itself
+    try std.testing.expectEqual(box.x, intersect.x);
+    try std.testing.expectEqual(box.y, intersect.y);
+    try std.testing.expectEqual(box.width, intersect.width);
+    try std.testing.expectEqual(box.height, intersect.height);
+}
+
+test "Box.contains - touching boundaries" {
+    const outer = Box.init(0, 0, 100, 100);
+    
+    // Box exactly at boundaries
+    const at_left_edge = Box.init(0, 0, 50, 50);
+    const at_right_edge = Box.init(50, 50, 50, 50);
+    const exceeds_by_one = Box.init(0, 0, 101, 100);
+    
+    try std.testing.expect(outer.contains(at_left_edge));
+    try std.testing.expect(outer.contains(at_right_edge));
+    try std.testing.expect(!outer.contains(exceeds_by_one));
+}
+
+test "Box.containsPoint - exact boundary test" {
+    const box = Box.init(10, 10, 100, 100);
+    
+    // Points at exact boundaries
+    const top_left = Vector2D.init(10, 10);
+    const bottom_right = Vector2D.init(110, 110);
+    const just_inside = Vector2D.init(10.001, 10.001);
+    
+    // Inclusive at start, exclusive at end
+    try std.testing.expect(box.containsPoint(top_left));
+    try std.testing.expect(!box.containsPoint(bottom_right)); // Exclusive
+    try std.testing.expect(box.containsPoint(just_inside));
+}
+
+test "Box.transform - all transforms preserve area" {
+    const box = Box.init(10, 20, 100, 50);
+    const area = box.width * box.height;
+    
+    const transforms = [_]@import("transform.zig").Transform{
+        .normal, .@"90", .@"180", .@"270",
+        .flipped, .flipped_90, .flipped_180, .flipped_270,
+    };
+    
+    for (transforms) |t| {
+        const transformed = box.transform(t, 1920, 1080);
+        const new_area = transformed.width * transformed.height;
+        
+        // Area should be preserved (might be rotated)
+        try std.testing.expectApproxEqAbs(area, new_area, 0.01);
+    }
+}
+
+test "Box.expand - negative expansion (shrink)" {
+    const box = Box.init(10, 10, 100, 50);
+    const shrunk = box.expand(-5);
+    
+    // Negative expansion shrinks the box
+    try std.testing.expectEqual(@as(f32, 15), shrunk.x);
+    try std.testing.expectEqual(@as(f32, 15), shrunk.y);
+    try std.testing.expectEqual(@as(f32, 90), shrunk.width);
+    try std.testing.expectEqual(@as(f32, 40), shrunk.height);
+}
+
+test "Box.expand - over-shrink creates negative dimensions" {
+    const box = Box.init(10, 10, 20, 20);
+    const over_shrunk = box.expand(-15);
+    
+    // Over-shrinking creates negative dimensions
+    try std.testing.expectEqual(@as(f32, -10), over_shrunk.width);
+    try std.testing.expectEqual(@as(f32, -10), over_shrunk.height);
+    
+    // Should be fixable
+    const fixed = over_shrunk.noNegativeSize();
+    try std.testing.expectEqual(@as(f32, 10), fixed.width);
+    try std.testing.expectEqual(@as(f32, 10), fixed.height);
+}
+
+test "Box.extentsFrom - various configurations" {
+    const box1 = Box.init(0, 0, 100, 100);
+    
+    // box2 inside box1
+    const box2_inside = Box.init(10, 10, 20, 20);
+    const extents_inside = box1.extentsFrom(box2_inside);
+    try std.testing.expect(extents_inside.top > 0);
+    try std.testing.expect(extents_inside.left > 0);
+    try std.testing.expect(extents_inside.bottom > 0);
+    try std.testing.expect(extents_inside.right > 0);
+    
+    // box2 extends beyond box1
+    const box2_beyond = Box.init(50, 50, 100, 100);
+    const extents_beyond = box1.extentsFrom(box2_beyond);
+    try std.testing.expect(extents_beyond.top > 0);
+    try std.testing.expect(extents_beyond.bottom < 0); // Extends beyond
+    try std.testing.expect(extents_beyond.right < 0); // Extends beyond
+}

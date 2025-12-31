@@ -350,3 +350,41 @@ test "Process - add environment variable" {
     try std.testing.expectEqualStrings("TEST_VAR", process.env.items[0].name);
     try std.testing.expectEqualStrings("test_value", process.env.items[0].value);
 }
+
+test "Process - multiple args with spaces" {
+    const allocator = std.testing.allocator;
+
+    const args = [_]string{ "-c", "echo", "arg with spaces", "another arg" };
+    var process = try Process.init(allocator, "/bin/sh", &args);
+    defer process.deinit();
+
+    try std.testing.expectEqual(@as(usize, 4), process.args.items.len);
+    try std.testing.expectEqualStrings("arg with spaces", process.args.items[2]);
+}
+
+test "Process - getExitCode before run" {
+    const allocator = std.testing.allocator;
+
+    const args = [_]string{};
+    var process = try Process.init(allocator, "/bin/echo", &args);
+    defer process.deinit();
+
+    // Exit code should be 0 before run
+    try std.testing.expectEqual(@as(i32, 0), process.getExitCode());
+}
+
+test "Process - buffer capacity for large output" {
+    const allocator = std.testing.allocator;
+
+    const args = [_]string{};
+    var process = try Process.init(allocator, "/bin/echo", &args);
+    defer process.deinit();
+
+    // Verify buffers can be allocated
+    try std.testing.expectEqual(@as(usize, 0), process.stdout_data.items.len);
+    try std.testing.expectEqual(@as(usize, 0), process.stderr_data.items.len);
+
+    // Simulate large append
+    try process.stdout_data.ensureTotalCapacity(allocator, 1024 * 1024); // 1MB
+    try std.testing.expect(process.stdout_data.capacity >= 1024 * 1024);
+}

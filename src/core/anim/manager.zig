@@ -90,16 +90,29 @@ pub const AnimationManager = struct {
     /// Safe to call even if variables are added/removed during callbacks
     pub fn tick(self: *AnimationManager) void {
         std.debug.assert(self.alive);
-
-        // Create a copy of indices to handle modifications during iteration
-        var i: usize = 0;
-        while (i < self.variables.items.len) {
-            self.tick_callbacks.items[i](self.variables.items[i]);
-
-            // Check if this callback modified the list
-            // If list got shorter, don't increment i
-            if (i < self.variables.items.len) {
-                i += 1;
+        
+        // SAFETY: We need to handle list modifications during callbacks
+        // Strategy: Snapshot the variables to tick before starting
+        const to_tick = self.allocator.dupe(*anyopaque, self.variables.items) catch return;
+        defer self.allocator.free(to_tick);
+        
+        const callbacks_snapshot = self.allocator.dupe(*const fn (*anyopaque) void, self.tick_callbacks.items) catch return;
+        defer self.allocator.free(callbacks_snapshot);
+        
+        // Tick all variables from snapshot
+        // Even if they get unregistered during tick, the snapshot keeps them valid
+        for (to_tick, callbacks_snapshot) |variable, callback| {
+            // Check if variable is still registered before ticking
+            var still_registered = false;
+            for (self.variables.items) |current_var| {
+                if (current_var == variable) {
+                    still_registered = true;
+                    break;
+                }
+            }
+            
+            if (still_registered) {
+                callback(variable);
             }
         }
     }
@@ -412,7 +425,7 @@ test "AnimationManager safe tick with modifications" {
     const config = AnimationConfig.init();
     var anim1 = AnimatedVariable(f32).init(0.0, config);
     var anim2 = AnimatedVariable(f32).init(0.0, config);
-
+    
     anim1.setDuration(100);
     anim2.setDuration(100);
 
@@ -425,7 +438,7 @@ test "AnimationManager safe tick with modifications" {
         var flag: *bool = undefined;
         var mgr: *AnimationManager = undefined;
         var a2: *AnimatedVariable(f32) = undefined;
-
+        
         fn onUpdate(a: *AnimatedVariable(f32)) void {
             _ = a;
             if (!flag.*) {
@@ -440,13 +453,509 @@ test "AnimationManager safe tick with modifications" {
     Ctx.a2 = &anim2;
 
     anim1.setUpdateCallback(Ctx.onUpdate);
-
+    
     anim1.setValue(100.0);
     anim1.animation_data.started_time = std.time.milliTimestamp() - 50;
-
+    
     // This tick should safely handle the modification
     manager.tick();
-
+    
     try std.testing.expect(callback_ran);
     try std.testing.expectEqual(@as(usize, 1), manager.variables.items.len);
+}
+
+test "AnimationManager - variable unregisters itself in callback" {
+    var manager = AnimationManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    const config = AnimationConfig.init();
+    var anim = AnimatedVariable(f32).init(0.0, config);
+    anim.setDuration(100);
+
+    try manager.registerVariable(f32, &anim);
+
+    const Ctx = struct {
+        var mgr: *AnimationManager = undefined;
+        var self_anim: *AnimatedVariable(f32) = undefined;
+        var callback_ran: bool = false;
+        
+        fn onUpdate(a: *AnimatedVariable(f32)) void {
+            if (!callback_ran) {
+                callback_ran = true;
+                // Unregister self during callback
+                mgr.unregisterVariable(f32, self_anim);
+            }
+            _ = a;
+        }
+    };
+    Ctx.mgr = &manager;
+    Ctx.self_anim = &anim;
+    Ctx.callback_ran = false;
+    
+    anim.setUpdateCallback(Ctx.onUpdate);
+    anim.setValue(100.0);
+    anim.animation_data.started_time = std.time.milliTimestamp() - 50;
+    
+    // Tick should handle self-unregistration safely
+    manager.tick();
+    
+    try std.testing.expect(Ctx.callback_ran);
+    try std.testing.expectEqual(@as(usize, 0), manager.variables.items.len);
+}
+
+test "AnimationManager - callback registers new variable" {
+    var manager = AnimationManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    const config = AnimationConfig.init();
+    var anim1 = AnimatedVariable(f32).init(0.0, config);
+    var anim2 = AnimatedVariable(f32).init(0.0, config);
+    
+    anim1.setDuration(100);
+    anim2.setDuration(100);
+
+    try manager.registerVariable(f32, &anim1);
+
+    const Ctx = struct {
+        var mgr: *AnimationManager = undefined;
+        var new_anim: *AnimatedVariable(f32) = undefined;
+        var registered: bool = false;
+        
+        fn onUpdate(a: *AnimatedVariable(f32)) void {
+            _ = a;
+            if (!registered) {
+                registered = true;
+                // Register new variable during tick
+                mgr.registerVariable(f32, new_anim) catch {};
+            }
+        }
+    };
+    Ctx.mgr = &manager;
+    Ctx.new_anim = &anim2;
+    Ctx.registered = false;
+    
+    anim1.setUpdateCallback(Ctx.onUpdate);
+    anim1.setValue(100.0);
+    anim1.animation_data.started_time = std.time.milliTimestamp() - 50;
+    
+    // First tick - registers new variable
+    manager.tick();
+    
+    try std.testing.expect(Ctx.registered);
+    try std.testing.expectEqual(@as(usize, 2), manager.variables.items.len);
+    
+    // New variable should NOT have been ticked on same tick
+    try std.testing.expect(!anim2.isBeingAnimated());
+}
+
+test "AnimationManager - removeFinishedVariables from callback" {
+    var manager = AnimationManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    const config = AnimationConfig.init();
+    var anim1 = AnimatedVariable(f32).init(0.0, config);
+    var anim2 = AnimatedVariable(f32).init(0.0, config);
+    var anim3 = AnimatedVariable(f32).init(0.0, config);
+    
+    anim1.setDuration(100);
+    anim2.setDuration(100);
+    anim3.setDuration(100);
+
+    try manager.registerVariable(f32, &anim1);
+    try manager.registerVariable(f32, &anim2);
+    try manager.registerVariable(f32, &anim3);
+
+    const Ctx = struct {
+        var mgr: *AnimationManager = undefined;
+        var a2: *AnimatedVariable(f32) = undefined;
+        
+        fn onUpdate(a: *AnimatedVariable(f32)) void {
+            _ = a;
+            // Finish another variable and call cleanup
+            a2.warp(false);
+            mgr.removeFinishedVariables(f32);
+        }
+    };
+    Ctx.mgr = &manager;
+    Ctx.a2 = &anim2;
+    
+    anim1.setUpdateCallback(Ctx.onUpdate);
+    
+    anim1.setValue(100.0);
+    anim2.setValue(100.0);
+    anim3.setValue(100.0);
+    
+    anim1.animation_data.started_time = std.time.milliTimestamp() - 50;
+    anim2.animation_data.started_time = std.time.milliTimestamp() - 50;
+    anim3.animation_data.started_time = std.time.milliTimestamp() - 50;
+    
+    // Tick should handle removeFinishedVariables being called during iteration
+    manager.tick();
+    
+    // anim2 should have been removed
+    try std.testing.expect(manager.variables.items.len < 3);
+}
+
+test "AnimationManager - stress test with 100 concurrent animations" {
+    var manager = AnimationManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    const config = AnimationConfig.init();
+    
+    // Create 100 animations
+    var animations: [100]AnimatedVariable(f32) = undefined;
+    for (&animations, 0..) |*anim, i| {
+        anim.* = AnimatedVariable(f32).init(0.0, config);
+        anim.setDuration(@intCast(50 + (i % 50))); // Random durations 50-100ms
+        try manager.registerVariable(f32, anim);
+    }
+
+    // Start all animations
+    for (&animations, 0..) |*anim, i| {
+        anim.setValue(@floatFromInt(i * 10));
+    }
+
+    // Simulate multiple ticks
+    const start_time = std.time.milliTimestamp();
+    var tick_count: usize = 0;
+    while (tick_count < 5) : (tick_count += 1) {
+        // Update all start times to simulate passage of time
+        for (&animations) |*anim| {
+            if (anim.isBeingAnimated()) {
+                anim.animation_data.started_time = start_time - @as(i64, @intCast(tick_count * 20));
+            }
+        }
+        
+        manager.tick();
+    }
+
+    // All animations should have been ticked
+    try std.testing.expectEqual(@as(usize, 100), manager.variables.items.len);
+}
+
+test "AnimationManager - callback chain reaction" {
+    var manager = AnimationManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    const config = AnimationConfig.init();
+    var anim1 = AnimatedVariable(f32).init(0.0, config);
+    var anim2 = AnimatedVariable(f32).init(0.0, config);
+    var anim3 = AnimatedVariable(f32).init(0.0, config);
+    
+    anim1.setDuration(100);
+    anim2.setDuration(100);
+    anim3.setDuration(100);
+
+    try manager.registerVariable(f32, &anim1);
+    try manager.registerVariable(f32, &anim2);
+    try manager.registerVariable(f32, &anim3);
+
+    var chain_count: u32 = 0;
+    const Ctx = struct {
+        var counter: *u32 = undefined;
+        var a2: *AnimatedVariable(f32) = undefined;
+        var a3: *AnimatedVariable(f32) = undefined;
+        
+        fn onEnd1(a: *AnimatedVariable(f32)) void {
+            _ = a;
+            counter.* += 1;
+            // Trigger second animation
+            a2.setValue(200.0);
+        }
+        
+        fn onEnd2(a: *AnimatedVariable(f32)) void {
+            _ = a;
+            counter.* += 10;
+            // Trigger third animation
+            a3.setValue(300.0);
+        }
+        
+        fn onEnd3(a: *AnimatedVariable(f32)) void {
+            _ = a;
+            counter.* += 100;
+        }
+    };
+    Ctx.counter = &chain_count;
+    Ctx.a2 = &anim2;
+    Ctx.a3 = &anim3;
+    
+    anim1.setCallbackOnEnd(Ctx.onEnd1, false);
+    anim2.setCallbackOnEnd(Ctx.onEnd2, false);
+    anim3.setCallbackOnEnd(Ctx.onEnd3, false);
+    chain_count = 0;
+
+    // Start first animation
+    anim1.setValue(100.0);
+    anim1.animation_data.started_time = std.time.milliTimestamp() - 100;
+    
+    manager.tick();
+    
+    // First callback fired, second animation started
+    try std.testing.expectEqual(@as(u32, 1), chain_count);
+    try std.testing.expect(anim2.isBeingAnimated());
+}
+
+test "AnimationManager - multiple variables unregister during same tick" {
+    var manager = AnimationManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    const config = AnimationConfig.init();
+    var anim1 = AnimatedVariable(f32).init(0.0, config);
+    var anim2 = AnimatedVariable(f32).init(0.0, config);
+    var anim3 = AnimatedVariable(f32).init(0.0, config);
+    
+    anim1.setDuration(100);
+    anim2.setDuration(100);
+    anim3.setDuration(100);
+
+    try manager.registerVariable(f32, &anim1);
+    try manager.registerVariable(f32, &anim2);
+    try manager.registerVariable(f32, &anim3);
+
+    const Ctx = struct {
+        var mgr: *AnimationManager = undefined;
+        var a1: *AnimatedVariable(f32) = undefined;
+        var a2: *AnimatedVariable(f32) = undefined;
+        
+        fn onUpdate1(a: *AnimatedVariable(f32)) void {
+            _ = a;
+            mgr.unregisterVariable(f32, a1);
+        }
+        
+        fn onUpdate2(a: *AnimatedVariable(f32)) void {
+            _ = a;
+            mgr.unregisterVariable(f32, a2);
+        }
+    };
+    Ctx.mgr = &manager;
+    Ctx.a1 = &anim1;
+    Ctx.a2 = &anim2;
+    
+    anim1.setUpdateCallback(Ctx.onUpdate1);
+    anim2.setUpdateCallback(Ctx.onUpdate2);
+    
+    anim1.setValue(100.0);
+    anim2.setValue(100.0);
+    anim3.setValue(100.0);
+    
+    anim1.animation_data.started_time = std.time.milliTimestamp() - 50;
+    anim2.animation_data.started_time = std.time.milliTimestamp() - 50;
+    anim3.animation_data.started_time = std.time.milliTimestamp() - 50;
+    
+    // Tick with multiple unregistrations
+    manager.tick();
+    
+    // Only anim3 should remain
+    try std.testing.expectEqual(@as(usize, 1), manager.variables.items.len);
+}
+
+test "AnimationManager - callback attempts to destroy manager" {
+    var manager = AnimationManager.init(std.testing.allocator);
+    
+    const config = AnimationConfig.init();
+    var anim = AnimatedVariable(f32).init(0.0, config);
+    anim.setDuration(100);
+
+    try manager.registerVariable(f32, &anim);
+
+    var attempted_destroy: bool = false;
+    const Ctx = struct {
+        var flag: *bool = undefined;
+        var mgr: *AnimationManager = undefined;
+        
+        fn onUpdate(a: *AnimatedVariable(f32)) void {
+            _ = a;
+            if (!flag.*) {
+                flag.* = true;
+                // Attempt to destroy manager during callback
+                mgr.deinit();
+            }
+        }
+    };
+    Ctx.flag = &attempted_destroy;
+    Ctx.mgr = &manager;
+    
+    anim.setUpdateCallback(Ctx.onUpdate);
+    anim.setValue(100.0);
+    anim.animation_data.started_time = std.time.milliTimestamp() - 50;
+    
+    // This will destroy the manager during tick
+    manager.tick();
+    
+    try std.testing.expect(attempted_destroy);
+    try std.testing.expect(!manager.alive);
+    
+    // Variable should detect dead manager
+    try std.testing.expect(anim.isAnimationManagerDead());
+}
+
+test "AnimationManager - register during tick then tick again" {
+    var manager = AnimationManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    const config = AnimationConfig.init();
+    var anim1 = AnimatedVariable(f32).init(0.0, config);
+    var anim2 = AnimatedVariable(f32).init(0.0, config);
+    
+    anim1.setDuration(100);
+    anim2.setDuration(100);
+
+    try manager.registerVariable(f32, &anim1);
+
+    var anim2_ticked: bool = false;
+    const Ctx = struct {
+        var mgr: *AnimationManager = undefined;
+        var new_anim: *AnimatedVariable(f32) = undefined;
+        var registered: bool = false;
+        var anim2_tick_flag: *bool = undefined;
+        
+        fn onUpdate1(a: *AnimatedVariable(f32)) void {
+            _ = a;
+            if (!registered) {
+                registered = true;
+                mgr.registerVariable(f32, new_anim) catch {};
+                new_anim.setValue(200.0);
+            }
+        }
+        
+        fn onUpdate2(a: *AnimatedVariable(f32)) void {
+            _ = a;
+            anim2_tick_flag.* = true;
+        }
+    };
+    Ctx.mgr = &manager;
+    Ctx.new_anim = &anim2;
+    Ctx.registered = false;
+    Ctx.anim2_tick_flag = &anim2_ticked;
+    
+    anim1.setUpdateCallback(Ctx.onUpdate1);
+    anim2.setUpdateCallback(Ctx.onUpdate2);
+    
+    anim1.setValue(100.0);
+    anim1.animation_data.started_time = std.time.milliTimestamp() - 50;
+    
+    // First tick - registers anim2 but shouldn't tick it
+    manager.tick();
+    try std.testing.expect(!anim2_ticked);
+    
+    // Second tick - should tick anim2
+    anim2.animation_data.started_time = std.time.milliTimestamp() - 50;
+    manager.tick();
+    try std.testing.expect(anim2_ticked);
+}
+
+test "AnimationManager - all variables finish simultaneously" {
+    var manager = AnimationManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    const config = AnimationConfig.init();
+    var anim1 = AnimatedVariable(f32).init(0.0, config);
+    var anim2 = AnimatedVariable(f32).init(0.0, config);
+    var anim3 = AnimatedVariable(f32).init(0.0, config);
+    
+    anim1.setDuration(100);
+    anim2.setDuration(100);
+    anim3.setDuration(100);
+
+    try manager.registerVariable(f32, &anim1);
+    try manager.registerVariable(f32, &anim2);
+    try manager.registerVariable(f32, &anim3);
+
+    var end_count: u32 = 0;
+    const Ctx = struct {
+        var counter: *u32 = undefined;
+        fn onEnd(a: *AnimatedVariable(f32)) void {
+            _ = a;
+            counter.* += 1;
+        }
+    };
+    Ctx.counter = &end_count;
+    
+    anim1.setCallbackOnEnd(Ctx.onEnd, false);
+    anim2.setCallbackOnEnd(Ctx.onEnd, false);
+    anim3.setCallbackOnEnd(Ctx.onEnd, false);
+    end_count = 0;
+
+    // Start all with same timing
+    const start_time = std.time.milliTimestamp() - 100;
+    anim1.setValue(100.0);
+    anim2.setValue(200.0);
+    anim3.setValue(300.0);
+    
+    anim1.animation_data.started_time = start_time;
+    anim2.animation_data.started_time = start_time;
+    anim3.animation_data.started_time = start_time;
+    
+    // Single tick should finish all
+    manager.tick();
+    
+    try std.testing.expectEqual(@as(u32, 3), end_count);
+    try std.testing.expect(!anim1.isBeingAnimated());
+    try std.testing.expect(!anim2.isBeingAnimated());
+    try std.testing.expect(!anim3.isBeingAnimated());
+}
+
+test "AnimationManager - nested callback modifications" {
+    var manager = AnimationManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    const config = AnimationConfig.init();
+    var anim1 = AnimatedVariable(f32).init(0.0, config);
+    var anim2 = AnimatedVariable(f32).init(0.0, config);
+    var anim3 = AnimatedVariable(f32).init(0.0, config);
+    
+    anim1.setDuration(100);
+    anim2.setDuration(100);
+    anim3.setDuration(100);
+
+    try manager.registerVariable(f32, &anim1);
+    try manager.registerVariable(f32, &anim2);
+
+    const Ctx = struct {
+        var mgr: *AnimationManager = undefined;
+        var a2: *AnimatedVariable(f32) = undefined;
+        var a3: *AnimatedVariable(f32) = undefined;
+        var step: u32 = 0;
+        
+        fn onUpdate1(a: *AnimatedVariable(f32)) void {
+            _ = a;
+            if (step == 0) {
+                step = 1;
+                // Unregister a2, register a3
+                mgr.unregisterVariable(f32, a2);
+                mgr.registerVariable(f32, a3) catch {};
+                a3.setValue(300.0);
+            }
+        }
+    };
+    Ctx.mgr = &manager;
+    Ctx.a2 = &anim2;
+    Ctx.a3 = &anim3;
+    Ctx.step = 0;
+    
+    anim1.setUpdateCallback(Ctx.onUpdate1);
+    
+    anim1.setValue(100.0);
+    anim2.setValue(200.0);
+    
+    anim1.animation_data.started_time = std.time.milliTimestamp() - 50;
+    anim2.animation_data.started_time = std.time.milliTimestamp() - 50;
+    
+    // Tick with nested modifications
+    manager.tick();
+    
+    // Should have anim1 and anim3, not anim2
+    try std.testing.expectEqual(@as(usize, 2), manager.variables.items.len);
+}
+
+test "AnimationManager - empty manager tick" {
+    var manager = AnimationManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    // Tick with no variables should not crash
+    manager.tick();
+    manager.tick();
+    manager.tick();
+    
+    try std.testing.expect(manager.alive);
 }

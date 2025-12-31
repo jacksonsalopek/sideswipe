@@ -539,3 +539,504 @@ test "AnimatedVariable - setValueAndWarp calls update callback" {
     try std.testing.expectEqual(@as(u32, 1), update_count);
     try std.testing.expectEqual(@as(f32, 42.0), animated.value);
 }
+
+test "AnimatedVariable - rapid setValue calls before tick" {
+    var config = AnimationConfig.init();
+    config.setStyle(.linear);
+    var animated = AnimatedVariable(f32).init(0.0, config);
+    animated.setDuration(100);
+
+    var begin_count: u32 = 0;
+    const Ctx = struct {
+        var counter: *u32 = undefined;
+        fn onBegin(anim: *AnimatedVariable(f32)) void {
+            _ = anim;
+            counter.* += 1;
+        }
+    };
+    Ctx.counter = &begin_count;
+    animated.setCallbackOnBegin(Ctx.onBegin);
+
+    // Rapid setValue calls
+    animated.setValue(10.0);
+    animated.setValue(20.0);
+    animated.setValue(30.0);
+    animated.setValue(40.0);
+    animated.setValue(50.0);
+
+    // Only first setValue should trigger onBegin
+    try std.testing.expectEqual(@as(u32, 1), begin_count);
+
+    // Goal should be updated to latest
+    try std.testing.expectEqual(@as(f32, 50.0), animated.goal);
+    try std.testing.expect(animated.isBeingAnimated());
+}
+
+test "AnimatedVariable - setValue to current goal" {
+    var config = AnimationConfig.init();
+    config.setStyle(.linear);
+    var animated = AnimatedVariable(f32).init(0.0, config);
+    animated.setDuration(100);
+
+    var begin_count: u32 = 0;
+    const Ctx = struct {
+        var counter: *u32 = undefined;
+        fn onBegin(anim: *AnimatedVariable(f32)) void {
+            _ = anim;
+            counter.* += 1;
+        }
+    };
+    Ctx.counter = &begin_count;
+    animated.setCallbackOnBegin(Ctx.onBegin);
+
+    // First setValue
+    animated.setValue(100.0);
+    try std.testing.expectEqual(@as(u32, 1), begin_count);
+
+    // Set to same goal - should not restart animation
+    animated.setValue(100.0);
+    try std.testing.expectEqual(@as(u32, 1), begin_count);
+
+    // Goal unchanged
+    try std.testing.expectEqual(@as(f32, 100.0), animated.goal);
+}
+
+test "AnimatedVariable - zero duration animation" {
+    var config = AnimationConfig.init();
+    config.setStyle(.linear);
+    var animated = AnimatedVariable(f32).init(0.0, config);
+    animated.setDuration(0); // Zero duration!
+
+    var end_count: u32 = 0;
+    const Ctx = struct {
+        var counter: *u32 = undefined;
+        fn onEnd(anim: *AnimatedVariable(f32)) void {
+            _ = anim;
+            counter.* += 1;
+        }
+    };
+    Ctx.counter = &end_count;
+    animated.setCallbackOnEnd(Ctx.onEnd, false);
+    end_count = 0;
+
+    animated.setValue(100.0);
+
+    // Tick should immediately finish
+    animated.tick();
+
+    try std.testing.expectEqual(@as(f32, 100.0), animated.value);
+    try std.testing.expect(!animated.isBeingAnimated());
+    try std.testing.expectEqual(@as(u32, 1), end_count);
+}
+
+test "AnimatedVariable - callback re-entrancy (setValue in callback)" {
+    var config = AnimationConfig.init();
+    config.setStyle(.linear);
+    var animated = AnimatedVariable(f32).init(0.0, config);
+    animated.setDuration(100);
+
+    var callback_count: u32 = 0;
+    const Ctx = struct {
+        var counter: *u32 = undefined;
+        var anim_ptr: *AnimatedVariable(f32) = undefined;
+
+        fn onUpdate(anim: *AnimatedVariable(f32)) void {
+            counter.* += 1;
+
+            // Re-entrant call: set value during update callback
+            if (counter.* == 1) {
+                anim.setValue(200.0); // Change goal mid-animation
+            }
+        }
+    };
+    Ctx.counter = &callback_count;
+    Ctx.anim_ptr = &animated;
+
+    animated.setUpdateCallback(Ctx.onUpdate);
+
+    animated.setValue(100.0);
+    animated.animation_data.started_time = std.time.milliTimestamp() - 50;
+
+    animated.tick();
+
+    // Callback should have run and changed goal
+    try std.testing.expectEqual(@as(u32, 1), callback_count);
+    try std.testing.expectEqual(@as(f32, 200.0), animated.goal);
+}
+
+test "AnimatedVariable - callback modifies different variable" {
+    var config = AnimationConfig.init();
+    config.setStyle(.linear);
+
+    var animated1 = AnimatedVariable(f32).init(0.0, config);
+    animated1.setDuration(100);
+
+    var animated2 = AnimatedVariable(f32).init(0.0, config);
+    animated2.setDuration(100);
+
+    const Ctx = struct {
+        var other: *AnimatedVariable(f32) = undefined;
+
+        fn onUpdate(anim: *AnimatedVariable(f32)) void {
+            _ = anim;
+            // Modify different variable
+            other.setValue(500.0);
+        }
+    };
+    Ctx.other = &animated2;
+
+    animated1.setUpdateCallback(Ctx.onUpdate);
+
+    animated1.setValue(100.0);
+    animated1.animation_data.started_time = std.time.milliTimestamp() - 50;
+
+    animated1.tick();
+
+    // animated2 should have been affected
+    try std.testing.expectEqual(@as(f32, 500.0), animated2.goal);
+    try std.testing.expect(animated2.isBeingAnimated());
+}
+
+test "AnimatedVariable - onEnd set mid-flight" {
+    var config = AnimationConfig.init();
+    config.setStyle(.linear);
+    var animated = AnimatedVariable(f32).init(0.0, config);
+    animated.setDuration(100);
+
+    animated.setValue(100.0);
+    animated.animation_data.started_time = std.time.milliTimestamp() - 30;
+
+    // Animation is now in progress at ~30%
+    try std.testing.expect(animated.isBeingAnimated());
+
+    var end_count: u32 = 0;
+    const Ctx = struct {
+        var counter: *u32 = undefined;
+        fn onEnd(anim: *AnimatedVariable(f32)) void {
+            _ = anim;
+            counter.* += 1;
+        }
+    };
+    Ctx.counter = &end_count;
+
+    // Set callback mid-flight (should NOT fire immediately since not finished)
+    animated.setCallbackOnEnd(Ctx.onEnd, false);
+    try std.testing.expectEqual(@as(u32, 0), end_count);
+
+    // Complete animation
+    animated.animation_data.started_time = std.time.milliTimestamp() - 100;
+    animated.tick();
+
+    // Now callback should have fired
+    try std.testing.expectEqual(@as(u32, 1), end_count);
+}
+
+test "AnimatedVariable - animation interrupted before tick" {
+    var config = AnimationConfig.init();
+    config.setStyle(.linear);
+    var animated = AnimatedVariable(f32).init(0.0, config);
+    animated.setDuration(100);
+
+    var end_count: u32 = 0;
+    var begin_count: u32 = 0;
+
+    const Ctx = struct {
+        var end_counter: *u32 = undefined;
+        var begin_counter: *u32 = undefined;
+
+        fn onBegin(anim: *AnimatedVariable(f32)) void {
+            _ = anim;
+            begin_counter.* += 1;
+        }
+
+        fn onEnd(anim: *AnimatedVariable(f32)) void {
+            _ = anim;
+            end_counter.* += 1;
+        }
+    };
+    Ctx.end_counter = &end_count;
+    Ctx.begin_counter = &begin_count;
+
+    animated.setCallbackOnBegin(Ctx.onBegin);
+    animated.setCallbackOnEnd(Ctx.onEnd, false);
+    end_count = 0; // Reset after initial callback
+
+    // Start animation to 100
+    animated.setValue(100.0);
+    try std.testing.expectEqual(@as(u32, 1), begin_count);
+
+    // Immediately interrupt with new value before any tick
+    animated.setValue(200.0);
+
+    // Begin should still only be called once (animation already started)
+    try std.testing.expectEqual(@as(u32, 1), begin_count);
+
+    // onEnd should NOT have fired yet (first animation was interrupted, not completed)
+    try std.testing.expectEqual(@as(u32, 0), end_count);
+
+    // Goal should be updated
+    try std.testing.expectEqual(@as(f32, 200.0), animated.goal);
+}
+
+test "AnimatedVariable - setValue during onEnd callback" {
+    var config = AnimationConfig.init();
+    config.setStyle(.linear);
+    var animated = AnimatedVariable(f32).init(0.0, config);
+    animated.setDuration(100);
+
+    var end_count: u32 = 0;
+    const Ctx = struct {
+        var counter: *u32 = undefined;
+        var anim_ptr: *AnimatedVariable(f32) = undefined;
+
+        fn onEnd(anim: *AnimatedVariable(f32)) void {
+            counter.* += 1;
+
+            // Chain animation: start new animation in onEnd
+            if (counter.* == 1) {
+                anim.setValue(200.0);
+            }
+        }
+    };
+    Ctx.counter = &end_count;
+    Ctx.anim_ptr = &animated;
+
+    animated.setCallbackOnEnd(Ctx.onEnd, false);
+    end_count = 0;
+
+    // First animation
+    animated.setValue(100.0);
+    animated.animation_data.started_time = std.time.milliTimestamp() - 100;
+    animated.tick();
+
+    // onEnd fired and started new animation
+    try std.testing.expectEqual(@as(u32, 1), end_count);
+    try std.testing.expectEqual(@as(f32, 100.0), animated.value);
+    try std.testing.expectEqual(@as(f32, 200.0), animated.goal);
+    try std.testing.expect(animated.isBeingAnimated());
+}
+
+test "AnimatedVariable - multiple interruptions in sequence" {
+    var config = AnimationConfig.init();
+    config.setStyle(.linear);
+    var animated = AnimatedVariable(f32).init(0.0, config);
+    animated.setDuration(100);
+
+    var begin_count: u32 = 0;
+    const Ctx = struct {
+        var counter: *u32 = undefined;
+        fn onBegin(anim: *AnimatedVariable(f32)) void {
+            _ = anim;
+            counter.* += 1;
+        }
+    };
+    Ctx.counter = &begin_count;
+    animated.setCallbackOnBegin(Ctx.onBegin);
+
+    // Start animation
+    animated.setValue(100.0);
+    try std.testing.expectEqual(@as(u32, 1), begin_count);
+
+    // Tick partially
+    animated.animation_data.started_time = std.time.milliTimestamp() - 50;
+    animated.tick();
+    const value_at_50 = animated.value;
+    try std.testing.expect(value_at_50 > 0.0 and value_at_50 < 100.0);
+
+    // Interrupt with new goal
+    animated.setValue(200.0);
+    try std.testing.expectEqual(@as(u32, 1), begin_count); // No new begin
+
+    // Interrupt again
+    animated.setValue(300.0);
+    try std.testing.expectEqual(@as(u32, 1), begin_count);
+
+    // Value should still be at the ticked position
+    try std.testing.expectEqual(value_at_50, animated.value);
+    try std.testing.expectEqual(@as(f32, 300.0), animated.goal);
+}
+
+test "AnimatedVariable - warp during active animation" {
+    var config = AnimationConfig.init();
+    config.setStyle(.linear);
+    var animated = AnimatedVariable(f32).init(0.0, config);
+    animated.setDuration(100);
+
+    var end_count: u32 = 0;
+    const Ctx = struct {
+        var counter: *u32 = undefined;
+        fn onEnd(anim: *AnimatedVariable(f32)) void {
+            _ = anim;
+            counter.* += 1;
+        }
+    };
+    Ctx.counter = &end_count;
+    animated.setCallbackOnEnd(Ctx.onEnd, false);
+    end_count = 0;
+
+    // Start animation
+    animated.setValue(100.0);
+    animated.animation_data.started_time = std.time.milliTimestamp() - 50;
+    animated.tick();
+
+    try std.testing.expect(animated.isBeingAnimated());
+
+    // Warp to different value during animation
+    animated.setValueAndWarp(75.0);
+
+    // Should have called onEnd
+    try std.testing.expectEqual(@as(u32, 1), end_count);
+    try std.testing.expectEqual(@as(f32, 75.0), animated.value);
+    try std.testing.expect(!animated.isBeingAnimated());
+}
+
+test "AnimatedVariable - callback recursion prevention" {
+    var config = AnimationConfig.init();
+    config.setStyle(.linear);
+    var animated = AnimatedVariable(f32).init(0.0, config);
+    animated.setDuration(100);
+
+    var callback_depth: u32 = 0;
+    const Ctx = struct {
+        var depth: *u32 = undefined;
+        var anim_ptr: *AnimatedVariable(f32) = undefined;
+
+        fn onUpdate(anim: *AnimatedVariable(f32)) void {
+            depth.* += 1;
+
+            // Try to cause infinite recursion
+            if (depth.* < 5) {
+                // This setValue won't trigger onBegin since animation is already started
+                // But it updates the goal
+                anim.setValue(anim.goal + 10.0);
+            }
+        }
+    };
+    Ctx.depth = &callback_depth;
+    Ctx.anim_ptr = &animated;
+
+    animated.setUpdateCallback(Ctx.onUpdate);
+
+    animated.setValue(100.0);
+    animated.animation_data.started_time = std.time.milliTimestamp() - 50;
+
+    // Single tick should not cause infinite recursion
+    animated.tick();
+
+    // Callback ran once per tick
+    try std.testing.expectEqual(@as(u32, 1), callback_depth);
+
+    // Goal was updated
+    try std.testing.expectEqual(@as(f32, 110.0), animated.goal);
+}
+
+test "AnimatedVariable - disabled animation interrupts active animation" {
+    var config = AnimationConfig.init();
+    config.setStyle(.linear);
+    var animated = AnimatedVariable(f32).init(0.0, config);
+    animated.setDuration(100);
+
+    var end_count: u32 = 0;
+    const Ctx = struct {
+        var counter: *u32 = undefined;
+        fn onEnd(anim: *AnimatedVariable(f32)) void {
+            _ = anim;
+            counter.* += 1;
+        }
+    };
+    Ctx.counter = &end_count;
+    animated.setCallbackOnEnd(Ctx.onEnd, false);
+    end_count = 0;
+
+    // Start animation
+    animated.setValue(100.0);
+    try std.testing.expect(animated.isBeingAnimated());
+
+    // Disable animation config
+    animated.animation_data.config.enabled = false;
+
+    // Now setValue should warp instead of animate
+    animated.setValue(50.0);
+
+    // Should have warped immediately
+    try std.testing.expectEqual(@as(f32, 50.0), animated.value);
+    try std.testing.expect(!animated.isBeingAnimated());
+
+    // onEnd should have been called
+    try std.testing.expectEqual(@as(u32, 1), end_count);
+}
+
+test "AnimatedVariable - pause and resume with callbacks" {
+    var config = AnimationConfig.init();
+    config.setStyle(.linear);
+    var animated = AnimatedVariable(f32).init(0.0, config);
+    animated.setDuration(100);
+
+    var update_count: u32 = 0;
+    const Ctx = struct {
+        var counter: *u32 = undefined;
+        fn onUpdate(anim: *AnimatedVariable(f32)) void {
+            _ = anim;
+            counter.* += 1;
+        }
+    };
+    Ctx.counter = &update_count;
+    animated.setUpdateCallback(Ctx.onUpdate);
+
+    animated.setValue(100.0);
+    animated.animation_data.started_time = std.time.milliTimestamp() - 30;
+
+    // Tick while active
+    animated.tick();
+    try std.testing.expectEqual(@as(u32, 1), update_count);
+
+    // Pause
+    animated.setPaused(true);
+
+    // Tick while paused - callback should NOT fire
+    animated.tick();
+    try std.testing.expectEqual(@as(u32, 1), update_count);
+
+    // Resume
+    animated.setPaused(false);
+
+    // Tick after resume - callback should fire
+    animated.tick();
+    try std.testing.expectEqual(@as(u32, 2), update_count);
+}
+
+test "AnimatedVariable - resetAllCallbacks during animation" {
+    var config = AnimationConfig.init();
+    config.setStyle(.linear);
+    var animated = AnimatedVariable(f32).init(0.0, config);
+    animated.setDuration(100);
+
+    var callback_ran: bool = false;
+    const Ctx = struct {
+        var flag: *bool = undefined;
+        fn onUpdate(anim: *AnimatedVariable(f32)) void {
+            _ = anim;
+            flag.* = true;
+        }
+    };
+    Ctx.flag = &callback_ran;
+
+    animated.setUpdateCallback(Ctx.onUpdate);
+    animated.setValue(100.0);
+    animated.animation_data.started_time = std.time.milliTimestamp() - 30;
+
+    // Tick once
+    animated.tick();
+    try std.testing.expect(callback_ran);
+    callback_ran = false;
+
+    // Reset callbacks mid-animation
+    animated.resetAllCallbacks();
+
+    // Tick again - callback should NOT fire
+    animated.tick();
+    try std.testing.expect(!callback_ran);
+
+    // Animation should still be progressing
+    try std.testing.expect(animated.isBeingAnimated());
+}

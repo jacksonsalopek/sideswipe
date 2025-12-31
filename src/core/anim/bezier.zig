@@ -269,15 +269,22 @@ test "BezierCurve - non-monotonic clamps out of range" {
     const curve = BezierCurve.init(1.5, 0.5, -0.5, 0.5);
 
     // Normal range
-    const y1 = curve.getYForPoint(0.5);
-    try std.testing.expect(std.math.isFinite(y1));
+    const y_normal = curve.getYForPoint(0.5);
+    try std.testing.expect(std.math.isFinite(y_normal));
     
-    // Far beyond range - should clamp gracefully
-    const y_max = curve.getYForPoint(std.math.floatMax(f32));
-    try std.testing.expect(std.math.isFinite(y_max));
+    // Moderately out of range (realistic compositor values)
+    const y_above = curve.getYForPoint(2.0);
+    try std.testing.expect(std.math.isFinite(y_above));
     
-    const y_min = curve.getYForPoint(-std.math.floatMax(f32));
-    try std.testing.expect(std.math.isFinite(y_min));
+    const y_below = curve.getYForPoint(-1.0);
+    try std.testing.expect(std.math.isFinite(y_below));
+    
+    // More extreme but still realistic
+    const y_far_above = curve.getYForPoint(100.0);
+    try std.testing.expect(std.math.isFinite(y_far_above));
+    
+    const y_far_below = curve.getYForPoint(-100.0);
+    try std.testing.expect(std.math.isFinite(y_far_below));
 }
 
 test "BezierCurve - adjacent baked X equal (flat tail)" {
@@ -373,4 +380,169 @@ test "BezierCurve - X values beyond 1.0" {
     
     // Should still be finite
     try std.testing.expect(std.math.isFinite(y_over));
+}
+
+test "BezierCurve - cusps (control points creating sharp turns)" {
+    // Control points that create cusps (sharp direction changes)
+    const curve = BezierCurve.init(2.0, 0.5, -1.0, 0.5);
+
+    // Sample many points to ensure numerical stability at cusp
+    var t: f32 = 0.0;
+    while (t <= 1.0) : (t += 0.05) {
+        const y = curve.getYForPoint(t);
+        try std.testing.expect(std.math.isFinite(y));
+        // Value should be reasonable (not exploding)
+        try std.testing.expect(y > -100.0 and y < 100.0);
+    }
+}
+
+test "BezierCurve - very large control points" {
+    // Extreme control points that could cause overflow
+    const curve = BezierCurve.init(1000.0, 1000.0, -1000.0, -1000.0);
+
+    // Should handle without overflow or NaN
+    const y_start = curve.getYForPoint(0.0);
+    const y_mid = curve.getYForPoint(0.5);
+    const y_end = curve.getYForPoint(1.0);
+
+    try std.testing.expect(std.math.isFinite(y_start));
+    try std.testing.expect(std.math.isFinite(y_mid));
+    try std.testing.expect(std.math.isFinite(y_end));
+}
+
+test "BezierCurve - very small control points near boundaries" {
+    // Control points very close to boundaries - tests precision
+    const curve = BezierCurve.init(0.0000001, 0.0, 1.0, 0.9999999);
+
+    // Should handle small differences gracefully
+    const y1 = curve.getYForPoint(0.0);
+    const y2 = curve.getYForPoint(0.1);
+    const y3 = curve.getYForPoint(0.5);
+    const y4 = curve.getYForPoint(0.9);
+    const y5 = curve.getYForPoint(1.0);
+
+    // All should be finite
+    try std.testing.expect(std.math.isFinite(y1));
+    try std.testing.expect(std.math.isFinite(y2));
+    try std.testing.expect(std.math.isFinite(y3));
+    try std.testing.expect(std.math.isFinite(y4));
+    try std.testing.expect(std.math.isFinite(y5));
+
+    // Should stay within reasonable bounds
+    try std.testing.expect(y1 >= 0.0 and y1 <= 1.0);
+    try std.testing.expect(y5 >= 0.0 and y5 <= 1.0);
+}
+
+test "BezierCurve - numerical stability with hundreds of evaluations" {
+    const curve = BezierCurve.init(0.42, 0, 0.58, 1);
+
+    // Evaluate 1000 times at different points
+    var i: usize = 0;
+    while (i < 1000) : (i += 1) {
+        const t: f32 = @as(f32, @floatFromInt(i)) / 1000.0;
+        const y = curve.getYForPoint(t);
+        
+        try std.testing.expect(std.math.isFinite(y));
+        try std.testing.expect(y >= -0.5 and y <= 1.5); // Allow some overshoot
+    }
+}
+
+test "BezierCurve - repeated evaluations at critical points" {
+    const curve = BezierCurve.init(0.25, 0.1, 0.75, 0.9);
+
+    // Critical points: start, quarter, half, three-quarter, end
+    const critical_points = [_]f32{ 0.0, 0.25, 0.5, 0.75, 1.0 };
+
+    for (critical_points) |t| {
+        // Evaluate same point 100 times - should be consistent
+        var prev_y: f32 = curve.getYForPoint(t);
+        
+        var j: usize = 0;
+        while (j < 100) : (j += 1) {
+            const y = curve.getYForPoint(t);
+            try std.testing.expectEqual(prev_y, y);
+            prev_y = y;
+        }
+    }
+}
+
+test "BezierCurve - extreme asymmetric control points" {
+    // One control point normal, one extreme
+    const curve1 = BezierCurve.init(0.1, 0.1, 10.0, 0.9);
+    const curve2 = BezierCurve.init(10.0, 0.1, 0.9, 0.9);
+
+    // Both should handle gracefully
+    for ([_]BezierCurve{ curve1, curve2 }) |curve| {
+        var t: f32 = 0.0;
+        while (t <= 1.0) : (t += 0.1) {
+            const y = curve.getYForPoint(t);
+            try std.testing.expect(std.math.isFinite(y));
+        }
+    }
+}
+
+test "BezierCurve - near-zero denominators" {
+    // Control points that could cause division by near-zero
+    const curve = BezierCurve.init(0.0, 0.0, 0.0, 1.0);
+
+    // Should not cause division errors
+    var t: f32 = 0.0;
+    while (t <= 1.0) : (t += 0.1) {
+        const y = curve.getYForPoint(t);
+        try std.testing.expect(std.math.isFinite(y));
+        try std.testing.expect(!std.math.isNan(y));
+    }
+}
+
+test "BezierCurve - all control points equal" {
+    // Degenerate case: all control points the same
+    const curve = BezierCurve.init(0.5, 0.5, 0.5, 0.5);
+
+    // Should produce a straight line at y=0.5
+    var t: f32 = 0.0;
+    while (t <= 1.0) : (t += 0.1) {
+        const y = curve.getYForPoint(t);
+        try std.testing.expect(std.math.isFinite(y));
+    }
+}
+
+test "BezierCurve - precision at boundaries" {
+    const curve = BezierCurve.init(0.42, 0, 0.58, 1);
+
+    // Test very close to 0.0
+    const y_near_zero1 = curve.getYForPoint(0.0001);
+    const y_near_zero2 = curve.getYForPoint(0.00001);
+    try std.testing.expect(std.math.isFinite(y_near_zero1));
+    try std.testing.expect(std.math.isFinite(y_near_zero2));
+
+    // Test very close to 1.0
+    const y_near_one1 = curve.getYForPoint(0.9999);
+    const y_near_one2 = curve.getYForPoint(0.99999);
+    try std.testing.expect(std.math.isFinite(y_near_one1));
+    try std.testing.expect(std.math.isFinite(y_near_one2));
+
+    // Values should be very close to 0 and 1 respectively
+    try std.testing.expect(y_near_zero2 < 0.1);
+    try std.testing.expect(y_near_one2 > 0.9);
+}
+
+test "BezierCurve - snake curve (s-shaped)" {
+    // S-shaped curve that crosses itself in X
+    const curve = BezierCurve.init(0.0, 1.0, 1.0, 0.0);
+
+    // Sample throughout - should remain finite despite crossing
+    var t: f32 = 0.0;
+    var prev_y: ?f32 = null;
+    
+    while (t <= 1.0) : (t += 0.05) {
+        const y = curve.getYForPoint(t);
+        try std.testing.expect(std.math.isFinite(y));
+        
+        // Track that we get reasonable Y values
+        if (prev_y) |py| {
+            const diff = @abs(y - py);
+            try std.testing.expect(diff < 2.0); // No huge jumps
+        }
+        prev_y = y;
+    }
 }

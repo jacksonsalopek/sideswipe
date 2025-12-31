@@ -372,3 +372,308 @@ test "Region.scale" {
     try std.testing.expectEqual(@as(f32, 200), extents.width);
     try std.testing.expectEqual(@as(f32, 100), extents.height);
 }
+
+test "Region - empty region operations" {
+    var empty = Region.init(std.testing.allocator);
+    defer empty.deinit();
+    
+    try std.testing.expect(empty.empty());
+    
+    var other = Region.initRect(std.testing.allocator, 10, 10, 50, 50);
+    defer other.deinit();
+    
+    // Add to empty
+    var result1 = empty.clone();
+    defer result1.deinit();
+    _ = result1.add(&other);
+    try std.testing.expect(!result1.empty());
+    
+    // Subtract from empty
+    var result2 = empty.clone();
+    defer result2.deinit();
+    _ = result2.subtract(&other);
+    try std.testing.expect(result2.empty());
+    
+    // Intersect with empty
+    var result3 = other.clone();
+    defer result3.deinit();
+    _ = result3.intersect(&empty);
+    try std.testing.expect(result3.empty());
+    
+    // Translate empty
+    var result4 = empty.clone();
+    defer result4.deinit();
+    _ = result4.translate(Vector2D.init(100, 100));
+    try std.testing.expect(result4.empty());
+    
+    // Scale empty
+    var result5 = empty.clone();
+    defer result5.deinit();
+    _ = try result5.scaleScalar(2.0);
+    try std.testing.expect(result5.empty());
+}
+
+test "Region - at MAX_REGION_SIDE boundaries" {
+    const max = MAX_REGION_SIDE;
+    
+    // Region at positive boundary
+    var region1 = Region.initRect(std.testing.allocator, @floatFromInt(max - 100), @floatFromInt(max - 100), 50, 50);
+    defer region1.deinit();
+    
+    try std.testing.expect(!region1.empty());
+    
+    // Region at negative boundary
+    var region2 = Region.initRect(std.testing.allocator, @floatFromInt(-max + 100), @floatFromInt(-max + 100), 50, 50);
+    defer region2.deinit();
+    
+    try std.testing.expect(!region2.empty());
+    
+    // Operations should work
+    _ = region1.add(&region2);
+    try std.testing.expect(!region1.empty());
+}
+
+test "Region.transform - large dimensions" {
+    var region = Region.initRect(std.testing.allocator, 0, 0, 100, 100);
+    defer region.deinit();
+    
+    // Transform with large but safe dimensions
+    _ = try region.transform(.@"90", 10000, 10000);
+    
+    // Transform may rationalize or clip, just verify no crash
+    _ = region.empty(); // Call to verify region is still valid
+}
+
+test "Region.scale - with zero" {
+    var region = Region.initRect(std.testing.allocator, 10, 10, 100, 100);
+    defer region.deinit();
+    
+    _ = try region.scaleScalar(0.0);
+    
+    // Zero scale should create empty or point region
+    const extents = region.getExtents();
+    try std.testing.expectEqual(@as(f32, 0), extents.width);
+    try std.testing.expectEqual(@as(f32, 0), extents.height);
+}
+
+test "Region.scale - with very large factor" {
+    var region = Region.initRect(std.testing.allocator, 10, 10, 100, 100);
+    defer region.deinit();
+    
+    // Scale with very large factor
+    _ = try region.scale(Vector2D.init(1e6, 1e6));
+    
+    // Should produce very large region
+    const extents = region.getExtents();
+    try std.testing.expect(extents.width > 1e7);
+    try std.testing.expect(extents.height > 1e7);
+}
+
+test "Region.rationalize - already outside MAX_REGION_SIDE" {
+    const max = MAX_REGION_SIDE;
+    
+    // Create region way outside boundaries
+    var region = Region.initRect(std.testing.allocator, @floatFromInt(max * 2), @floatFromInt(max * 2), 1000, 1000);
+    defer region.deinit();
+    
+    // Rationalize should clip it
+    _ = region.rationalize();
+    
+    // After rationalization, should be empty (clipped away)
+    try std.testing.expect(region.empty());
+}
+
+test "Region.rationalize - partially outside boundaries" {
+    const max = MAX_REGION_SIDE;
+    
+    // Region that straddles the boundary
+    var region = Region.initRect(std.testing.allocator, @floatFromInt(max - 50), @floatFromInt(max - 50), 100, 100);
+    defer region.deinit();
+    
+    _ = region.rationalize();
+    
+    // Should be clipped but not empty
+    const extents = region.getExtents();
+    try std.testing.expect(extents.width > 0);
+    try std.testing.expect(extents.width < 100); // Clipped
+}
+
+test "Region.expand - negative values (shrink)" {
+    var region = Region.initRect(std.testing.allocator, 10, 10, 100, 100);
+    defer region.deinit();
+    
+    _ = try region.expand(-10);
+    
+    // Should shrink the region
+    const extents = region.getExtents();
+    try std.testing.expectApproxEqAbs(@as(f32, 20), extents.x, 1.0);
+    try std.testing.expectApproxEqAbs(@as(f32, 20), extents.y, 1.0);
+    try std.testing.expectApproxEqAbs(@as(f32, 80), extents.width, 1.0);
+    try std.testing.expectApproxEqAbs(@as(f32, 80), extents.height, 1.0);
+}
+
+test "Region.expand - over-shrink creates empty" {
+    var region = Region.initRect(std.testing.allocator, 10, 10, 40, 40);
+    defer region.deinit();
+    
+    // Shrink by less than half the size
+    _ = try region.expand(-15);
+    
+    // Should shrink but not become empty (40 - 30 = 10 remaining)
+    const extents = region.getExtents();
+    try std.testing.expect(extents.width > 0);
+    try std.testing.expect(extents.height > 0);
+}
+
+test "Region.closestPoint - on empty region" {
+    var empty = Region.init(std.testing.allocator);
+    defer empty.deinit();
+    
+    const point = Vector2D.init(50, 50);
+    
+    // Should handle gracefully (may return input or zero)
+    const result = Region.closestPoint(&empty, point) catch point;
+    
+    // Just verify it doesn't crash
+    try std.testing.expect(std.math.isFinite(result.x));
+    try std.testing.expect(std.math.isFinite(result.y));
+}
+
+test "Region.transform - all 8 transforms" {
+    const transforms = [_]Transform{
+        .normal, .@"90", .@"180", .@"270",
+        .flipped, .flipped_90, .flipped_180, .flipped_270,
+    };
+    
+    for (transforms) |t| {
+        var region = Region.initRect(std.testing.allocator, 10, 20, 100, 50);
+        defer region.deinit();
+        
+        _ = try region.transform(t, 1920, 1080);
+        
+        // Should not be empty after transform
+        try std.testing.expect(!region.empty());
+        
+        const extents = region.getExtents();
+        // Dimensions should be reasonable
+        try std.testing.expect(extents.width > 0);
+        try std.testing.expect(extents.height > 0);
+    }
+}
+
+test "Region - multiple rectangles with operations" {
+    var region = Region.initRect(std.testing.allocator, 0, 0, 50, 50);
+    defer region.deinit();
+    
+    // Add multiple non-overlapping rectangles
+    _ = region.addRect(100, 0, 50, 50);
+    _ = region.addRect(0, 100, 50, 50);
+    _ = region.addRect(100, 100, 50, 50);
+    
+    // Region should not be empty
+    try std.testing.expect(!region.empty());
+    
+    // Scale all rectangles
+    _ = try region.scaleScalar(2.0);
+    try std.testing.expect(!region.empty());
+    
+    // Translate all
+    _ = region.translate(Vector2D.init(10, 10));
+    try std.testing.expect(!region.empty());
+}
+
+test "Region - subtract larger from smaller" {
+    var small = Region.initRect(std.testing.allocator, 10, 10, 50, 50);
+    defer small.deinit();
+    
+    var large = Region.initRect(std.testing.allocator, 0, 0, 100, 100);
+    defer large.deinit();
+    
+    // Subtract larger from smaller
+    _ = small.subtract(&large);
+    
+    // Should be empty (completely subtracted)
+    try std.testing.expect(small.empty());
+}
+
+test "Region - intersect non-overlapping" {
+    var region1 = Region.initRect(std.testing.allocator, 0, 0, 50, 50);
+    defer region1.deinit();
+    
+    var region2 = Region.initRect(std.testing.allocator, 100, 100, 50, 50);
+    defer region2.deinit();
+    
+    _ = region1.intersect(&region2);
+    
+    // Non-overlapping regions produce empty intersection
+    try std.testing.expect(region1.empty());
+}
+
+test "Region - containsPoint at exact boundaries" {
+    var region = Region.initRect(std.testing.allocator, 10, 10, 100, 100);
+    defer region.deinit();
+    
+    // Point at top-left corner
+    try std.testing.expect(region.containsPoint(Vector2D.init(10, 10)));
+    
+    // Point at bottom-right corner (exclusive)
+    try std.testing.expect(!region.containsPoint(Vector2D.init(110, 110)));
+    
+    // Point just inside
+    try std.testing.expect(region.containsPoint(Vector2D.init(10.1, 10.1)));
+    
+    // Point just outside
+    try std.testing.expect(!region.containsPoint(Vector2D.init(110.1, 110.1)));
+}
+
+test "Region - transform with multiple rectangles" {
+    var region = Region.initRect(std.testing.allocator, 0, 0, 50, 50);
+    defer region.deinit();
+    
+    _ = region.addRect(100, 0, 50, 50);
+    _ = region.addRect(0, 100, 50, 50);
+    
+    const rects_before = try region.getRects();
+    const count_before = rects_before.len;
+    std.testing.allocator.free(rects_before);
+    
+    try std.testing.expect(count_before > 0);
+    
+    // Transform should work with multiple rectangles (may merge or clip)
+    _ = try region.transform(.@"90", 200, 200);
+    
+    // Verify region is still valid (may be empty after transform due to clipping)
+    _ = region.empty();
+}
+
+test "Region - scale with different X and Y factors" {
+    var region = Region.initRect(std.testing.allocator, 10, 10, 100, 100);
+    defer region.deinit();
+    
+    _ = try region.scale(Vector2D.init(2.0, 0.5));
+    
+    const extents = region.getExtents();
+    
+    // Width doubled, height halved
+    try std.testing.expectApproxEqAbs(@as(f32, 20), extents.x, 1.0);
+    try std.testing.expectApproxEqAbs(@as(f32, 5), extents.y, 1.0);
+    try std.testing.expectApproxEqAbs(@as(f32, 200), extents.width, 1.0);
+    try std.testing.expectApproxEqAbs(@as(f32, 50), extents.height, 1.0);
+}
+
+test "Region - invert creates complement" {
+    var region = Region.initRect(std.testing.allocator, 25, 25, 50, 50);
+    defer region.deinit();
+    
+    const bounds = Box.init(0, 0, 100, 100);
+    _ = region.invertBox(bounds);
+    
+    // Inverted region should not be empty
+    try std.testing.expect(!region.empty());
+    
+    // Original center point should NOT be in inverted region
+    try std.testing.expect(!region.containsPoint(Vector2D.init(50, 50)));
+    
+    // Corners should be in inverted region
+    try std.testing.expect(region.containsPoint(Vector2D.init(5, 5)));
+}

@@ -399,3 +399,273 @@ test "truthy" {
     try std.testing.expect(!truthy(""));
     try std.testing.expect(!truthy("random"));
 }
+
+test "split - empty delimiter returns empty immediately" {
+    var iter = split("hello", "");
+    
+    // Empty delimiter causes immediate return of empty string
+    const first = iter.next();
+    try std.testing.expect(first != null);
+    try std.testing.expectEqualStrings("", first.?);
+}
+
+test "split - delimiter longer than string" {
+    var iter = split("hi", "hello");
+    
+    // Should return the whole string since delimiter doesn't match
+    const result = iter.next();
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("hi", result.?);
+    
+    try std.testing.expect(iter.next() == null);
+}
+
+test "split - empty string returns null" {
+    var iter = split("", ",");
+    
+    // Empty string with delimiter returns null immediately
+    const result = iter.next();
+    try std.testing.expect(result == null);
+}
+
+test "split - delimiter at start and end" {
+    var iter = split(",hello,world,", ",");
+    
+    // First: empty string before first comma
+    try std.testing.expectEqualStrings("", iter.next().?);
+    try std.testing.expectEqualStrings("hello", iter.next().?);
+    try std.testing.expectEqualStrings("world", iter.next().?);
+    
+    // After last comma, there's an empty string
+    const last = iter.next();
+    if (last) |l| {
+        try std.testing.expectEqualStrings("", l);
+    }
+}
+
+test "SplitIterator.rest - called multiple times" {
+    var iter = split("one,two,three", ",");
+    
+    _ = iter.next(); // Skip "one"
+    
+    const rest1 = iter.rest();
+    try std.testing.expectEqualStrings("two,three", rest1);
+    
+    // Second call should return empty (already consumed)
+    const rest2 = iter.rest();
+    try std.testing.expectEqualStrings("", rest2);
+}
+
+test "join - empty string array" {
+    const strings = [_]string{};
+    const result = try join(std.testing.allocator, &strings, ",");
+    defer std.testing.allocator.free(result);
+    
+    try std.testing.expectEqualStrings("", result);
+}
+
+test "join - single string" {
+    const strings = [_]string{"hello"};
+    const result = try join(std.testing.allocator, &strings, ",");
+    defer std.testing.allocator.free(result);
+    
+    try std.testing.expectEqualStrings("hello", result);
+}
+
+test "join - empty separator" {
+    const strings = [_]string{ "a", "b", "c" };
+    const result = try join(std.testing.allocator, &strings, "");
+    defer std.testing.allocator.free(result);
+    
+    try std.testing.expectEqualStrings("abc", result);
+}
+
+test "replace - replacement with empty string" {
+    const result = try replace(std.testing.allocator, "hello world", "world", "");
+    defer std.testing.allocator.free(result);
+    
+    try std.testing.expectEqualStrings("hello ", result);
+}
+
+test "replace - pattern at position 0" {
+    const result = try replace(std.testing.allocator, "world hello", "world", "goodbye");
+    defer std.testing.allocator.free(result);
+    
+    try std.testing.expectEqualStrings("goodbye hello", result);
+}
+
+test "replace - pattern at end" {
+    const result = try replace(std.testing.allocator, "hello world", "world", "everyone");
+    defer std.testing.allocator.free(result);
+    
+    try std.testing.expectEqualStrings("hello everyone", result);
+}
+
+test "replace - pattern at position 0 and end" {
+    const result = try replace(std.testing.allocator, "test and test", "test", "X");
+    defer std.testing.allocator.free(result);
+    
+    try std.testing.expectEqualStrings("X and X", result);
+}
+
+test "replace - empty pattern" {
+    const result = try replace(std.testing.allocator, "hello", "", "X");
+    defer std.testing.allocator.free(result);
+    
+    // Empty pattern should return original
+    try std.testing.expectEqualStrings("hello", result);
+}
+
+test "replaceInString - overlapping patterns" {
+    const result = try replaceInString(std.testing.allocator, "aaa", "aa", "X");
+    defer std.testing.allocator.free(result);
+    
+    // Should replace first occurrence, leaving one 'a'
+    try std.testing.expectEqualStrings("Xa", result);
+}
+
+test "isNumber - just minus sign" {
+    try std.testing.expect(!isNumber("-", false));
+    try std.testing.expect(!isNumber("-", true));
+}
+
+test "isNumber - multiple minus signs" {
+    try std.testing.expect(!isNumber("--5", false));
+    try std.testing.expect(!isNumber("--5", true));
+}
+
+test "isNumber - minus in middle" {
+    try std.testing.expect(!isNumber("5-5", false));
+    try std.testing.expect(!isNumber("5-5", true));
+}
+
+test "isNumber - ends with decimal point" {
+    try std.testing.expect(!isNumber("12.", false));
+    try std.testing.expect(!isNumber("12.", true));
+}
+
+test "isNumber - starts with decimal point" {
+    try std.testing.expect(!isNumber(".5", false));
+    try std.testing.expect(!isNumber(".5", true));
+}
+
+test "truthy - partial match with extra characters" {
+    // Should only match prefix
+    try std.testing.expect(truthy("TrUeXYZ"));
+    try std.testing.expect(truthy("yesTHIS"));
+    try std.testing.expect(truthy("onABC"));
+    
+    // But not if prefix doesn't match
+    try std.testing.expect(!truthy("XYZtrue"));
+    try std.testing.expect(!truthy("maybe"));
+}
+
+test "trim - entirely whitespace" {
+    const all_spaces = "     ";
+    const all_tabs = "\t\t\t";
+    const mixed = " \t \n \r ";
+    
+    try std.testing.expectEqualStrings("", trim(all_spaces));
+    try std.testing.expectEqualStrings("", trim(all_tabs));
+    try std.testing.expectEqualStrings("", trim(mixed));
+}
+
+test "trim - no whitespace" {
+    const no_ws = "hello";
+    try std.testing.expectEqualStrings("hello", trim(no_ws));
+}
+
+test "trim - whitespace only at start" {
+    const result = trim("  hello");
+    try std.testing.expectEqualStrings("hello", result);
+}
+
+test "trim - whitespace only at end" {
+    const result = trim("hello  ");
+    try std.testing.expectEqualStrings("hello", result);
+}
+
+test "trimLeft and trimRight independently" {
+    const str = "  hello  ";
+    
+    const left = trimLeft(str);
+    try std.testing.expectEqualStrings("hello  ", left);
+    
+    const right = trimRight(str);
+    try std.testing.expectEqualStrings("  hello", right);
+}
+
+test "isEmpty - various strings" {
+    try std.testing.expect(isEmpty(""));
+    try std.testing.expect(!isEmpty(" "));
+    try std.testing.expect(!isEmpty("a"));
+}
+
+test "startsWith - empty prefix" {
+    try std.testing.expect(startsWith("hello", ""));
+}
+
+test "endsWith - empty suffix" {
+    try std.testing.expect(endsWith("hello", ""));
+}
+
+test "contains - empty needle" {
+    // Empty needle should be found (vacuous truth)
+    try std.testing.expect(contains("hello", ""));
+}
+
+test "indexOf - multiple occurrences returns first" {
+    const idx = indexOf("hello hello", "hello");
+    try std.testing.expectEqual(@as(?usize, 0), idx);
+}
+
+test "lastIndexOf - multiple occurrences returns last" {
+    const idx = lastIndexOf("hello hello", "hello");
+    try std.testing.expectEqual(@as(?usize, 6), idx);
+}
+
+test "String - clear and reuse" {
+    var str = String.init(std.testing.allocator);
+    defer str.deinit();
+    
+    try str.append("hello");
+    try std.testing.expectEqual(@as(usize, 5), str.len());
+    
+    str.clear();
+    try std.testing.expectEqual(@as(usize, 0), str.len());
+    
+    // Should be reusable
+    try str.append("world");
+    try std.testing.expectEqualStrings("world", str.toSlice());
+}
+
+test "String - toOwned transfers ownership" {
+    var str = String.init(std.testing.allocator);
+    
+    try str.append("test");
+    
+    const owned = try str.toOwned();
+    defer std.testing.allocator.free(owned);
+    
+    try std.testing.expectEqualStrings("test", owned);
+    
+    // Original should now be empty (ownership transferred)
+    try std.testing.expectEqual(@as(usize, 0), str.len());
+    
+    str.deinit();
+}
+
+test "duplicate and duplicateZ" {
+    const original = "hello";
+    
+    const dup = try duplicate(std.testing.allocator, original);
+    defer std.testing.allocator.free(dup);
+    try std.testing.expectEqualStrings("hello", dup);
+    
+    const dup_z = try duplicateZ(std.testing.allocator, original);
+    defer std.testing.allocator.free(dup_z);
+    try std.testing.expectEqualStrings("hello", dup_z);
+    
+    // duplicateZ should have null terminator
+    try std.testing.expectEqual(@as(u8, 0), dup_z[dup_z.len]);
+}

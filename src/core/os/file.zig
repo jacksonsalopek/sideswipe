@@ -382,28 +382,28 @@ test "FileDescriptor - comprehensive duplicate test" {
     const test_file = try test_dir.dir.createFile("test.txt", .{ .read = true });
     const raw_fd = test_file.handle;
 
+    // fd1 wraps raw_fd but doesn't own it (test_file owns it)
     var fd1 = FileDescriptor.init(raw_fd);
 
     // Both should be valid and readable initially
     try std.testing.expect(fd1.isValid());
     try std.testing.expect(fd1.isReadable());
 
-    // Duplicate
+    // Duplicate creates a NEW fd owned by fd2
     var fd2 = try fd1.duplicate(F_DUPFD_CLOEXEC);
-    defer fd2.deinit();
 
-    // Both original and duplicate should be valid
+    // Both original and duplicate should be valid (different fds)
     try std.testing.expect(fd1.isValid());
     try std.testing.expect(fd1.isReadable());
     try std.testing.expect(fd2.isValid());
     try std.testing.expect(fd2.isReadable());
     try std.testing.expect(fd1.get() != fd2.get());
 
-    // Take ownership from fd2 to fd3
+    // Take ownership from fd2 to fd3 (ownership transfer)
     const fd3_raw = fd2.take();
     var fd3 = FileDescriptor.init(fd3_raw);
-    defer fd3.deinit();
 
+    // fd2 is now invalid (ownership transferred)
     try std.testing.expect(fd1.isValid());
     try std.testing.expect(!fd2.isValid());
     try std.testing.expect(!fd2.isReadable());
@@ -414,12 +414,18 @@ test "FileDescriptor - comprehensive duplicate test" {
     const fd3_flags = try fd3.getFlags();
     try std.testing.expectEqual(@as(i32, posix.FD_CLOEXEC), fd3_flags);
 
-    // Close test_file since fd1 doesn't own it
-    test_file.close();
+    // Clean up:
+    // - fd3 owns a duplicate fd, will be closed by its deinit
+    fd3.deinit();
 
-    // Don't deinit fd1 since we don't own it
-    const taken = fd1.take();
-    _ = taken;
+    // - fd2 was already taken, deinit is a no-op (safe)
+    fd2.deinit();
+
+    // - fd1 doesn't own raw_fd, just invalidate without closing
+    _ = fd1.take();
+
+    // - test_file closes raw_fd
+    test_file.close();
 }
 
 test "FileDescriptor - reset makes non-readable" {
@@ -455,4 +461,135 @@ test "FileDescriptor - isClosed after close" {
     try std.testing.expect(fd.isClosed());
 
     _ = test_file.handle;
+}
+
+test "FileDescriptor - double take is safe" {
+    var test_dir = std.testing.tmpDir(.{});
+    defer test_dir.cleanup();
+
+    const test_file = try test_dir.dir.createFile("test.txt", .{});
+    defer test_file.close();
+    const raw_fd = test_file.handle;
+
+    var fd = FileDescriptor.init(raw_fd);
+
+    // First take
+    const taken1 = fd.take();
+    try std.testing.expectEqual(raw_fd, taken1);
+    try std.testing.expect(!fd.isValid());
+
+    // Second take should return -1
+    const taken2 = fd.take();
+    try std.testing.expectEqual(@as(posix.fd_t, -1), taken2);
+    try std.testing.expect(!fd.isValid());
+}
+
+test "FileDescriptor - deinit after take is safe" {
+    var test_dir = std.testing.tmpDir(.{});
+    defer test_dir.cleanup();
+
+    const test_file = try test_dir.dir.createFile("test.txt", .{});
+    const raw_fd = test_file.handle;
+
+    var fd = FileDescriptor.init(raw_fd);
+
+    // Take ownership
+    const taken = fd.take();
+    try std.testing.expect(!fd.isValid());
+
+    // Deinit after take should be no-op
+    fd.deinit();
+    try std.testing.expect(!fd.isValid());
+
+    // Close the taken fd ourselves
+    posix.close(taken);
+
+    // test_file shouldn't close since we already did
+    _ = test_file.handle;
+}
+
+test "FileDescriptor - multiple duplicates from same source" {
+    var test_dir = std.testing.tmpDir(.{});
+    defer test_dir.cleanup();
+
+    const test_file = try test_dir.dir.createFile("test.txt", .{});
+    defer test_file.close();
+    const raw_fd = test_file.handle;
+
+    var fd1 = FileDescriptor.init(raw_fd);
+
+    // Create multiple duplicates
+    var fd2 = try fd1.duplicate(F_DUPFD_CLOEXEC);
+    defer fd2.deinit();
+
+    var fd3 = try fd1.duplicate(F_DUPFD_CLOEXEC);
+    defer fd3.deinit();
+
+    var fd4 = try fd1.duplicate(F_DUPFD_CLOEXEC);
+    defer fd4.deinit();
+
+    // All should be valid and different
+    try std.testing.expect(fd2.isValid());
+    try std.testing.expect(fd3.isValid());
+    try std.testing.expect(fd4.isValid());
+
+    try std.testing.expect(fd2.get() != fd3.get());
+    try std.testing.expect(fd2.get() != fd4.get());
+    try std.testing.expect(fd3.get() != fd4.get());
+
+    // Don't deinit fd1 since test_file owns it
+    _ = fd1.take();
+}
+
+test "FileDescriptor - reset multiple times is safe" {
+    var test_dir = std.testing.tmpDir(.{});
+    defer test_dir.cleanup();
+
+    const test_file = try test_dir.dir.createFile("test.txt", .{});
+    const raw_fd = test_file.handle;
+
+    var fd = FileDescriptor.init(raw_fd);
+
+    // First reset
+    fd.reset();
+    try std.testing.expect(!fd.isValid());
+
+    // Second reset should be no-op
+    fd.reset();
+    try std.testing.expect(!fd.isValid());
+
+    // Third reset
+    fd.reset();
+    try std.testing.expect(!fd.isValid());
+
+    _ = test_file.handle;
+}
+
+test "FileDescriptor - operations on invalid fd" {
+    var fd = FileDescriptor.initInvalid();
+
+    // All operations should handle invalid fd gracefully
+    try std.testing.expect(!fd.isValid());
+    try std.testing.expect(!fd.isReadable());
+    try std.testing.expect(fd.isClosed());
+
+    // getFlags on invalid should error
+    const flags_result = fd.getFlags();
+    try std.testing.expectError(error.InvalidFileDescriptor, flags_result);
+
+    // setFlags on invalid should error
+    const set_result = fd.setFlags(posix.FD_CLOEXEC);
+    try std.testing.expectError(error.InvalidFileDescriptor, set_result);
+
+    // duplicate on invalid should return invalid
+    const dup = try fd.duplicate(F_DUPFD_CLOEXEC);
+    try std.testing.expect(!dup.isValid());
+
+    // reset on invalid is safe
+    fd.reset();
+    try std.testing.expect(!fd.isValid());
+
+    // deinit on invalid is safe
+    fd.deinit();
+    try std.testing.expect(!fd.isValid());
 }
