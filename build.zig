@@ -57,11 +57,14 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "core", .module = core_mod },
             .{ .name = "core.string", .module = core_string_mod },
+            .{ .name = "core.math", .module = core_math_mod },
         },
     });
     backend_mod.linkSystemLibrary("libdrm", .{});
     backend_mod.linkSystemLibrary("libinput", .{});
+    backend_mod.linkSystemLibrary("pixman-1", .{});
     backend_mod.addImport("core.string", core_string_mod);
+    backend_mod.addImport("core.math", core_math_mod);
 
     // Main executable
     const exe = b.addExecutable(.{
@@ -199,6 +202,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "core", .module = core_mod },
                 .{ .name = "core.string", .module = core_string_mod },
+                .{ .name = "core.math", .module = core_math_mod },
             },
         }),
     });

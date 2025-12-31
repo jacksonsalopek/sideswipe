@@ -47,8 +47,8 @@ pub const Mat3x3 = struct {
         var mat = Mat3x3.init();
 
         const transform_mat = getTransformMatrix(t);
-        const x: f32 = 2.0 / size.x;
-        const y: f32 = 2.0 / size.y;
+        const x: f32 = 2.0 / size.getX();
+        const y: f32 = 2.0 / size.getY();
 
         // Rotation + reflection
         mat.matrix[0] = x * transform_mat[0];
@@ -113,7 +113,7 @@ pub const Mat3x3 = struct {
     }
 
     pub fn scale(self: *Mat3x3, scale_vec: Vector2D) *Mat3x3 {
-        const scale_mat = [9]f32{ scale_vec.x, 0.0, 0.0, 0.0, scale_vec.y, 0.0, 0.0, 0.0, 1.0 };
+        const scale_mat = [9]f32{ scale_vec.getX(), 0.0, 0.0, 0.0, scale_vec.getY(), 0.0, 0.0, 0.0, 1.0 };
         _ = self.multiply(Mat3x3.initFromArray(scale_mat));
         return self;
     }
@@ -123,7 +123,7 @@ pub const Mat3x3 = struct {
     }
 
     pub fn translate(self: *Mat3x3, offset: Vector2D) *Mat3x3 {
-        const translation_mat = [9]f32{ 1.0, 0.0, offset.x, 0.0, 1.0, offset.y, 0.0, 0.0, 1.0 };
+        const translation_mat = [9]f32{ 1.0, 0.0, offset.getX(), 0.0, 1.0, offset.getY(), 0.0, 0.0, 1.0 };
         _ = self.multiply(Mat3x3.initFromArray(translation_mat));
         return self;
     }

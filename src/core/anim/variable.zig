@@ -238,8 +238,8 @@ pub fn AnimatedVariable(comptime T: type) type {
                     // Check if it's Vector2D
                     if (T == Vector2D) {
                         break :blk Vector2D.init(
-                            from.x + (to.x - from.x) * percent,
-                            from.y + (to.y - from.y) * percent,
+                            from.getX() + (to.getX() - from.getX()) * percent,
+                            from.getY() + (to.getY() - from.getY()) * percent,
                         );
                     }
 
@@ -309,8 +309,8 @@ test "AnimatedVariable Vector2D" {
     animated.animation_data.started_time = std.time.milliTimestamp() - 50;
     animated.tick();
 
-    try std.testing.expect(animated.value.x > 40.0 and animated.value.x < 60.0);
-    try std.testing.expect(animated.value.y > 40.0 and animated.value.y < 60.0);
+    try std.testing.expect(animated.value.getX() > 40.0 and animated.value.getX() < 60.0);
+    try std.testing.expect(animated.value.getY() > 40.0 and animated.value.getY() < 60.0);
 }
 
 test "AnimatedVariable disabled animation" {

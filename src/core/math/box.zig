@@ -38,10 +38,10 @@ pub const Box = struct {
     }
 
     pub fn containsPoint(self: Box, point: Vector2D) bool {
-        return point.x >= self.x and
-            point.x < self.x + self.width and
-            point.y >= self.y and
-            point.y < self.y + self.height;
+        return point.getX() >= self.x and
+            point.getX() < self.x + self.width and
+            point.getY() >= self.y and
+            point.getY() < self.y + self.height;
     }
 
     pub fn empty(self: Box) bool {
@@ -50,8 +50,8 @@ pub const Box = struct {
 
     pub fn translate(self: Box, delta: Vector2D) Box {
         return .{
-            .x = self.x + delta.x,
-            .y = self.y + delta.y,
+            .x = self.x + delta.getX(),
+            .y = self.y + delta.getY(),
             .width = self.width,
             .height = self.height,
         };
@@ -72,8 +72,8 @@ pub const Box = struct {
         const new_height = self.height * s;
 
         return .{
-            .x = center.x - new_width / 2.0,
-            .y = center.y - new_height / 2.0,
+            .x = center.getX() - new_width / 2.0,
+            .y = center.getY() - new_height / 2.0,
             .width = new_width,
             .height = new_height,
         };
@@ -160,8 +160,8 @@ pub const Box = struct {
         if (self.containsPoint(point)) return point;
 
         return Vector2D.init(
-            std.math.clamp(point.x, self.x, self.x + self.width),
-            std.math.clamp(point.y, self.y, self.y + self.height),
+            std.math.clamp(point.getX(), self.x, self.x + self.width),
+            std.math.clamp(point.getY(), self.y, self.y + self.height),
         );
     }
 
@@ -240,8 +240,8 @@ test "Box initialization" {
 test "Box.middle" {
     const box = Box.init(0, 0, 100, 50);
     const mid = box.middle();
-    try std.testing.expectEqual(@as(f64, 50), mid.x);
-    try std.testing.expectEqual(@as(f64, 25), mid.y);
+    try std.testing.expectEqual(@as(f32, 50), mid.getX());
+    try std.testing.expectEqual(@as(f32, 25), mid.getY());
 }
 
 test "Box.contains" {
@@ -321,8 +321,8 @@ test "Box.scaleFromCenter" {
     // Center should remain the same
     const orig_center = box.middle();
     const new_center = scaled_up.middle();
-    try std.testing.expectApproxEqAbs(orig_center.x, new_center.x, 0.01);
-    try std.testing.expectApproxEqAbs(orig_center.y, new_center.y, 0.01);
+    try std.testing.expectApproxEqAbs(orig_center.getX(), new_center.getX(), 0.01);
+    try std.testing.expectApproxEqAbs(orig_center.getY(), new_center.getY(), 0.01);
     
     // Scale down from center
     const scaled_down = scaled_up.scaleFromCenter(0.5);
@@ -413,7 +413,7 @@ test "Box - infinity coordinates" {
     
     // Middle with infinity
     const mid = box.middle();
-    try std.testing.expect(std.math.isInf(mid.x));
+    try std.testing.expect(std.math.isInf(mid.getX()));
 }
 
 test "Box - NaN coordinates" {
@@ -496,8 +496,8 @@ test "Box.scaleFromCenter - zero scale factor" {
     const new_center = scaled.middle();
     
     // With zero size, middle is just the position
-    try std.testing.expectApproxEqAbs(orig_center.x, new_center.x, 0.01);
-    try std.testing.expectApproxEqAbs(orig_center.y, new_center.y, 0.01);
+    try std.testing.expectApproxEqAbs(orig_center.getX(), new_center.getX(), 0.01);
+    try std.testing.expectApproxEqAbs(orig_center.getY(), new_center.getY(), 0.01);
 }
 
 test "Box.scaleFromCenter - negative scale factor" {

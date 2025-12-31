@@ -124,7 +124,7 @@ pub const Region = struct {
     }
 
     pub fn translate(self: *Region, vec: Vector2D) *Region {
-        c.pixman_region32_translate(&self.region, @intFromFloat(vec.x), @intFromFloat(vec.y));
+        c.pixman_region32_translate(&self.region, @intFromFloat(vec.getX()), @intFromFloat(vec.getY()));
         return self;
     }
 
@@ -185,7 +185,7 @@ pub const Region = struct {
     }
 
     pub fn scale(self: *Region, scale_vec: Vector2D) !*Region {
-        if (scale_vec.x == 1.0 and scale_vec.y == 1.0) return self;
+        if (scale_vec.getX() == 1.0 and scale_vec.getY() == 1.0) return self;
 
         var rects_num: c_int = 0;
         const rects_arr = c.pixman_region32_rectangles(&self.region, &rects_num);
@@ -194,10 +194,10 @@ pub const Region = struct {
         defer self.allocator.free(boxes);
 
         for (0..@intCast(rects_num)) |i| {
-            boxes[i].x1 = @intFromFloat(@floor(@as(f32, @floatFromInt(rects_arr[i].x1)) * scale_vec.x));
-            boxes[i].x2 = @intFromFloat(@ceil(@as(f32, @floatFromInt(rects_arr[i].x2)) * scale_vec.x));
-            boxes[i].y1 = @intFromFloat(@floor(@as(f32, @floatFromInt(rects_arr[i].y1)) * scale_vec.y));
-            boxes[i].y2 = @intFromFloat(@ceil(@as(f32, @floatFromInt(rects_arr[i].y2)) * scale_vec.y));
+            boxes[i].x1 = @intFromFloat(@floor(@as(f32, @floatFromInt(rects_arr[i].x1)) * scale_vec.getX()));
+            boxes[i].x2 = @intFromFloat(@ceil(@as(f32, @floatFromInt(rects_arr[i].x2)) * scale_vec.getX()));
+            boxes[i].y1 = @intFromFloat(@floor(@as(f32, @floatFromInt(rects_arr[i].y1)) * scale_vec.getY()));
+            boxes[i].y2 = @intFromFloat(@ceil(@as(f32, @floatFromInt(rects_arr[i].y2)) * scale_vec.getY()));
         }
 
         c.pixman_region32_fini(&self.region);
@@ -226,7 +226,7 @@ pub const Region = struct {
     }
 
     pub fn containsPoint(self: *const Region, vec: Vector2D) bool {
-        return c.pixman_region32_contains_point(&self.region, @intFromFloat(vec.x), @intFromFloat(vec.y), null) != 0;
+        return c.pixman_region32_contains_point(&self.region, @intFromFloat(vec.getX()), @intFromFloat(vec.getY()), null) != 0;
     }
 
     pub fn empty(self: *const Region) bool {
@@ -246,20 +246,20 @@ pub const Region = struct {
             var x: f32 = 0;
             var y: f32 = 0;
 
-            if (vec.x >= @as(f32, @floatFromInt(box.x2))) {
+            if (vec.getX() >= @as(f32, @floatFromInt(box.x2))) {
                 x = @as(f32, @floatFromInt(box.x2)) - 1.0;
-            } else if (vec.x < @as(f32, @floatFromInt(box.x1))) {
+            } else if (vec.getX() < @as(f32, @floatFromInt(box.x1))) {
                 x = @floatFromInt(box.x1);
             } else {
-                x = vec.x;
+                x = vec.getX();
             }
 
-            if (vec.y >= @as(f32, @floatFromInt(box.y2))) {
+            if (vec.getY() >= @as(f32, @floatFromInt(box.y2))) {
                 y = @as(f32, @floatFromInt(box.y2)) - 1.0;
-            } else if (vec.y < @as(f32, @floatFromInt(box.y1))) {
+            } else if (vec.getY() < @as(f32, @floatFromInt(box.y1))) {
                 y = @floatFromInt(box.y1);
             } else {
-                y = vec.y;
+                y = vec.getY();
             }
 
             const distance = (x * x) + (y * y);
@@ -535,8 +535,8 @@ test "Region.closestPoint - on empty region" {
     const result = Region.closestPoint(&empty, point) catch point;
     
     // Just verify it doesn't crash
-    try std.testing.expect(std.math.isFinite(result.x));
-    try std.testing.expect(std.math.isFinite(result.y));
+    try std.testing.expect(std.math.isFinite(result.getX()));
+    try std.testing.expect(std.math.isFinite(result.getY()));
 }
 
 test "Region.transform - all 8 transforms" {
