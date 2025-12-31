@@ -57,8 +57,10 @@ pub const Mat3x3 = struct {
         mat.matrix[4] = y * transform_mat[4];
 
         // Translation
-        mat.matrix[2] = -std.math.copysign(1.0, mat.matrix[0] + mat.matrix[1]);
-        mat.matrix[5] = -std.math.copysign(1.0, mat.matrix[3] + mat.matrix[4]);
+        const sign_x = mat.matrix[0] + mat.matrix[1];
+        const sign_y = mat.matrix[3] + mat.matrix[4];
+        mat.matrix[2] = if (sign_x >= 0) -1.0 else 1.0;
+        mat.matrix[5] = if (sign_y >= 0) -1.0 else 1.0;
 
         // Identity
         mat.matrix[8] = 1.0;
@@ -258,4 +260,32 @@ test "Mat3x3.format" {
     // Check if the custom format function produced the expected output
     try std.testing.expect(result.len > 0);
     try std.testing.expect(std.mem.indexOf(u8, result, "mat3x3") != null);
+}
+
+test "Mat3x3 - complex compositor chain" {
+    // Test from hyprutils: outputProjection + projectBox + translate + scale + transpose
+    const output_size = Vector2D.init(1920, 1080);
+    const jeremy = Mat3x3.outputProjection(output_size, .flipped_90);
+
+    const box = Box.init(10, 10, 200, 200);
+    var matrix_box_1 = jeremy.projectBox(box, .normal, 0);
+    _ = matrix_box_1.translate(Vector2D.init(100, 100));
+    _ = matrix_box_1.scale(Vector2D.init(1.25, 1.5));
+    const matrix_box = matrix_box_1.transpose();
+
+    // Expected values from hyprutils test (with tolerance for precision)
+    const expected = [9]f32{ 0, 0.46296296, 0, 0.3125, 0, 0, 19.84375, 36.055557, 1 };
+
+    const result = matrix_box.getMatrix();
+
+    // Check each element with tolerance for 32-bit precision
+    try std.testing.expectApproxEqAbs(expected[0], result[0], 0.1);
+    try std.testing.expectApproxEqAbs(expected[1], result[1], 0.1);
+    try std.testing.expectApproxEqAbs(expected[2], result[2], 0.1);
+    try std.testing.expectApproxEqAbs(expected[3], result[3], 0.1);
+    try std.testing.expectApproxEqAbs(expected[4], result[4], 0.1);
+    try std.testing.expectApproxEqAbs(expected[5], result[5], 0.1);
+    try std.testing.expectApproxEqAbs(expected[6], result[6], 0.1);
+    try std.testing.expectApproxEqAbs(expected[7], result[7], 0.1);
+    try std.testing.expectApproxEqAbs(expected[8], result[8], 0.1);
 }

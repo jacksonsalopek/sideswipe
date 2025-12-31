@@ -67,15 +67,15 @@ pub const Box = struct {
     }
 
     pub fn scaleFromCenter(self: Box, s: f32) Box {
-        const old_dims = self.size();
-        const new_box = self.scale(s);
-        const new_dims = new_box.size();
+        const center = self.middle();
+        const new_width = self.width * s;
+        const new_height = self.height * s;
 
         return .{
-            .x = new_box.x - (new_dims.x - old_dims.x) / 2.0,
-            .y = new_box.y - (new_dims.y - old_dims.y) / 2.0,
-            .width = new_box.width,
-            .height = new_box.height,
+            .x = center.x - new_width / 2.0,
+            .y = center.y - new_height / 2.0,
+            .width = new_width,
+            .height = new_height,
         };
     }
 
@@ -149,6 +149,13 @@ pub const Box = struct {
         return !self.intersection(other).empty();
     }
 
+    pub fn inside(self: Box, other: Box) bool {
+        return self.x >= other.x and
+            self.y >= other.y and
+            self.x + self.width <= other.x + other.width and
+            self.y + self.height <= other.y + other.height;
+    }
+
     pub fn closest(self: Box, point: Vector2D) Vector2D {
         if (self.containsPoint(point)) return point;
 
@@ -173,6 +180,28 @@ pub const Box = struct {
             .y = self.y + extents.top,
             .width = self.width - extents.left - extents.right,
             .height = self.height - extents.top - extents.bottom,
+        };
+    }
+
+    pub fn extentsFrom(self: Box, other: Box) Extents {
+        return .{
+            .top = other.y - self.y,
+            .bottom = (self.y + self.height) - (other.y + other.height),
+            .left = other.x - self.x,
+            .right = (self.x + self.width) - (other.x + other.width),
+        };
+    }
+
+    pub fn transform(self: Box, t: @import("transform.zig").Transform, w: f32, h: f32) Box {
+        return switch (t) {
+            .normal => self,
+            .@"90" => Box.init(h - self.y - self.height, self.x, self.height, self.width),
+            .@"180" => Box.init(w - self.x - self.width, h - self.y - self.height, self.width, self.height),
+            .@"270" => Box.init(self.y, w - self.x - self.width, self.height, self.width),
+            .flipped => Box.init(w - self.x - self.width, self.y, self.width, self.height),
+            .flipped_90 => Box.init(self.y, self.x, self.height, self.width),
+            .flipped_180 => Box.init(self.x, h - self.y - self.height, self.width, self.height),
+            .flipped_270 => Box.init(h - self.y - self.height, w - self.x - self.width, self.height, self.width),
         };
     }
 
@@ -265,8 +294,90 @@ test "Box.expand" {
     const box = Box.init(10, 10, 100, 50);
     const expanded = box.expand(5);
 
-    try std.testing.expectEqual(@as(f64, 5), expanded.x);
-    try std.testing.expectEqual(@as(f64, 5), expanded.y);
-    try std.testing.expectEqual(@as(f64, 110), expanded.width);
-    try std.testing.expectEqual(@as(f64, 60), expanded.height);
+    try std.testing.expectEqual(@as(f32, 5), expanded.x);
+    try std.testing.expectEqual(@as(f32, 5), expanded.y);
+    try std.testing.expectEqual(@as(f32, 110), expanded.width);
+    try std.testing.expectEqual(@as(f32, 60), expanded.height);
+}
+
+test "Box.translate" {
+    const box = Box.init(10, 20, 30, 40);
+    const translated = box.translate(Vector2D.init(5, -5));
+
+    try std.testing.expectEqual(@as(f32, 15), translated.x);
+    try std.testing.expectEqual(@as(f32, 15), translated.y);
+    try std.testing.expectEqual(@as(f32, 30), translated.width);
+    try std.testing.expectEqual(@as(f32, 40), translated.height);
+}
+
+test "Box.scaleFromCenter" {
+    const box = Box.init(10, 10, 20, 30);
+    
+    // Scale up from center
+    const scaled_up = box.scaleFromCenter(2.0);
+    try std.testing.expectEqual(@as(f32, 40), scaled_up.width);
+    try std.testing.expectEqual(@as(f32, 60), scaled_up.height);
+    
+    // Center should remain the same
+    const orig_center = box.middle();
+    const new_center = scaled_up.middle();
+    try std.testing.expectApproxEqAbs(orig_center.x, new_center.x, 0.01);
+    try std.testing.expectApproxEqAbs(orig_center.y, new_center.y, 0.01);
+    
+    // Scale down from center
+    const scaled_down = scaled_up.scaleFromCenter(0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 20), scaled_down.width, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 30), scaled_down.height, 0.01);
+}
+
+test "Box.inside" {
+    const inner = Box.init(10, 10, 20, 20);
+    const outer = Box.init(0, 0, 100, 100);
+    const overlapping = Box.init(50, 50, 100, 100);
+
+    try std.testing.expect(inner.inside(outer));
+    try std.testing.expect(!outer.inside(inner));
+    try std.testing.expect(!overlapping.inside(outer));
+}
+
+test "Box.extentsFrom" {
+    const box1 = Box.init(0, 0, 100, 100);
+    const box2 = Box.init(50, 50, 100, 100);
+
+    const extents = box1.extentsFrom(box2);
+    
+    try std.testing.expectEqual(@as(f32, 50), extents.top);
+    try std.testing.expectEqual(@as(f32, 50), extents.left);
+    try std.testing.expectEqual(@as(f32, -50), extents.bottom);
+    try std.testing.expectEqual(@as(f32, -50), extents.right);
+}
+
+test "Box.transform - 90 degrees" {
+    const box = Box.init(10, 20, 30, 40);
+    const transformed = box.transform(.@"90", 100, 200);
+
+    try std.testing.expectEqual(@as(f32, 140), transformed.x); // 200 - 20 - 40
+    try std.testing.expectEqual(@as(f32, 10), transformed.y);
+    try std.testing.expectEqual(@as(f32, 40), transformed.width); // height becomes width
+    try std.testing.expectEqual(@as(f32, 30), transformed.height); // width becomes height
+}
+
+test "Box.transform - flipped" {
+    const box = Box.init(10, 20, 30, 40);
+    const transformed = box.transform(.flipped, 100, 200);
+
+    try std.testing.expectEqual(@as(f32, 60), transformed.x); // 100 - 10 - 30
+    try std.testing.expectEqual(@as(f32, 20), transformed.y);
+    try std.testing.expectEqual(@as(f32, 30), transformed.width);
+    try std.testing.expectEqual(@as(f32, 40), transformed.height);
+}
+
+test "Box.empty" {
+    const empty1 = Box.init(0, 0, 0, 100);
+    const empty2 = Box.init(0, 0, 100, 0);
+    const not_empty = Box.init(0, 0, 10, 10);
+
+    try std.testing.expect(empty1.empty());
+    try std.testing.expect(empty2.empty());
+    try std.testing.expect(!not_empty.empty());
 }

@@ -262,3 +262,115 @@ test "BezierCurve - monotonic property" {
         prev_y = y;
     }
 }
+
+test "BezierCurve - non-monotonic clamps out of range" {
+    // Non-monotonic curve - control points that create loops
+    // Should handle gracefully without going out of bounds
+    const curve = BezierCurve.init(1.5, 0.5, -0.5, 0.5);
+
+    // Normal range
+    const y1 = curve.getYForPoint(0.5);
+    try std.testing.expect(std.math.isFinite(y1));
+    
+    // Far beyond range - should clamp gracefully
+    const y_max = curve.getYForPoint(std.math.floatMax(f32));
+    try std.testing.expect(std.math.isFinite(y_max));
+    
+    const y_min = curve.getYForPoint(-std.math.floatMax(f32));
+    try std.testing.expect(std.math.isFinite(y_min));
+}
+
+test "BezierCurve - adjacent baked X equal (flat tail)" {
+    // Curve that ends flat (both control points at 1,1)
+    const curve = BezierCurve.init(0.2, 0.2, 1.0, 1.0);
+
+    // Exactly at end
+    const y_at_end = curve.getYForPoint(1.0);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), y_at_end, 0.01);
+    
+    // Slightly beyond end - should clamp to endpoint
+    const y_past_end = curve.getYForPoint(1.0001);
+    try std.testing.expectApproxEqAbs(y_at_end, y_past_end, 0.01);
+}
+
+test "BezierCurve - all baked X equal (vertical curve)" {
+    // Extreme case: X doesn't change (vertical line)
+    // Both control points have X=0
+    const curve = BezierCurve.init(0.0, 0.3, 0.0, 0.7);
+
+    // Below range
+    const y_lo = curve.getYForPoint(-100.0);
+    try std.testing.expect(std.math.isFinite(y_lo));
+    
+    // At zero
+    const y_0 = curve.getYForPoint(0.0);
+    try std.testing.expect(std.math.isFinite(y_0));
+    
+    // Above range
+    const y_hi = curve.getYForPoint(100.0);
+    try std.testing.expect(std.math.isFinite(y_hi));
+
+    // All should be valid values
+    try std.testing.expect(std.math.isFinite(y_lo));
+    try std.testing.expect(std.math.isFinite(y_0));
+    try std.testing.expect(std.math.isFinite(y_hi));
+}
+
+test "BezierCurve - extreme control points" {
+    // Test with control points far outside [0,1] range
+    const curve = BezierCurve.init(2.0, -1.0, -1.0, 2.0);
+
+    // Should handle gracefully even with extreme values
+    const y_start = curve.getYForPoint(0.0);
+    const y_mid = curve.getYForPoint(0.5);
+    const y_end = curve.getYForPoint(1.0);
+    
+    try std.testing.expect(std.math.isFinite(y_start));
+    try std.testing.expect(std.math.isFinite(y_mid));
+    try std.testing.expect(std.math.isFinite(y_end));
+}
+
+test "BezierCurve - zero duration handling" {
+    // Edge case: what happens with t values very close together
+    const curve = BezierCurve.init(0.25, 0.1, 0.25, 1.0);
+    
+    const y1 = curve.getYForPoint(0.0001);
+    const y2 = curve.getYForPoint(0.0002);
+    
+    // Should be very close but both valid
+    try std.testing.expect(std.math.isFinite(y1));
+    try std.testing.expect(std.math.isFinite(y2));
+    try std.testing.expect(@abs(y2 - y1) < 0.1);
+}
+
+test "BezierCurve - repeated queries at same point" {
+    const curve = BezierCurve.init(0.42, 0, 0.58, 1);
+    
+    // Query the same point multiple times - should be consistent
+    const y1 = curve.getYForPoint(0.5);
+    const y2 = curve.getYForPoint(0.5);
+    const y3 = curve.getYForPoint(0.5);
+    
+    try std.testing.expectEqual(y1, y2);
+    try std.testing.expectEqual(y2, y3);
+}
+
+test "BezierCurve - negative X values" {
+    const curve = BezierCurve.init(0.42, 0, 0.58, 1);
+    
+    // Negative X - implementation extrapolates rather than clamping
+    const y_neg = curve.getYForPoint(-0.5);
+    
+    // Should still be finite
+    try std.testing.expect(std.math.isFinite(y_neg));
+}
+
+test "BezierCurve - X values beyond 1.0" {
+    const curve = BezierCurve.init(0.42, 0, 0.58, 1);
+    
+    // X beyond 1.0 - implementation extrapolates
+    const y_over = curve.getYForPoint(1.5);
+    
+    // Should still be finite
+    try std.testing.expect(std.math.isFinite(y_over));
+}

@@ -50,13 +50,14 @@ pub const FileDescriptor = struct {
     /// Get file descriptor flags
     pub fn getFlags(self: Self) !i32 {
         if (!self.isValid()) return error.InvalidFileDescriptor;
-        return posix.fcntl(self.fd, posix.F.GETFD, 0);
+        const result = try posix.fcntl(self.fd, posix.F.GETFD, 0);
+        return @intCast(result);
     }
 
     /// Set file descriptor flags
     pub fn setFlags(self: Self, flags: i32) !void {
         if (!self.isValid()) return error.InvalidFileDescriptor;
-        _ = try posix.fcntl(self.fd, posix.F.SETFD, flags);
+        _ = try posix.fcntl(self.fd, posix.F.SETFD, @as(u32, @intCast(flags)));
     }
 
     /// Take ownership of the file descriptor, leaving this object invalid
@@ -84,6 +85,7 @@ pub const FileDescriptor = struct {
 
     /// Check if the file descriptor is closed
     pub fn isClosed(self: Self) bool {
+        if (!self.isValid()) return true;
         return isClosedFd(self.fd);
     }
 
@@ -348,4 +350,109 @@ test "FileDescriptor - isReadable" {
     // Don't call deinit since test_file owns it
     const taken = fd.take();
     _ = taken;
+}
+
+test "FileDescriptor - getFlags and setFlags" {
+    var test_dir = std.testing.tmpDir(.{});
+    defer test_dir.cleanup();
+
+    const test_file = try test_dir.dir.createFile("test.txt", .{});
+    defer test_file.close();
+
+    var fd = FileDescriptor.init(test_file.handle);
+    defer {
+        const taken = fd.take();
+        _ = taken;
+    }
+
+    // Get current flags
+    const initial_flags = try fd.getFlags();
+    try std.testing.expect(initial_flags >= 0);
+
+    // Try setting flags (FD_CLOEXEC)
+    try fd.setFlags(posix.FD_CLOEXEC);
+    const new_flags = try fd.getFlags();
+    try std.testing.expectEqual(@as(i32, posix.FD_CLOEXEC), new_flags);
+}
+
+test "FileDescriptor - comprehensive duplicate test" {
+    var test_dir = std.testing.tmpDir(.{});
+    defer test_dir.cleanup();
+
+    const test_file = try test_dir.dir.createFile("test.txt", .{ .read = true });
+    const raw_fd = test_file.handle;
+
+    var fd1 = FileDescriptor.init(raw_fd);
+
+    // Both should be valid and readable initially
+    try std.testing.expect(fd1.isValid());
+    try std.testing.expect(fd1.isReadable());
+
+    // Duplicate
+    var fd2 = try fd1.duplicate(F_DUPFD_CLOEXEC);
+    defer fd2.deinit();
+
+    // Both original and duplicate should be valid
+    try std.testing.expect(fd1.isValid());
+    try std.testing.expect(fd1.isReadable());
+    try std.testing.expect(fd2.isValid());
+    try std.testing.expect(fd2.isReadable());
+    try std.testing.expect(fd1.get() != fd2.get());
+
+    // Take ownership from fd2 to fd3
+    const fd3_raw = fd2.take();
+    var fd3 = FileDescriptor.init(fd3_raw);
+    defer fd3.deinit();
+
+    try std.testing.expect(fd1.isValid());
+    try std.testing.expect(!fd2.isValid());
+    try std.testing.expect(!fd2.isReadable());
+    try std.testing.expect(fd3.isValid());
+    try std.testing.expect(fd3.isReadable());
+
+    // Check duplicate has FD_CLOEXEC by default
+    const fd3_flags = try fd3.getFlags();
+    try std.testing.expectEqual(@as(i32, posix.FD_CLOEXEC), fd3_flags);
+
+    // Close test_file since fd1 doesn't own it
+    test_file.close();
+
+    // Don't deinit fd1 since we don't own it
+    const taken = fd1.take();
+    _ = taken;
+}
+
+test "FileDescriptor - reset makes non-readable" {
+    var test_dir = std.testing.tmpDir(.{});
+    defer test_dir.cleanup();
+
+    const test_file = try test_dir.dir.createFile("test.txt", .{});
+    const raw_fd = test_file.handle;
+
+    var fd = FileDescriptor.init(raw_fd);
+    try std.testing.expect(fd.isValid());
+
+    // Reset should close and make it non-readable
+    fd.reset();
+    try std.testing.expect(!fd.isValid());
+    try std.testing.expect(!fd.isReadable());
+
+    // test_file shouldn't close since fd already did
+    _ = test_file.handle;
+}
+
+test "FileDescriptor - isClosed after close" {
+    var test_dir = std.testing.tmpDir(.{});
+    defer test_dir.cleanup();
+
+    const test_file = try test_dir.dir.createFile("test.txt", .{});
+    const raw_fd = test_file.handle;
+
+    var fd = FileDescriptor.init(raw_fd);
+    try std.testing.expect(!fd.isClosed());
+
+    fd.reset();
+    try std.testing.expect(fd.isClosed());
+
+    _ = test_file.handle;
 }

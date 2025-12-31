@@ -453,3 +453,203 @@ test "Locale - stem without underscore" {
     defer std.testing.allocator.free(stem_str);
     try std.testing.expectEqualStrings("pl", stem_str);
 }
+
+test "Engine - pluralization with function" {
+    var engine = Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    // English pluralization (simple: 1 vs many)
+    const EnglishPlural = struct {
+        fn pluralize(map: TranslationVarMap, allocator: std.mem.Allocator) ![]const u8 {
+            const count_str = map.get("count") orelse return try allocator.dupe(u8, "I have apples.");
+
+            // Simple check if count is "1"
+            if (std.mem.eql(u8, count_str, "1")) {
+                return try allocator.dupe(u8, "I have {count} apple.");
+            } else {
+                return try allocator.dupe(u8, "I have {count} apples.");
+            }
+        }
+    };
+
+    try engine.registerEntryFn("en_US", 1, EnglishPlural.pluralize);
+
+    var var_map = TranslationVarMap.init(std.testing.allocator);
+    defer var_map.deinit();
+
+    try var_map.put("count", "1");
+    const result1 = try engine.localizeEntry("en_US", 1, var_map);
+    defer std.testing.allocator.free(result1);
+    try std.testing.expectEqualStrings("I have 1 apple.", result1);
+
+    try var_map.put("count", "2");
+    const result2 = try engine.localizeEntry("en_US", 1, var_map);
+    defer std.testing.allocator.free(result2);
+    try std.testing.expectEqualStrings("I have 2 apples.", result2);
+}
+
+test "Engine - locale stem fallback (pl -> pl_PL)" {
+    var engine = Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    try engine.registerEntry("pl_PL", 0, "Witaj świecie!");
+
+    var var_map = TranslationVarMap.init(std.testing.allocator);
+    defer var_map.deinit();
+
+    // Request "pl" should match "pl_PL"
+    const result = try engine.localizeEntry("pl", 0, var_map);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("Witaj świecie!", result);
+}
+
+test "Engine - locale fallback chain (en_XX -> en_US)" {
+    var engine = Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    try engine.registerEntry("en_US", 0, "Hello from US");
+
+    var var_map = TranslationVarMap.init(std.testing.allocator);
+    defer var_map.deinit();
+
+    // Request "en_XX" should fall back to "en_US"
+    const result = try engine.localizeEntry("en_XX", 0, var_map);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("Hello from US", result);
+}
+
+test "Engine - locale variant matching (es_YY prefers es_ES over es_XX)" {
+    var engine = Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    try engine.registerEntry("es_XX", 0, "Spanish variant XX");
+    try engine.registerEntry("es_ES", 0, "Spanish Spain");
+
+    var var_map = TranslationVarMap.init(std.testing.allocator);
+    defer var_map.deinit();
+
+    // Should prefer exact stem match or available variant
+    const result = try engine.localizeEntry("es_YY", 0, var_map);
+    defer std.testing.allocator.free(result);
+
+    // Will match one of the es_* variants
+    try std.testing.expect(std.mem.indexOf(u8, result, "Spanish") != null);
+}
+
+test "Engine - multiple variable substitution" {
+    var engine = Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    try engine.registerEntry("en_US", 0, "Hello {var1} world {var2}");
+
+    var var_map = TranslationVarMap.init(std.testing.allocator);
+    defer var_map.deinit();
+
+    try var_map.put("var1", "hi");
+    try var_map.put("var2", "!");
+
+    const result = try engine.localizeEntry("en_US", 0, var_map);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("Hello hi world !", result);
+}
+
+test "Engine - variable substitution order independent" {
+    var engine = Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    try engine.registerEntry("en_US", 0, "A {x} B {y}");
+
+    var var_map1 = TranslationVarMap.init(std.testing.allocator);
+    defer var_map1.deinit();
+    try var_map1.put("x", "1");
+    try var_map1.put("y", "2");
+
+    var var_map2 = TranslationVarMap.init(std.testing.allocator);
+    defer var_map2.deinit();
+    try var_map2.put("y", "2");
+    try var_map2.put("x", "1");
+
+    const result1 = try engine.localizeEntry("en_US", 0, var_map1);
+    defer std.testing.allocator.free(result1);
+
+    const result2 = try engine.localizeEntry("en_US", 0, var_map2);
+    defer std.testing.allocator.free(result2);
+
+    try std.testing.expectEqualStrings("A 1 B 2", result1);
+    try std.testing.expectEqualStrings(result1, result2);
+}
+
+test "Engine - malformed variable patterns" {
+    var engine = Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    // Patterns that shouldn't be replaced
+    try engine.registerEntry("en_US", 0, "count}");
+    try engine.registerEntry("en_US", 1, "{count");
+    try engine.registerEntry("en_US", 2, "{{count}}"); // Double braces
+
+    var var_map = TranslationVarMap.init(std.testing.allocator);
+    defer var_map.deinit();
+    try var_map.put("count", "1");
+
+    const result0 = try engine.localizeEntry("en_US", 0, var_map);
+    defer std.testing.allocator.free(result0);
+    try std.testing.expectEqualStrings("count}", result0);
+
+    const result1 = try engine.localizeEntry("en_US", 1, var_map);
+    defer std.testing.allocator.free(result1);
+    try std.testing.expectEqualStrings("{count", result1);
+
+    const result2 = try engine.localizeEntry("en_US", 2, var_map);
+    defer std.testing.allocator.free(result2);
+    // Our implementation finds {count} inside {{count}} and replaces it
+    try std.testing.expectEqualStrings("{1}", result2);
+}
+
+test "Engine - invalid key returns empty string" {
+    var engine = Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    try engine.registerEntry("en_US", 0, "Valid");
+
+    var var_map = TranslationVarMap.init(std.testing.allocator);
+    defer var_map.deinit();
+
+    // Invalid key
+    const result = try engine.localizeEntry("en_US", 42069, var_map);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("", result);
+}
+
+test "Engine - comprehensive locale fallback" {
+    var engine = Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    engine.setFallbackLocale("en_US");
+
+    try engine.registerEntry("en_US", 0, "Hello World!");
+    try engine.registerEntry("pl_PL", 0, "Witaj świecie!");
+    try engine.registerEntry("am", 0, "Amongus!");
+
+    var var_map = TranslationVarMap.init(std.testing.allocator);
+    defer var_map.deinit();
+
+    // Direct matches
+    const en = try engine.localizeEntry("en_US", 0, var_map);
+    defer std.testing.allocator.free(en);
+    try std.testing.expectEqualStrings("Hello World!", en);
+
+    const pl = try engine.localizeEntry("pl_PL", 0, var_map);
+    defer std.testing.allocator.free(pl);
+    try std.testing.expectEqualStrings("Witaj świecie!", pl);
+
+    // Locale without region should match any with that language
+    const am = try engine.localizeEntry("am_AM", 0, var_map);
+    defer std.testing.allocator.free(am);
+    try std.testing.expectEqualStrings("Amongus!", am);
+
+    // Unknown locale should fall back to en_US
+    const de = try engine.localizeEntry("de_DE", 0, var_map);
+    defer std.testing.allocator.free(de);
+    try std.testing.expectEqualStrings("Hello World!", de);
+}

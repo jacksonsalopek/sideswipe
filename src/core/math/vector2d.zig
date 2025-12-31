@@ -187,14 +187,59 @@ test "Vector2D arithmetic" {
     const v2 = Vector2D.init(5, 3);
 
     const sum = v1.add(v2);
-    try std.testing.expectEqual(@as(f64, 15), sum.x);
-    try std.testing.expectEqual(@as(f64, 23), sum.y);
+    try std.testing.expectEqual(@as(f32, 15), sum.x);
+    try std.testing.expectEqual(@as(f32, 23), sum.y);
 
     const diff = v1.sub(v2);
-    try std.testing.expectEqual(@as(f64, 5), diff.x);
-    try std.testing.expectEqual(@as(f64, 17), diff.y);
+    try std.testing.expectEqual(@as(f32, 5), diff.x);
+    try std.testing.expectEqual(@as(f32, 17), diff.y);
 
     const scaled = v1.mul(2);
-    try std.testing.expectEqual(@as(f64, 20), scaled.x);
-    try std.testing.expectEqual(@as(f64, 40), scaled.y);
+    try std.testing.expectEqual(@as(f32, 20), scaled.x);
+    try std.testing.expectEqual(@as(f32, 40), scaled.y);
+}
+
+test "Vector2D.transform - all 8 variants" {
+    const v = Vector2D.init(10, 20);
+    const monitor = Vector2D.init(1920, 1080);
+
+    // Normal (identity)
+    const normal = v.transform(.normal, monitor);
+    try std.testing.expectEqual(@as(f32, 10), normal.x);
+    try std.testing.expectEqual(@as(f32, 20), normal.y);
+
+    // 90 degrees
+    const t90 = v.transform(.@"90", monitor);
+    try std.testing.expectEqual(@as(f32, 20), t90.x);
+    try std.testing.expectEqual(@as(f32, 1070), t90.y); // 1080 - 10
+
+    // 180 degrees
+    const t180 = v.transform(.@"180", monitor);
+    try std.testing.expectEqual(@as(f32, 1910), t180.x); // 1920 - 10
+    try std.testing.expectEqual(@as(f32, 1060), t180.y); // 1080 - 20
+
+    // 270 degrees
+    const t270 = v.transform(.@"270", monitor);
+    try std.testing.expectEqual(@as(f32, 1900), t270.x); // 1920 - 20
+    try std.testing.expectEqual(@as(f32, 10), t270.y);
+
+    // Flipped (horizontal flip)
+    const flipped = v.transform(.flipped, monitor);
+    try std.testing.expectEqual(@as(f32, 1910), flipped.x); // 1920 - 10
+    try std.testing.expectEqual(@as(f32, 20), flipped.y);
+
+    // Flipped 90
+    const flipped90 = v.transform(.flipped_90, monitor);
+    try std.testing.expectEqual(@as(f32, 20), flipped90.x);
+    try std.testing.expectEqual(@as(f32, 10), flipped90.y);
+
+    // Flipped 180
+    const flipped180 = v.transform(.flipped_180, monitor);
+    try std.testing.expectEqual(@as(f32, 10), flipped180.x);
+    try std.testing.expectEqual(@as(f32, 1060), flipped180.y); // 1080 - 20
+
+    // Flipped 270
+    const flipped270 = v.transform(.flipped_270, monitor);
+    try std.testing.expectEqual(@as(f32, 1900), flipped270.x); // 1920 - 20
+    try std.testing.expectEqual(@as(f32, 1070), flipped270.y); // 1080 - 10
 }
