@@ -1,5 +1,5 @@
 const std = @import("std");
-const string = @import("string.zig").string;
+const string = []const u8;
 
 /// Check whether a config in the form basePath/hypr/programName.conf exists
 pub fn checkConfigExists(base_path: string, program_name: string, allocator: std.mem.Allocator) !bool {

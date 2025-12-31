@@ -1,5 +1,6 @@
 const std = @import("std");
 const core = @import("core");
+const string = @import("core.string").string;
 const libinput = @import("libinput.zig");
 
 pub const Input = struct {
@@ -35,8 +36,8 @@ pub const Input = struct {
     };
 
     pub const Device = struct {
-        name: []const u8,
-        sysname: []const u8,
+        name: string,
+        sysname: string,
         vendor: u32,
         product: u32,
         device_type: DeviceType,
@@ -164,7 +165,7 @@ pub const Input = struct {
         devices: std.AutoHashMap(*libinput.Device, *Device),
         event_queue: EventQueue,
 
-        pub fn init(allocator: std.mem.Allocator, udev: *anyopaque, seat_id: []const u8) !Manager {
+        pub fn init(allocator: std.mem.Allocator, udev: *anyopaque, seat_id: string) !Manager {
             const interface = libinput.c.libinput_interface{
                 .open_restricted = openRestricted,
                 .close_restricted = closeRestricted,

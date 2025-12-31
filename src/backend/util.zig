@@ -1,19 +1,22 @@
 const std = @import("std");
-const core = @import("core");
+const string_utils = @import("core.string");
+const string = string_utils.string;
+const c_string = string_utils.c_string;
+const c = @cImport(@cInclude("drm_fourcc.h"));
 
-extern "c" fn setenv(name: core.c_string, value: core.c_string, overwrite: c_int) c_int;
+extern "c" fn setenv(name: c_string, value: c_string, overwrite: c_int) c_int;
 extern "c" fn drmGetFormatName(format: u32) ?[*:0]u8;
 
 pub const Env = struct {
     // Trace flag - initialized once from SIDESWIPE_TRACE environment variable
     var trace_value: ?bool = null;
 
-    pub fn enabled(env: core.string) bool {
+    pub fn enabled(env: string) bool {
         const val = std.posix.getenv(env) orelse return false;
         return std.mem.eql(u8, val, "1");
     }
 
-    pub fn explicitlyDisabled(env: core.string) bool {
+    pub fn explicitlyDisabled(env: string) bool {
         const val = std.posix.getenv(env) orelse return false;
         return std.mem.eql(u8, val, "0");
     }
@@ -117,7 +120,7 @@ test "Env.isTrace - enabled" {
 pub const Fmt = struct {
     /// Convert DRM fourcc format to a human-readable name.
     /// Caller owns the returned memory and must free it with the provided allocator.
-    pub fn fourccToName(format: u32, allocator: std.mem.Allocator) !core.string {
+    pub fn fourccToName(format: u32, allocator: std.mem.Allocator) !string {
         const fmt = drmGetFormatName(format);
         if (fmt == null) {
             return allocator.dupe(u8, "unknown");

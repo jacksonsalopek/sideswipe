@@ -1,4 +1,5 @@
 const std = @import("std");
+const string = @import("core.string").string;
 const Vector2D = @import("vector2d.zig").Vector2D;
 const Box = @import("box.zig").Box;
 const Transform = @import("transform.zig").Transform;
@@ -159,7 +160,7 @@ pub const Mat3x3 = struct {
 
     pub fn format(
         self: Mat3x3,
-        comptime fmt: []const u8,
+        comptime fmt: string,
         options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
