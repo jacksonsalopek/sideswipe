@@ -293,15 +293,15 @@ test "Mat3x3 - complex compositor chain" {
 test "Mat3x3 - matrix with NaN values" {
     const nan = std.math.nan(f32);
     const mat = Mat3x3.initFromArray(.{ nan, 0, 0, 0, nan, 0, 0, 0, 1 });
-    
+
     const result = mat.getMatrix();
     try std.testing.expect(std.math.isNan(result[0]));
     try std.testing.expect(std.math.isNan(result[4]));
-    
+
     // Operations with NaN propagate NaN
     var mat_copy = mat;
     _ = mat_copy.translate(Vector2D.init(10, 10));
-    
+
     const after_translate = mat_copy.getMatrix();
     try std.testing.expect(std.math.isNan(after_translate[0]));
 }
@@ -309,15 +309,15 @@ test "Mat3x3 - matrix with NaN values" {
 test "Mat3x3 - matrix with infinity values" {
     const inf = std.math.inf(f32);
     const mat = Mat3x3.initFromArray(.{ inf, 0, 0, 0, inf, 0, 0, 0, 1 });
-    
+
     const result = mat.getMatrix();
     try std.testing.expect(std.math.isInf(result[0]));
     try std.testing.expect(std.math.isInf(result[4]));
-    
+
     // Operations with infinity
     var mat_copy = mat;
     _ = mat_copy.scale(Vector2D.init(2, 2));
-    
+
     const after_scale = mat_copy.getMatrix();
     try std.testing.expect(std.math.isInf(after_scale[0]));
 }
@@ -325,22 +325,22 @@ test "Mat3x3 - matrix with infinity values" {
 test "Mat3x3 - singular matrix (determinant zero)" {
     // All zeros except bottom-right (singular)
     const singular = Mat3x3.initFromArray(.{ 0, 0, 0, 0, 0, 0, 0, 0, 1 });
-    
+
     const result = singular.getMatrix();
     try std.testing.expectEqual(@as(f32, 0), result[0]);
     try std.testing.expectEqual(@as(f32, 0), result[4]);
-    
+
     // Operations should still work (even if mathematically singular)
     var mat_copy = singular;
     _ = mat_copy.translate(Vector2D.init(5, 5));
-    
+
     // Should not crash
     _ = mat_copy.getMatrix();
 }
 
 test "Mat3x3 - long chain of transformations" {
     var mat = Mat3x3.identity();
-    
+
     // 100 iterations of transformation
     var i: usize = 0;
     while (i < 100) : (i += 1) {
@@ -348,14 +348,14 @@ test "Mat3x3 - long chain of transformations" {
         _ = mat.scale(Vector2D.init(1.001, 1.001));
         _ = mat.rotate(@as(f32, @floatCast(0.01)));
     }
-    
+
     const result = mat.getMatrix();
-    
+
     // After 100 iterations, values should still be finite
     for (result) |val| {
         try std.testing.expect(std.math.isFinite(val));
     }
-    
+
     // Values shouldn't have drifted to extreme magnitudes
     for (result) |val| {
         try std.testing.expect(@abs(val) < 1e6);
@@ -365,18 +365,18 @@ test "Mat3x3 - long chain of transformations" {
 test "Mat3x3.format - with non-finite values" {
     const nan = std.math.nan(f32);
     const inf = std.math.inf(f32);
-    
+
     const mat_nan = Mat3x3.initFromArray(.{ nan, 0, 0, 0, 1, 0, 0, 0, 1 });
     const mat_inf = Mat3x3.initFromArray(.{ inf, 0, 0, 0, 1, 0, 0, 0, 1 });
-    
+
     var buf: [300]u8 = undefined;
-    
+
     // Format with NaN should not crash
     var fbs1 = std.io.fixedBufferStream(&buf);
     try mat_nan.format("", .{}, fbs1.writer());
     const result1 = fbs1.getWritten();
     try std.testing.expect(result1.len > 0);
-    
+
     // Format with Inf should not crash
     var fbs2 = std.io.fixedBufferStream(&buf);
     try mat_inf.format("", .{}, fbs2.writer());
@@ -387,18 +387,18 @@ test "Mat3x3.format - with non-finite values" {
 test "Mat3x3 - rotation preserves structure" {
     // Test that rotation maintains reasonable matrix values
     const angles = [_]f32{ 0, std.math.pi / 4.0, std.math.pi / 2.0, std.math.pi, 2.0 * std.math.pi };
-    
+
     for (angles) |angle| {
         var mat = Mat3x3.identity();
         _ = mat.rotate(angle);
-        
+
         const result = mat.getMatrix();
-        
+
         // All values should be finite
         for (result) |val| {
             try std.testing.expect(std.math.isFinite(val));
         }
-        
+
         // Rotation matrix elements should be bounded
         for (result) |val| {
             try std.testing.expect(@abs(val) <= 2.0);
@@ -409,22 +409,22 @@ test "Mat3x3 - rotation preserves structure" {
 test "Mat3x3.projectBox - with rotation at π intervals" {
     const output_size = Vector2D.init(1920, 1080);
     const mat = Mat3x3.outputProjection(output_size, .normal);
-    
+
     const box = Box.init(100, 100, 200, 200);
-    
+
     // Test rotation at special angles
-    const rotations = [_]f32{ 
-        0, 
-        std.math.pi / 2.0,      // 90 degrees
-        std.math.pi,            // 180 degrees
-        3.0 * std.math.pi / 2.0,  // 270 degrees
-        2.0 * std.math.pi,      // 360 degrees (full circle)
+    const rotations = [_]f32{
+        0,
+        std.math.pi / 2.0, // 90 degrees
+        std.math.pi, // 180 degrees
+        3.0 * std.math.pi / 2.0, // 270 degrees
+        2.0 * std.math.pi, // 360 degrees (full circle)
     };
-    
+
     for (rotations) |rot| {
         const result = mat.projectBox(box, .normal, rot);
         const matrix = result.getMatrix();
-        
+
         // All values should be finite
         for (matrix) |val| {
             try std.testing.expect(std.math.isFinite(val));
@@ -435,10 +435,10 @@ test "Mat3x3.projectBox - with rotation at π intervals" {
 test "Mat3x3 - multiply by zero matrix" {
     var identity = Mat3x3.identity();
     const zero = Mat3x3.init(); // All zeros
-    
+
     const result = identity.multiply(zero);
     const matrix = result.getMatrix();
-    
+
     // Result should be all zeros
     for (matrix) |val| {
         try std.testing.expectEqual(@as(f32, 0), val);
@@ -450,14 +450,14 @@ test "Mat3x3 - chained operations maintain finite values" {
     _ = mat.translate(Vector2D.init(10, 20));
     _ = mat.scale(Vector2D.init(2, 3));
     _ = mat.rotate(@as(f32, @floatCast(std.math.pi / 4.0)));
-    
+
     const result = mat.getMatrix();
-    
+
     // All values should remain finite after chained operations
     for (result) |val| {
         try std.testing.expect(std.math.isFinite(val));
     }
-    
+
     // Values should be reasonable
     for (result) |val| {
         try std.testing.expect(@abs(val) < 1000);
@@ -468,23 +468,23 @@ test "Mat3x3 - identity is neutral element" {
     var mat = Mat3x3.identity();
     _ = mat.translate(Vector2D.init(5, 10));
     _ = mat.scale(Vector2D.init(2, 3));
-    
+
     const original = mat.getMatrix();
-    
+
     var identity = Mat3x3.identity();
-    
+
     // M * I = M
     const result1 = mat.multiply(identity);
     const matrix1 = result1.getMatrix();
-    
+
     for (original, matrix1) |o, r| {
         try std.testing.expectApproxEqAbs(o, r, 0.001);
     }
-    
+
     // I * M = M
     const result2 = identity.multiply(mat);
     const matrix2 = result2.getMatrix();
-    
+
     for (original, matrix2) |o, r| {
         try std.testing.expectApproxEqAbs(o, r, 0.001);
     }
@@ -493,9 +493,9 @@ test "Mat3x3 - identity is neutral element" {
 test "Mat3x3 - scale by zero" {
     var mat = Mat3x3.identity();
     _ = mat.scale(Vector2D.init(0, 0));
-    
+
     const result = mat.getMatrix();
-    
+
     // Scaling by zero should zero out the scale components
     try std.testing.expectEqual(@as(f32, 0), result[0]);
     try std.testing.expectEqual(@as(f32, 0), result[4]);
@@ -505,14 +505,14 @@ test "Mat3x3 - transpose twice returns original" {
     var mat = Mat3x3.identity();
     _ = mat.translate(Vector2D.init(10, 20));
     _ = mat.scale(Vector2D.init(2, 3));
-    
+
     const original = mat.getMatrix();
-    
+
     const transposed_once = mat.transpose();
     const transposed_twice = transposed_once.transpose();
-    
+
     const result = transposed_twice.getMatrix();
-    
+
     // (M^T)^T = M
     for (original, result) |o, r| {
         try std.testing.expectEqual(o, r);
@@ -521,21 +521,21 @@ test "Mat3x3 - transpose twice returns original" {
 
 test "Mat3x3 - outputProjection for all transforms" {
     const output_size = Vector2D.init(1920, 1080);
-    
+
     const transforms = [_]Transform{
-        .normal, .@"90", .@"180", .@"270",
+        .normal,  .@"90",      .@"180",      .@"270",
         .flipped, .flipped_90, .flipped_180, .flipped_270,
     };
-    
+
     for (transforms) |t| {
         const mat = Mat3x3.outputProjection(output_size, t);
         const result = mat.getMatrix();
-        
+
         // All values should be finite
         for (result) |val| {
             try std.testing.expect(std.math.isFinite(val));
         }
-        
+
         // Bottom-right should always be 1
         try std.testing.expectEqual(@as(f32, 1), result[8]);
     }
@@ -543,19 +543,19 @@ test "Mat3x3 - outputProjection for all transforms" {
 
 test "Mat3x3 - numerical drift in rotation" {
     var mat = Mat3x3.identity();
-    
+
     // Small rotation repeated many times
     const small_angle: f32 = 0.01; // ~0.57 degrees
-    
+
     var i: usize = 0;
     while (i < 200) : (i += 1) {
         _ = mat.rotate(small_angle);
     }
-    
+
     // After 200 rotations of 0.01 radians (2 radians total)
     // Should still have finite values
     const result = mat.getMatrix();
-    
+
     for (result) |val| {
         try std.testing.expect(std.math.isFinite(val));
         // Values shouldn't explode
@@ -567,14 +567,14 @@ test "Mat3x3.projectBox - rotation at exact multiples of π" {
     const output_size = Vector2D.init(1920, 1080);
     const mat = Mat3x3.outputProjection(output_size, .normal);
     const box = Box.init(100, 100, 200, 200);
-    
+
     const pi = std.math.pi;
     const special_angles = [_]f32{ pi, 2 * pi, -pi, 3 * pi };
-    
+
     for (special_angles) |angle| {
         const result = mat.projectBox(box, .normal, angle);
         const matrix = result.getMatrix();
-        
+
         // All values should be finite (no sin/cos edge cases)
         for (matrix) |val| {
             try std.testing.expect(std.math.isFinite(val));
@@ -584,16 +584,16 @@ test "Mat3x3.projectBox - rotation at exact multiples of π" {
 
 test "Mat3x3 - very small rotation angles" {
     var mat = Mat3x3.identity();
-    
+
     // Very small angle (numerical precision test)
     const tiny_angle: f32 = 1e-6;
     _ = mat.rotate(tiny_angle);
-    
+
     const result = mat.getMatrix();
-    
+
     // Should be very close to identity
     const identity_mat = Mat3x3.identity().getMatrix();
-    
+
     for (result, identity_mat) |r, id| {
         try std.testing.expectApproxEqAbs(id, r, 0.01);
     }
@@ -603,14 +603,14 @@ test "Mat3x3 - commutative scaling" {
     var mat1 = Mat3x3.identity();
     _ = mat1.scale(Vector2D.init(2, 3));
     _ = mat1.scale(Vector2D.init(4, 5));
-    
+
     var mat2 = Mat3x3.identity();
     _ = mat2.scale(Vector2D.init(4, 5));
     _ = mat2.scale(Vector2D.init(2, 3));
-    
+
     const result1 = mat1.getMatrix();
     const result2 = mat2.getMatrix();
-    
+
     // Scaling should be commutative
     for (result1, result2) |r1, r2| {
         try std.testing.expectApproxEqAbs(r1, r2, 0.001);
@@ -621,14 +621,14 @@ test "Mat3x3 - translate then scale vs scale then translate" {
     var translate_first = Mat3x3.identity();
     _ = translate_first.translate(Vector2D.init(10, 20));
     _ = translate_first.scale(Vector2D.init(2, 2));
-    
+
     var scale_first = Mat3x3.identity();
     _ = scale_first.scale(Vector2D.init(2, 2));
     _ = scale_first.translate(Vector2D.init(10, 20));
-    
+
     const result1 = translate_first.getMatrix();
     const result2 = scale_first.getMatrix();
-    
+
     // These should be DIFFERENT (operations don't commute)
     var different = false;
     for (result1, result2) |r1, r2| {
@@ -637,6 +637,6 @@ test "Mat3x3 - translate then scale vs scale then translate" {
             break;
         }
     }
-    
+
     try std.testing.expect(different);
 }
