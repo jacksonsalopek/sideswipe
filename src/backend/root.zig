@@ -14,6 +14,7 @@ pub const renderer = @import("renderer.zig");
 pub const session = @import("session.zig");
 pub const swapchain = @import("swapchain.zig");
 pub const util = @import("util.zig");
+pub const wayland = @import("wayland.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
@@ -31,4 +32,5 @@ test {
     _ = @import("session.zig");
     _ = @import("swapchain.zig");
     _ = @import("util.zig");
+    _ = @import("wayland.zig");
 }

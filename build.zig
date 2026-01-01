@@ -4,6 +4,14 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Generate Wayland protocol headers
+    const generate_protocols = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "scripts/generate-wayland-protocols.sh",
+    });
+    generate_protocols.setCwd(b.path("."));
+
     // Core module with shared types
     const core_mod = b.addModule("core", .{
         .root_source_file = b.path("src/core/root.zig"),
@@ -60,6 +68,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "core.math", .module = core_math_mod },
         },
     });
+    backend_mod.addIncludePath(b.path("protocols"));
     backend_mod.linkSystemLibrary("libdrm", .{});
     backend_mod.linkSystemLibrary("libinput", .{});
     backend_mod.linkSystemLibrary("pixman-1", .{});
@@ -68,11 +77,44 @@ pub fn build(b: *std.Build) void {
     backend_mod.linkSystemLibrary("GLESv2", .{});
     backend_mod.linkSystemLibrary("libudev", .{});
     backend_mod.linkSystemLibrary("libseat", .{});
+    backend_mod.linkSystemLibrary("wayland-client", .{});
+    backend_mod.linkSystemLibrary("wayland-cursor", .{});
     backend_mod.addImport("core.string", core_string_mod);
     backend_mod.addImport("core.math", core_math_mod);
 
     // Note: backend.drm uses relative imports and is tested via backend module tests
     // Cannot be tested standalone due to module path restrictions
+
+    // Wayland protocol sources
+    const xdg_shell_c = b.addObject(.{
+        .name = "xdg-shell-protocol",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    xdg_shell_c.step.dependOn(&generate_protocols.step);
+    xdg_shell_c.addCSourceFile(.{
+        .file = b.path("protocols/xdg-shell-protocol.c"),
+        .flags = &.{"-std=c99"},
+    });
+    xdg_shell_c.addIncludePath(b.path("protocols"));
+    xdg_shell_c.linkLibC();
+
+    const dmabuf_c = b.addObject(.{
+        .name = "linux-dmabuf-protocol",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    dmabuf_c.step.dependOn(&generate_protocols.step);
+    dmabuf_c.addCSourceFile(.{
+        .file = b.path("protocols/linux-dmabuf-unstable-v1-protocol.c"),
+        .flags = &.{"-std=c99"},
+    });
+    dmabuf_c.addIncludePath(b.path("protocols"));
+    dmabuf_c.linkLibC();
 
     // Main executable
     const exe = b.addExecutable(.{
@@ -87,6 +129,9 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    exe.addIncludePath(b.path("protocols"));
+    exe.addObject(xdg_shell_c);
+    exe.addObject(dmabuf_c);
     exe.linkSystemLibrary("libdrm");
     exe.linkSystemLibrary("libinput");
     exe.linkSystemLibrary("pixman-1");
@@ -95,6 +140,8 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("GLESv2");
     exe.linkSystemLibrary("libudev");
     exe.linkSystemLibrary("libseat");
+    exe.linkSystemLibrary("wayland-client");
+    exe.linkSystemLibrary("wayland-cursor");
     exe.linkLibC();
 
     b.installArtifact(exe);
@@ -219,6 +266,9 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    backend_tests.addIncludePath(b.path("protocols"));
+    backend_tests.addObject(xdg_shell_c);
+    backend_tests.addObject(dmabuf_c);
     backend_tests.linkSystemLibrary("libdrm");
     backend_tests.linkSystemLibrary("libinput");
     backend_tests.linkSystemLibrary("pixman-1");
@@ -227,6 +277,8 @@ pub fn build(b: *std.Build) void {
     backend_tests.linkSystemLibrary("GLESv2");
     backend_tests.linkSystemLibrary("libudev");
     backend_tests.linkSystemLibrary("libseat");
+    backend_tests.linkSystemLibrary("wayland-client");
+    backend_tests.linkSystemLibrary("wayland-cursor");
     backend_tests.linkLibC();
     const run_backend_tests = b.addRunArtifact(backend_tests);
     test_step.dependOn(&run_backend_tests.step);
@@ -253,6 +305,9 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
+        file_tests.addIncludePath(b.path("protocols"));
+        file_tests.addObject(xdg_shell_c);
+        file_tests.addObject(dmabuf_c);
         file_tests.linkSystemLibrary("libdrm");
         file_tests.linkSystemLibrary("libinput");
         file_tests.linkSystemLibrary("pixman-1");
@@ -261,6 +316,8 @@ pub fn build(b: *std.Build) void {
         file_tests.linkSystemLibrary("GLESv2");
         file_tests.linkSystemLibrary("libudev");
         file_tests.linkSystemLibrary("libseat");
+        file_tests.linkSystemLibrary("wayland-client");
+        file_tests.linkSystemLibrary("wayland-cursor");
         file_tests.linkLibC();
 
         if (b.option([]const u8, "filter", "Test name filter")) |filter| {
@@ -272,4 +329,13 @@ pub fn build(b: *std.Build) void {
         const run_file_tests = b.addRunArtifact(file_tests);
         test_file_step.dependOn(&run_file_tests.step);
     }
+
+    // Clear cache step
+    const clean_step = b.step("clean", "Clear Zig build caches");
+    const clean_cmd = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "rm -rf .zig-cache protocols zig-out && echo 'Zig caches cleared'",
+    });
+    clean_step.dependOn(&clean_cmd.step);
 }
