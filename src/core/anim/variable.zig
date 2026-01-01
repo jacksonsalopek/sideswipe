@@ -1,8 +1,8 @@
 const std = @import("std");
 const math = @import("core.math");
+const Vector2D = math.Vector2D;
 const BezierCurve = @import("bezier.zig").BezierCurve;
 const AnimationConfig = @import("config.zig").AnimationConfig;
-const Vector2D = math.Vector2D;
 
 pub const AnimationData = struct {
     started: bool = false,

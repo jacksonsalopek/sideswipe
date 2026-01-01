@@ -1,5 +1,5 @@
 const std = @import("std");
-const Vector2D = @import("vector2d.zig").Vector2D;
+const Vector2D = @import("vector2d.zig").Type;
 
 pub const Box = struct {
     x: f32 = 0,

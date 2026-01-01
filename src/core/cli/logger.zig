@@ -253,30 +253,35 @@ pub const Logger = struct {
         try stdout.flush();
     }
 
-    /// Append message to rolling log buffer
+    /// Append message to rolling log buffer with simple truncation
     fn appendToRolling(self: *Self, message: []const u8) !void {
         if (self.rolling_log.items.len > 0) {
             try self.rolling_log.append(self.allocator, '\n');
         }
         try self.rolling_log.appendSlice(self.allocator, message);
 
-        // Trim if over size
+        // Simple truncation: if over size, keep only the last ROLLING_LOG_SIZE bytes
         if (self.rolling_log.items.len > ROLLING_LOG_SIZE) {
-            // Find the first newline after the excess data
-            const excess = self.rolling_log.items.len - ROLLING_LOG_SIZE;
-            var newline_pos: usize = excess;
+            const keep_from = self.rolling_log.items.len - ROLLING_LOG_SIZE;
 
-            while (newline_pos < self.rolling_log.items.len) : (newline_pos += 1) {
-                if (self.rolling_log.items[newline_pos] == '\n') {
+            // Find the first newline in what we're keeping to avoid partial messages
+            var start_pos = keep_from;
+            while (start_pos < self.rolling_log.items.len) : (start_pos += 1) {
+                if (self.rolling_log.items[start_pos] == '\n') {
+                    start_pos += 1; // Skip the newline itself
                     break;
                 }
             }
 
-            if (newline_pos < self.rolling_log.items.len) {
-                // Remove everything before this newline
-                const new_start = newline_pos + 1;
-                const new_len = self.rolling_log.items.len - new_start;
-                std.mem.copyForwards(u8, self.rolling_log.items[0..new_len], self.rolling_log.items[new_start..]);
+            // If we found a newline, trim from there; otherwise use keep_from
+            if (start_pos < self.rolling_log.items.len) {
+                const new_len = self.rolling_log.items.len - start_pos;
+                std.mem.copyForwards(u8, self.rolling_log.items[0..new_len], self.rolling_log.items[start_pos..]);
+                self.rolling_log.shrinkRetainingCapacity(new_len);
+            } else {
+                // No newline found in the kept portion, just truncate
+                const new_len = self.rolling_log.items.len - keep_from;
+                std.mem.copyForwards(u8, self.rolling_log.items[0..new_len], self.rolling_log.items[keep_from..]);
                 self.rolling_log.shrinkRetainingCapacity(new_len);
             }
         }

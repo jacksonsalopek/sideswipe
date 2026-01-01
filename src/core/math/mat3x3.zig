@@ -1,6 +1,6 @@
 const std = @import("std");
 const string = @import("core.string").string;
-const Vector2D = @import("vector2d.zig").Vector2D;
+const Vector2D = @import("vector2d.zig").Type;
 const Box = @import("box.zig").Box;
 const Transform = @import("transform.zig").Transform;
 

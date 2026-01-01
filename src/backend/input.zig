@@ -69,7 +69,7 @@ pub const Input = struct {
         }
 
         pub fn deinit(self: *Device) void {
-            libinput.c.libinput_device_unref(self.libinput_device);
+            _ = libinput.c.libinput_device_unref(self.libinput_device);
             self.allocator.free(self.name);
             self.allocator.free(self.sysname);
             self.allocator.destroy(self);
@@ -147,7 +147,7 @@ pub const Input = struct {
         pub fn push(self: *EventQueue, event: Event) !void {
             try self.events.append(self.allocator, event);
         }
-        
+
         pub fn len(self: *const EventQueue) usize {
             return self.events.items.len;
         }
@@ -161,7 +161,7 @@ pub const Input = struct {
             defer self.events.clearRetainingCapacity();
             return self.events.items;
         }
-        
+
         pub fn clear(self: *EventQueue) void {
             self.events.clearRetainingCapacity();
         }
@@ -453,7 +453,7 @@ test "Device - identical vendor/product IDs" {
     // Devices should be distinguishable by name/sysname
     try std.testing.expect(!std.mem.eql(u8, mock_device1.name, mock_device2.name));
     try std.testing.expect(!std.mem.eql(u8, mock_device1.sysname, mock_device2.sysname));
-    
+
     // But same vendor/product
     try std.testing.expectEqual(mock_device1.vendor, mock_device2.vendor);
     try std.testing.expectEqual(mock_device1.product, mock_device2.product);
@@ -659,7 +659,7 @@ test "EventQueue - ordering preservation under stress" {
         try std.testing.expectEqual(actual_key, event.keyboard_key.key);
         actual_key += 1;
     }
-    
+
     try std.testing.expectEqual(@as(u32, 500), actual_key);
 }
 
@@ -897,7 +897,7 @@ test "EventQueue - event timestamp ordering validation" {
 
     // Add events with specific timestamps
     const timestamps = [_]u64{ 1000, 500, 2000, 1500, 3000 };
-    
+
     for (timestamps, 0..) |ts, i| {
         try queue.push(.{
             .keyboard_key = .{
@@ -918,4 +918,446 @@ test "EventQueue - event timestamp ordering validation" {
 
     const e3 = queue.pop().?;
     try std.testing.expectEqual(@as(u64, 2000), e3.keyboard_key.time_usec);
+}
+
+// Aquamarine-style input device interfaces
+pub const IKeyboard = blk: {
+    const VTableDef = struct {
+        get_libinput_handle: *const fn (ptr: *anyopaque) ?*libinput.Device,
+        get_name: *const fn (ptr: *anyopaque) []const u8,
+        update_leds: *const fn (ptr: *anyopaque, leds: u32) void,
+        deinit: *const fn (ptr: *anyopaque) void,
+    };
+
+    const Base = core.vtable.VTable(VTableDef);
+
+    break :blk struct {
+        base: Base,
+
+        pub const VTable = VTableDef;
+        const Self = @This();
+
+        pub fn init(ptr: anytype, vtable: *const VTableDef) Self {
+            return .{ .base = Base.init(ptr, vtable) };
+        }
+
+        pub fn getLibinputHandle(self: Self) ?*libinput.Device {
+            return self.base.vtable.get_libinput_handle(self.base.ptr);
+        }
+
+        pub fn getName(self: Self) []const u8 {
+            return self.base.vtable.get_name(self.base.ptr);
+        }
+
+        pub fn updateLeds(self: Self, leds: u32) void {
+            self.base.vtable.update_leds(self.base.ptr, leds);
+        }
+
+        pub fn deinit(self: Self) void {
+            self.base.vtable.deinit(self.base.ptr);
+        }
+    };
+};
+
+pub const IPointer = core.vtable.DeviceInterface("IPointer");
+
+pub const ITouch = core.vtable.DeviceInterface("ITouch");
+
+pub const ISwitch = blk: {
+    const BaseInterface = core.vtable.DeviceInterface("ISwitch");
+
+    break :blk struct {
+        base: BaseInterface,
+
+        pub const SwitchType = enum(u32) {
+            unknown = 0,
+            lid = 1,
+            tablet_mode = 2,
+        };
+
+        pub const VTable = BaseInterface.VTable;
+        const Self = @This();
+
+        pub fn init(ptr: anytype, vtable: *const VTable) Self {
+            return .{ .base = BaseInterface.init(ptr, vtable) };
+        }
+
+        pub fn getLibinputHandle(self: Self) ?*anyopaque {
+            return self.base.getLibinputHandle();
+        }
+
+        pub fn getName(self: Self) []const u8 {
+            return self.base.getName();
+        }
+
+        pub fn deinit(self: Self) void {
+            self.base.deinit();
+        }
+    };
+};
+
+pub const ITablet = core.vtable.DeviceInterface("ITablet");
+
+pub const ITabletTool = blk: {
+    const BaseInterface = core.vtable.DeviceInterface("ITabletTool");
+
+    break :blk struct {
+        base: BaseInterface,
+
+        pub const ToolType = enum(u32) {
+            invalid = 0,
+            pen = 1,
+            eraser = 2,
+            brush = 3,
+            pencil = 4,
+            airbrush = 5,
+            mouse = 6,
+            lens = 7,
+            totem = 8,
+        };
+
+        pub const VTable = BaseInterface.VTable;
+        const Self = @This();
+
+        pub fn init(ptr: anytype, vtable: *const VTable) Self {
+            return .{ .base = BaseInterface.init(ptr, vtable) };
+        }
+
+        pub fn getLibinputHandle(self: Self) ?*anyopaque {
+            return self.base.getLibinputHandle();
+        }
+
+        pub fn getName(self: Self) []const u8 {
+            return self.base.getName();
+        }
+
+        pub fn deinit(self: Self) void {
+            self.base.deinit();
+        }
+    };
+};
+
+pub const ITabletPad = core.vtable.DeviceInterface("ITabletPad");
+
+// Tests for device interfaces
+test "IKeyboard - interface creation and methods" {
+    const testing = std.testing;
+
+    const MockKeyboard = struct {
+        name: []const u8,
+        leds_state: u32 = 0,
+
+        fn getLibinputHandle(ptr: *anyopaque) ?*libinput.Device {
+            _ = ptr;
+            return null;
+        }
+
+        fn getName(ptr: *anyopaque) []const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return self.name;
+        }
+
+        fn updateLeds(ptr: *anyopaque, leds: u32) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.leds_state = leds;
+        }
+
+        fn deinitFn(ptr: *anyopaque) void {
+            _ = ptr;
+        }
+
+        const vtable_instance = IKeyboard.VTable{
+            .get_libinput_handle = getLibinputHandle,
+            .get_name = getName,
+            .update_leds = updateLeds,
+            .deinit = deinitFn,
+        };
+    };
+
+    var mock = MockKeyboard{ .name = "Test Keyboard" };
+    const keyboard = IKeyboard.init(&mock, &MockKeyboard.vtable_instance);
+
+    try testing.expectEqualStrings("Test Keyboard", keyboard.getName());
+    try testing.expectEqual(@as(u32, 0), mock.leds_state);
+
+    keyboard.updateLeds(5);
+    try testing.expectEqual(@as(u32, 5), mock.leds_state);
+}
+
+test "IPointer - interface creation" {
+    const testing = std.testing;
+
+    const MockPointer = struct {
+        name: []const u8,
+
+        fn getLibinputHandle(ptr: *anyopaque) ?*anyopaque {
+            _ = ptr;
+            return null;
+        }
+
+        fn getName(ptr: *anyopaque) []const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return self.name;
+        }
+
+        fn deinitFn(ptr: *anyopaque) void {
+            _ = ptr;
+        }
+
+        const vtable_instance = IPointer.VTable{
+            .get_libinput_handle = getLibinputHandle,
+            .get_name = getName,
+            .deinit = deinitFn,
+        };
+    };
+
+    var mock = MockPointer{ .name = "Test Mouse" };
+    const pointer = IPointer.init(&mock, &MockPointer.vtable_instance);
+
+    try testing.expectEqualStrings("Test Mouse", pointer.getName());
+    try testing.expect(pointer.getLibinputHandle() == null);
+}
+
+test "ITouch - interface creation" {
+    const testing = std.testing;
+
+    const MockTouch = struct {
+        name: []const u8,
+
+        fn getLibinputHandle(ptr: *anyopaque) ?*anyopaque {
+            _ = ptr;
+            return null;
+        }
+
+        fn getName(ptr: *anyopaque) []const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return self.name;
+        }
+
+        fn deinitFn(ptr: *anyopaque) void {
+            _ = ptr;
+        }
+
+        const vtable_instance = ITouch.VTable{
+            .get_libinput_handle = getLibinputHandle,
+            .get_name = getName,
+            .deinit = deinitFn,
+        };
+    };
+
+    var mock = MockTouch{ .name = "Test Touchscreen" };
+    const touch = ITouch.init(&mock, &MockTouch.vtable_instance);
+
+    try testing.expectEqualStrings("Test Touchscreen", touch.getName());
+}
+
+test "ISwitch - interface with SwitchType enum" {
+    const testing = std.testing;
+
+    const MockSwitch = struct {
+        name: []const u8,
+
+        fn getLibinputHandle(ptr: *anyopaque) ?*anyopaque {
+            _ = ptr;
+            return null;
+        }
+
+        fn getName(ptr: *anyopaque) []const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return self.name;
+        }
+
+        fn deinitFn(ptr: *anyopaque) void {
+            _ = ptr;
+        }
+
+        const vtable_instance = ISwitch.VTable{
+            .get_libinput_handle = getLibinputHandle,
+            .get_name = getName,
+            .deinit = deinitFn,
+        };
+    };
+
+    var mock = MockSwitch{ .name = "Lid Switch" };
+    const switch_dev = ISwitch.init(&mock, &MockSwitch.vtable_instance);
+
+    try testing.expectEqualStrings("Lid Switch", switch_dev.getName());
+
+    // Test SwitchType enum
+    try testing.expectEqual(@as(u32, 0), @intFromEnum(ISwitch.SwitchType.unknown));
+    try testing.expectEqual(@as(u32, 1), @intFromEnum(ISwitch.SwitchType.lid));
+    try testing.expectEqual(@as(u32, 2), @intFromEnum(ISwitch.SwitchType.tablet_mode));
+}
+
+test "ITablet - interface creation" {
+    const testing = std.testing;
+
+    const MockTablet = struct {
+        name: []const u8,
+
+        fn getLibinputHandle(ptr: *anyopaque) ?*anyopaque {
+            _ = ptr;
+            return null;
+        }
+
+        fn getName(ptr: *anyopaque) []const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return self.name;
+        }
+
+        fn deinitFn(ptr: *anyopaque) void {
+            _ = ptr;
+        }
+
+        const vtable_instance = ITablet.VTable{
+            .get_libinput_handle = getLibinputHandle,
+            .get_name = getName,
+            .deinit = deinitFn,
+        };
+    };
+
+    var mock = MockTablet{ .name = "Wacom Tablet" };
+    const tablet = ITablet.init(&mock, &MockTablet.vtable_instance);
+
+    try testing.expectEqualStrings("Wacom Tablet", tablet.getName());
+}
+
+test "ITabletTool - interface with ToolType enum" {
+    const testing = std.testing;
+
+    const MockTabletTool = struct {
+        name: []const u8,
+        tool_type: ITabletTool.ToolType,
+
+        fn getLibinputHandle(ptr: *anyopaque) ?*anyopaque {
+            _ = ptr;
+            return null;
+        }
+
+        fn getName(ptr: *anyopaque) []const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return self.name;
+        }
+
+        fn deinitFn(ptr: *anyopaque) void {
+            _ = ptr;
+        }
+
+        const vtable_instance = ITabletTool.VTable{
+            .get_libinput_handle = getLibinputHandle,
+            .get_name = getName,
+            .deinit = deinitFn,
+        };
+    };
+
+    var mock = MockTabletTool{ .name = "Pen", .tool_type = .pen };
+    const tool = ITabletTool.init(&mock, &MockTabletTool.vtable_instance);
+
+    try testing.expectEqualStrings("Pen", tool.getName());
+
+    // Test ToolType enum values
+    try testing.expectEqual(@as(u32, 0), @intFromEnum(ITabletTool.ToolType.invalid));
+    try testing.expectEqual(@as(u32, 1), @intFromEnum(ITabletTool.ToolType.pen));
+    try testing.expectEqual(@as(u32, 2), @intFromEnum(ITabletTool.ToolType.eraser));
+    try testing.expectEqual(@as(u32, 5), @intFromEnum(ITabletTool.ToolType.airbrush));
+}
+
+test "ITabletPad - interface creation" {
+    const testing = std.testing;
+
+    const MockTabletPad = struct {
+        name: []const u8,
+
+        fn getLibinputHandle(ptr: *anyopaque) ?*anyopaque {
+            _ = ptr;
+            return null;
+        }
+
+        fn getName(ptr: *anyopaque) []const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return self.name;
+        }
+
+        fn deinitFn(ptr: *anyopaque) void {
+            _ = ptr;
+        }
+
+        const vtable_instance = ITabletPad.VTable{
+            .get_libinput_handle = getLibinputHandle,
+            .get_name = getName,
+            .deinit = deinitFn,
+        };
+    };
+
+    var mock = MockTabletPad{ .name = "Tablet Pad" };
+    const pad = ITabletPad.init(&mock, &MockTabletPad.vtable_instance);
+
+    try testing.expectEqualStrings("Tablet Pad", pad.getName());
+}
+
+test "Multiple device interfaces - different types" {
+    const testing = std.testing;
+
+    const MockKeyboard = struct {
+        name: []const u8,
+
+        fn getLibinputHandle(ptr: *anyopaque) ?*libinput.Device {
+            _ = ptr;
+            return null;
+        }
+
+        fn getName(ptr: *anyopaque) []const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return self.name;
+        }
+
+        fn updateLeds(ptr: *anyopaque, leds: u32) void {
+            _ = ptr;
+            _ = leds;
+        }
+
+        fn deinitFn(ptr: *anyopaque) void {
+            _ = ptr;
+        }
+
+        const vtable_instance = IKeyboard.VTable{
+            .get_libinput_handle = getLibinputHandle,
+            .get_name = getName,
+            .update_leds = updateLeds,
+            .deinit = deinitFn,
+        };
+    };
+
+    const MockPointer = struct {
+        name: []const u8,
+
+        fn getLibinputHandle(ptr: *anyopaque) ?*anyopaque {
+            _ = ptr;
+            return null;
+        }
+
+        fn getName(ptr: *anyopaque) []const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return self.name;
+        }
+
+        fn deinitFn(ptr: *anyopaque) void {
+            _ = ptr;
+        }
+
+        const vtable_instance = IPointer.VTable{
+            .get_libinput_handle = getLibinputHandle,
+            .get_name = getName,
+            .deinit = deinitFn,
+        };
+    };
+
+    var mock1 = MockKeyboard{ .name = "Keyboard" };
+    var mock2 = MockPointer{ .name = "Mouse" };
+
+    const keyboard = IKeyboard.init(&mock1, &MockKeyboard.vtable_instance);
+    const pointer = IPointer.init(&mock2, &MockPointer.vtable_instance);
+
+    try testing.expectEqualStrings("Keyboard", keyboard.getName());
+    try testing.expectEqualStrings("Mouse", pointer.getName());
 }

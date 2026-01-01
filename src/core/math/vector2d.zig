@@ -1,49 +1,49 @@
 const std = @import("std");
 const Transform = @import("transform.zig").Transform;
 
-pub const Vector2D = struct {
+pub const Type = struct {
     v: @Vector(2, f32) = @splat(0),
 
-    pub fn init(x: f32, y: f32) Vector2D {
+    pub fn init(x: f32, y: f32) Type {
         return .{ .v = .{ x, y } };
     }
 
     /// Get x component
-    pub inline fn getX(self: Vector2D) f32 {
+    pub inline fn getX(self: Type) f32 {
         return self.v[0];
     }
 
     /// Get y component
-    pub inline fn getY(self: Vector2D) f32 {
+    pub inline fn getY(self: Type) f32 {
         return self.v[1];
     }
 
     /// Set x component
-    pub inline fn setX(self: *Vector2D, value: f32) void {
+    pub inline fn setX(self: *Type, value: f32) void {
         self.v[0] = value;
     }
 
     /// Set y component
-    pub inline fn setY(self: *Vector2D, value: f32) void {
+    pub inline fn setY(self: *Type, value: f32) void {
         self.v[1] = value;
     }
 
     /// Normalizes the vector and returns the max absolute component
-    pub fn normalize(self: *Vector2D) f64 {
+    pub fn normalize(self: *Type) f64 {
         const max = @max(@abs(self.v[0]), @abs(self.v[1]));
         self.v /= @as(@Vector(2, f32), @splat(max));
         return max;
     }
 
-    pub fn floor(self: Vector2D) Vector2D {
+    pub fn floor(self: Type) Type {
         return .{ .v = @floor(self.v) };
     }
 
-    pub fn round(self: Vector2D) Vector2D {
+    pub fn round(self: Type) Type {
         return .{ .v = @round(self.v) };
     }
 
-    pub fn clamp(self: Vector2D, min: Vector2D, max: Vector2D) Vector2D {
+    pub fn clamp(self: Type, min: Type, max: Type) Type {
         return .{
             .v = .{
                 std.math.clamp(self.v[0], min.v[0], if (max.v[0] < min.v[0]) std.math.inf(f32) else max.v[0]),
@@ -52,26 +52,26 @@ pub const Vector2D = struct {
         };
     }
 
-    pub fn distance(self: Vector2D, other: Vector2D) f32 {
+    pub fn distance(self: Type, other: Type) f32 {
         return @sqrt(self.distanceSq(other));
     }
 
-    pub fn distanceSq(self: Vector2D, other: Vector2D) f32 {
+    pub fn distanceSq(self: Type, other: Type) f32 {
         const diff = self.v - other.v;
         const sq = diff * diff;
         return @reduce(.Add, sq);
     }
 
-    pub fn size(self: Vector2D) f64 {
+    pub fn size(self: Type) f64 {
         const sq = self.v * self.v;
         return @sqrt(@reduce(.Add, sq));
     }
 
-    pub fn getComponentMax(self: Vector2D, other: Vector2D) Vector2D {
+    pub fn getComponentMax(self: Type, other: Type) Type {
         return .{ .v = @max(self.v, other.v) };
     }
 
-    pub fn transform(self: Vector2D, t: Transform, monitor_size: Vector2D) Vector2D {
+    pub fn transform(self: Type, t: Transform, monitor_size: Type) Type {
         const x = self.v[0];
         const y = self.v[1];
         const mx = monitor_size.v[0];
@@ -88,33 +88,33 @@ pub const Vector2D = struct {
         };
     }
 
-    pub fn add(self: Vector2D, other: Vector2D) Vector2D {
+    pub fn add(self: Type, other: Type) Type {
         return .{ .v = self.v + other.v };
     }
 
-    pub fn sub(self: Vector2D, other: Vector2D) Vector2D {
+    pub fn sub(self: Type, other: Type) Type {
         return .{ .v = self.v - other.v };
     }
 
-    pub fn mul(self: Vector2D, scalar: f32) Vector2D {
+    pub fn mul(self: Type, scalar: f32) Type {
         return .{ .v = self.v * @as(@Vector(2, f32), @splat(scalar)) };
     }
 
-    pub fn scale(self: Vector2D, scalar: f32) Vector2D {
+    pub fn scale(self: Type, scalar: f32) Type {
         return self.mul(scalar);
     }
 
-    pub fn div(self: Vector2D, scalar: f32) Vector2D {
+    pub fn div(self: Type, scalar: f32) Type {
         return .{ .v = self.v / @as(@Vector(2, f32), @splat(scalar)) };
     }
 
-    pub fn eql(self: Vector2D, other: Vector2D) bool {
+    pub fn eql(self: Type, other: Type) bool {
         return @reduce(.And, self.v == other.v);
     }
 };
 
-test "Vector2D.normalize" {
-    var v = Vector2D.init(10, 5);
+test "Type.normalize" {
+    var v = Type.init(10, 5);
     const max = v.normalize();
 
     try std.testing.expectEqual(@as(f64, 10), max);
@@ -122,85 +122,85 @@ test "Vector2D.normalize" {
     try std.testing.expectEqual(@as(f32, 0.5), v.getY());
 }
 
-test "Vector2D.floor" {
-    const v = Vector2D.init(10.7, 5.3);
+test "Type.floor" {
+    const v = Type.init(10.7, 5.3);
     const result = v.floor();
 
     try std.testing.expectEqual(@as(f32, 10), result.getX());
     try std.testing.expectEqual(@as(f32, 5), result.getY());
 }
 
-test "Vector2D.round" {
-    const v = Vector2D.init(10.4, 5.6);
+test "Type.round" {
+    const v = Type.init(10.4, 5.6);
     const result = v.round();
 
     try std.testing.expectEqual(@as(f32, 10), result.getX());
     try std.testing.expectEqual(@as(f32, 6), result.getY());
 }
 
-test "Vector2D.clamp" {
-    const v = Vector2D.init(15, 5);
-    const min = Vector2D.init(0, 0);
-    const max = Vector2D.init(10, 10);
+test "Type.clamp" {
+    const v = Type.init(15, 5);
+    const min = Type.init(0, 0);
+    const max = Type.init(10, 10);
     const result = v.clamp(min, max);
 
     try std.testing.expectEqual(@as(f32, 10), result.getX());
     try std.testing.expectEqual(@as(f32, 5), result.getY());
 }
 
-test "Vector2D.distance" {
-    const v1 = Vector2D.init(0, 0);
-    const v2 = Vector2D.init(3, 4);
+test "Type.distance" {
+    const v1 = Type.init(0, 0);
+    const v2 = Type.init(3, 4);
     const dist = v1.distance(v2);
 
     try std.testing.expectEqual(@as(f32, 5), dist);
 }
 
-test "Vector2D.distanceSq" {
-    const v1 = Vector2D.init(0, 0);
-    const v2 = Vector2D.init(3, 4);
+test "Type.distanceSq" {
+    const v1 = Type.init(0, 0);
+    const v2 = Type.init(3, 4);
     const dist_sq = v1.distanceSq(v2);
 
     try std.testing.expectEqual(@as(f32, 25), dist_sq);
 }
 
-test "Vector2D.size" {
-    const v = Vector2D.init(3, 4);
+test "Type.size" {
+    const v = Type.init(3, 4);
     const s = v.size();
 
     try std.testing.expectEqual(@as(f64, 5), s);
 }
 
-test "Vector2D.getComponentMax" {
-    const v1 = Vector2D.init(10, 5);
-    const v2 = Vector2D.init(3, 8);
+test "Type.getComponentMax" {
+    const v1 = Type.init(10, 5);
+    const v2 = Type.init(3, 8);
     const result = v1.getComponentMax(v2);
 
     try std.testing.expectEqual(@as(f32, 10), result.getX());
     try std.testing.expectEqual(@as(f32, 8), result.getY());
 }
 
-test "Vector2D.transform 90 degrees" {
-    const v = Vector2D.init(10, 20);
-    const monitor = Vector2D.init(1920, 1080);
+test "Type.transform 90 degrees" {
+    const v = Type.init(10, 20);
+    const monitor = Type.init(1920, 1080);
     const result = v.transform(.@"90", monitor);
 
     try std.testing.expectEqual(@as(f32, 20), result.getX());
     try std.testing.expectEqual(@as(f32, 1070), result.getY()); // 1080 - 10
 }
 
-test "Vector2D.transform 180 degrees" {
-    const v = Vector2D.init(10, 20);
-    const monitor = Vector2D.init(1920, 1080);
+test "Type.transform 180 degrees" {
+    const v = Type.init(10, 20);
+    const monitor = Type.init(1920, 1080);
     const result = v.transform(.@"180", monitor);
 
     try std.testing.expectEqual(@as(f32, 1910), result.getX()); // 1920 - 10
     try std.testing.expectEqual(@as(f32, 1060), result.getY()); // 1080 - 20
 }
 
-test "Vector2D arithmetic" {
-    const v1 = Vector2D.init(10, 20);
-    const v2 = Vector2D.init(5, 3);
+test "Type arithmetic" {
+    const v1 = Type.init(10, 20);
+    const v2 = Type.init(5, 3);
 
     const sum = v1.add(v2);
     try std.testing.expectEqual(@as(f32, 15), sum.getX());
@@ -215,9 +215,9 @@ test "Vector2D arithmetic" {
     try std.testing.expectEqual(@as(f32, 40), scaled.getY());
 }
 
-test "Vector2D.transform - all 8 variants" {
-    const v = Vector2D.init(10, 20);
-    const monitor = Vector2D.init(1920, 1080);
+test "Type.transform - all 8 variants" {
+    const v = Type.init(10, 20);
+    const monitor = Type.init(1920, 1080);
 
     // Normal (identity)
     const normal = v.transform(.normal, monitor);
