@@ -1,16 +1,74 @@
 const std = @import("std");
 
+fn setupWaylandProtocols(b: *std.Build) *std.Build.Step {
+    // Create protocols directory
+    const mkdir_protocols = b.addSystemCommand(&.{
+        "mkdir",
+        "-p",
+        "protocols",
+    });
+
+    // Generate xdg-shell protocol
+    const xdg_shell_header = b.addSystemCommand(&.{
+        "wayland-scanner",
+        "client-header",
+        "/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml",
+        "protocols/xdg-shell-client-protocol.h",
+    });
+    xdg_shell_header.step.dependOn(&mkdir_protocols.step);
+
+    const xdg_shell_code = b.addSystemCommand(&.{
+        "wayland-scanner",
+        "private-code",
+        "/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml",
+        "protocols/xdg-shell-protocol.c",
+    });
+    xdg_shell_code.step.dependOn(&mkdir_protocols.step);
+
+    // Generate linux-dmabuf protocol
+    const dmabuf_header = b.addSystemCommand(&.{
+        "wayland-scanner",
+        "client-header",
+        "/usr/share/wayland-protocols/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml",
+        "protocols/linux-dmabuf-unstable-v1-client-protocol.h",
+    });
+    dmabuf_header.step.dependOn(&mkdir_protocols.step);
+
+    const dmabuf_code = b.addSystemCommand(&.{
+        "wayland-scanner",
+        "private-code",
+        "/usr/share/wayland-protocols/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml",
+        "protocols/linux-dmabuf-unstable-v1-protocol.c",
+    });
+    dmabuf_code.step.dependOn(&mkdir_protocols.step);
+
+    // Create a step that depends on all protocol generation
+    const protocols_step = b.step("_protocols_internal", "Internal step for all protocol generation");
+    protocols_step.dependOn(&xdg_shell_header.step);
+    protocols_step.dependOn(&xdg_shell_code.step);
+    protocols_step.dependOn(&dmabuf_header.step);
+    protocols_step.dependOn(&dmabuf_code.step);
+
+    return protocols_step;
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Generate Wayland protocol headers
-    const generate_protocols = b.addSystemCommand(&.{
+    // Clean step
+    const clean_step = b.step("clean", "Clear Zig build caches");
+    const clean_cmd = b.addSystemCommand(&.{
         "sh",
         "-c",
-        "scripts/generate-wayland-protocols.sh",
+        "rm -rf .zig-cache protocols zig-out && echo 'Zig caches cleared'",
     });
-    generate_protocols.setCwd(b.path("."));
+    clean_step.dependOn(&clean_cmd.step);
+
+    // Generate Wayland protocol headers
+    const generate_protocols_step = b.step("generate-protocols", "Generate Wayland protocol headers");
+    const generate_protocols = setupWaylandProtocols(b);
+    generate_protocols_step.dependOn(generate_protocols);
 
     // Core module with shared types
     const core_mod = b.addModule("core", .{
@@ -93,7 +151,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    xdg_shell_c.step.dependOn(&generate_protocols.step);
+    xdg_shell_c.step.dependOn(generate_protocols);
     xdg_shell_c.addCSourceFile(.{
         .file = b.path("protocols/xdg-shell-protocol.c"),
         .flags = &.{"-std=c99"},
@@ -108,7 +166,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    dmabuf_c.step.dependOn(&generate_protocols.step);
+    dmabuf_c.step.dependOn(generate_protocols);
     dmabuf_c.addCSourceFile(.{
         .file = b.path("protocols/linux-dmabuf-unstable-v1-protocol.c"),
         .flags = &.{"-std=c99"},
@@ -329,13 +387,4 @@ pub fn build(b: *std.Build) void {
         const run_file_tests = b.addRunArtifact(file_tests);
         test_file_step.dependOn(&run_file_tests.step);
     }
-
-    // Clear cache step
-    const clean_step = b.step("clean", "Clear Zig build caches");
-    const clean_cmd = b.addSystemCommand(&.{
-        "sh",
-        "-c",
-        "rm -rf .zig-cache protocols zig-out && echo 'Zig caches cleared'",
-    });
-    clean_step.dependOn(&clean_cmd.step);
 }
