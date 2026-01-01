@@ -5,15 +5,21 @@ const std = @import("std");
 const posix = std.posix;
 const input = @import("input.zig");
 
-// External C library types (opaque)
-pub const udev = opaque {};
-pub const udev_monitor = opaque {};
-pub const udev_device = opaque {};
-pub const libseat = opaque {};
-pub const libinput = opaque {};
-pub const libinput_event = opaque {};
-pub const libinput_device = opaque {};
-pub const libinput_tablet_tool = opaque {};
+const c = @cImport({
+    @cInclude("libudev.h");
+    @cInclude("libseat.h");
+    @cInclude("libinput.h");
+});
+
+// External C library types
+pub const udev = c.struct_udev;
+pub const udev_monitor = c.struct_udev_monitor;
+pub const udev_device = c.struct_udev_device;
+pub const libseat = c.struct_libseat;
+pub const libinput = c.struct_libinput;
+pub const libinput_event = c.struct_libinput_event;
+pub const libinput_device = c.struct_libinput_device;
+pub const libinput_tablet_tool = c.struct_libinput_tablet_tool;
 
 /// Session device change event type
 pub const ChangeEventType = enum(u32) {
@@ -30,26 +36,26 @@ pub const ChangeEvent = struct {
     } = .{},
 };
 
-/// Session device (represents a DRM device opened through libseat)
-pub const SessionDevice = struct {
+/// Device (represents a DRM device opened through libseat)
+pub const Device = struct {
     fd: i32 = -1,
     device_id: i32 = -1,
     dev: std.posix.dev_t = 0,
     path: []const u8,
     render_node_fd: i32 = -1,
     allocator: std.mem.Allocator,
-    session: ?*Session = null,
+    session: ?*Type = null,
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, session: *Session, path: []const u8) !*Self {
+    pub fn init(allocator: std.mem.Allocator, sess: *Type, path: []const u8) !*Self {
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
 
         self.* = .{
             .path = try allocator.dupe(u8, path),
             .allocator = allocator,
-            .session = session,
+            .session = sess,
         };
 
         return self;
@@ -74,8 +80,8 @@ pub const SessionDevice = struct {
     }
 
     /// Open this device if it's a KMS device
-    pub fn openIfKms(allocator: std.mem.Allocator, session: *Session, path: []const u8) !?*Self {
-        var device = try Self.init(allocator, session, path);
+    pub fn openIfKms(allocator: std.mem.Allocator, sess: *Type, path: []const u8) !?*Self {
+        var device = try Self.init(allocator, sess, path);
         if (!device.supportsKms()) {
             device.deinit();
             return null;
@@ -87,7 +93,7 @@ pub const SessionDevice = struct {
 /// Libinput device wrapper
 pub const LibinputDevice = struct {
     device: *libinput_device,
-    session: ?*Session = null,
+    session: ?*Type = null,
     name: []const u8,
     allocator: std.mem.Allocator,
 
@@ -102,13 +108,13 @@ pub const LibinputDevice = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, device: *libinput_device, session: *Session) !*Self {
+    pub fn init(allocator: std.mem.Allocator, device: *libinput_device, sess: *Type) !*Self {
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
 
         self.* = .{
             .device = device,
-            .session = session,
+            .session = sess,
             .name = "", // TODO: Get device name from libinput
             .allocator = allocator,
             .tablet_tools = std.ArrayList(*input.ITabletTool){},
@@ -135,25 +141,25 @@ pub const AddDrmCardEvent = struct {
     path: []const u8,
 };
 
-/// Session manages seat, input, and device access
-pub const Session = struct {
+/// Type manages seat, input, and device access
+pub const Type = struct {
     allocator: std.mem.Allocator,
     active: bool = true,
     vt: u32 = 0, // 0 means unsupported
     seat_name: []const u8,
-    
+
     // Session devices (DRM cards)
-    session_devices: std.ArrayList(*SessionDevice),
-    
+    session_devices: std.ArrayList(*Device),
+
     // Libinput devices
     libinput_devices: std.ArrayList(*LibinputDevice),
-    
+
     // External library handles
     udev_handle: ?*udev = null,
     udev_monitor: ?*udev_monitor = null,
     libseat_handle: ?*libseat = null,
     libinput_handle: ?*libinput = null,
-    
+
     // Backend reference
     backend: ?*anyopaque = null,
 
@@ -166,7 +172,7 @@ pub const Session = struct {
         self.* = .{
             .allocator = allocator,
             .seat_name = "", // Will be set during initialization
-            .session_devices = std.ArrayList(*SessionDevice){},
+            .session_devices = std.ArrayList(*Device){},
             .libinput_devices = std.ArrayList(*LibinputDevice){},
             .backend = backend,
         };
@@ -187,7 +193,19 @@ pub const Session = struct {
         }
         self.session_devices.deinit(self.allocator);
 
-        // TODO: Clean up libseat, libinput, udev handles
+        // Clean up external library handles
+        if (self.libinput_handle) |handle| {
+            _ = c.libinput_unref(handle);
+        }
+        if (self.libseat_handle) |handle| {
+            _ = c.libseat_close_seat(handle);
+        }
+        if (self.udev_monitor) |monitor| {
+            _ = c.udev_monitor_unref(monitor);
+        }
+        if (self.udev_handle) |handle| {
+            _ = c.udev_unref(handle);
+        }
 
         self.allocator.destroy(self);
     }
@@ -265,23 +283,23 @@ pub const PollFd = struct {
 // Tests
 test "Session - initialization" {
     const testing = std.testing;
-    
-    var session = try Session.init(testing.allocator, null);
-    defer session.deinit();
 
-    try testing.expect(session.active == true);
-    try testing.expectEqual(@as(u32, 0), session.vt);
-    try testing.expectEqual(@as(usize, 0), session.session_devices.items.len);
-    try testing.expectEqual(@as(usize, 0), session.libinput_devices.items.len);
+    var sess = try Type.init(testing.allocator, null);
+    defer sess.deinit();
+
+    try testing.expect(sess.active == true);
+    try testing.expectEqual(@as(u32, 0), sess.vt);
+    try testing.expectEqual(@as(usize, 0), sess.session_devices.items.len);
+    try testing.expectEqual(@as(usize, 0), sess.libinput_devices.items.len);
 }
 
-test "SessionDevice - basic initialization" {
+test "Device - basic initialization" {
     const testing = std.testing;
-    
-    var session = try Session.init(testing.allocator, null);
-    defer session.deinit();
 
-    var device = try SessionDevice.init(testing.allocator, session, "/dev/dri/card0");
+    var sess = try Type.init(testing.allocator, null);
+    defer sess.deinit();
+
+    var device = try Device.init(testing.allocator, sess, "/dev/dri/card0");
     defer device.deinit();
 
     try testing.expectEqualStrings("/dev/dri/card0", device.path);
@@ -291,10 +309,10 @@ test "SessionDevice - basic initialization" {
 
 test "Session - switch VT returns false when not implemented" {
     const testing = std.testing;
-    
-    var session = try Session.init(testing.allocator, null);
-    defer session.deinit();
 
-    const result = session.switchVt(2);
+    var sess = try Type.init(testing.allocator, null);
+    defer sess.deinit();
+
+    const result = sess.switchVt(2);
     try testing.expectEqual(false, result);
 }

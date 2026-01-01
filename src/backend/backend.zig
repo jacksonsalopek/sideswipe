@@ -106,7 +106,7 @@ pub const Coordinator = struct {
     implementation_options: []const ImplementationOptions,
     implementations: std.ArrayList(IBackendImplementation),
     primary_allocator: ?allocator_mod.IAllocator = null,
-    session: ?*session_mod.Session = null,
+    session: ?*session_mod.Type = null,
     ready: bool = false,
     idle_fd: i32 = -1,
 

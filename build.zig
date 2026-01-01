@@ -63,8 +63,16 @@ pub fn build(b: *std.Build) void {
     backend_mod.linkSystemLibrary("libdrm", .{});
     backend_mod.linkSystemLibrary("libinput", .{});
     backend_mod.linkSystemLibrary("pixman-1", .{});
+    backend_mod.linkSystemLibrary("gbm", .{});
+    backend_mod.linkSystemLibrary("EGL", .{});
+    backend_mod.linkSystemLibrary("GLESv2", .{});
+    backend_mod.linkSystemLibrary("libudev", .{});
+    backend_mod.linkSystemLibrary("libseat", .{});
     backend_mod.addImport("core.string", core_string_mod);
     backend_mod.addImport("core.math", core_math_mod);
+
+    // Note: backend.drm uses relative imports and is tested via backend module tests
+    // Cannot be tested standalone due to module path restrictions
 
     // Main executable
     const exe = b.addExecutable(.{
@@ -82,6 +90,11 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("libdrm");
     exe.linkSystemLibrary("libinput");
     exe.linkSystemLibrary("pixman-1");
+    exe.linkSystemLibrary("gbm");
+    exe.linkSystemLibrary("EGL");
+    exe.linkSystemLibrary("GLESv2");
+    exe.linkSystemLibrary("libudev");
+    exe.linkSystemLibrary("libseat");
     exe.linkLibC();
 
     b.installArtifact(exe);
@@ -209,9 +222,16 @@ pub fn build(b: *std.Build) void {
     backend_tests.linkSystemLibrary("libdrm");
     backend_tests.linkSystemLibrary("libinput");
     backend_tests.linkSystemLibrary("pixman-1");
+    backend_tests.linkSystemLibrary("gbm");
+    backend_tests.linkSystemLibrary("EGL");
+    backend_tests.linkSystemLibrary("GLESv2");
+    backend_tests.linkSystemLibrary("libudev");
+    backend_tests.linkSystemLibrary("libseat");
     backend_tests.linkLibC();
     const run_backend_tests = b.addRunArtifact(backend_tests);
     test_step.dependOn(&run_backend_tests.step);
+
+    // Test backend.drm module (uses relative imports, tested via backend tests)
 
     // Test a specific file with module access
     const test_file_step = b.step("test-file", "Run tests for a specific file with module access");
@@ -236,6 +256,11 @@ pub fn build(b: *std.Build) void {
         file_tests.linkSystemLibrary("libdrm");
         file_tests.linkSystemLibrary("libinput");
         file_tests.linkSystemLibrary("pixman-1");
+        file_tests.linkSystemLibrary("gbm");
+        file_tests.linkSystemLibrary("EGL");
+        file_tests.linkSystemLibrary("GLESv2");
+        file_tests.linkSystemLibrary("libudev");
+        file_tests.linkSystemLibrary("libseat");
         file_tests.linkLibC();
 
         if (b.option([]const u8, "filter", "Test name filter")) |filter| {

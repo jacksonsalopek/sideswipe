@@ -1,6 +1,7 @@
 const std = @import("std");
 const math = @import("core.math");
 const Vector2D = math.Vector2D;
+const attachment = @import("attachment.zig");
 
 /// Buffer capability flags
 pub const BufferCapability = packed struct(u32) {
@@ -145,6 +146,19 @@ pub const Buffer = struct {
     is_opaque: bool = false,
     locked_by_backend: bool = false,
     locks: i32 = 0,
+    attachments: attachment.Manager,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) Buffer {
+        return .{
+            .attachments = attachment.Manager.init(allocator),
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *Buffer) void {
+        self.attachments.deinit();
+    }
 
     /// Default implementation: returns empty DMA-BUF attributes
     pub fn defaultDmabuf(_: *anyopaque) DMABUFAttrs {
@@ -204,15 +218,14 @@ pub const ExampleBuffer = struct {
 
     const Self = @This();
 
-    pub fn init() Self {
+    pub fn init(allocator: std.mem.Allocator) Self {
         return .{
-            .base = .{},
+            .base = Buffer.init(allocator),
         };
     }
 
     pub fn deinit(self: *Self) void {
-        _ = self;
-        // Cleanup resources
+        self.base.deinit();
     }
 
     pub fn interface(self: *Self) IBuffer {
@@ -288,7 +301,7 @@ test "DMABUFAttrs - default values" {
 }
 
 test "ExampleBuffer - interface and locking" {
-    var buffer = ExampleBuffer.init();
+    var buffer = ExampleBuffer.init(std.testing.allocator);
     defer buffer.deinit();
 
     const ibuf = buffer.interface();
@@ -302,4 +315,33 @@ test "ExampleBuffer - interface and locking" {
     try std.testing.expect(ibuf.locked());
     ibuf.unlock();
     try std.testing.expect(!ibuf.locked());
+}
+
+test "Buffer - attachments management" {
+    const testing = std.testing;
+
+    var buffer = Buffer.init(testing.allocator);
+    defer buffer.deinit();
+
+    const TestAttachment = struct {
+        value: i32,
+
+        fn deinitImpl(ptr: *anyopaque) void {
+            _ = ptr;
+        }
+
+        const vtable_instance = attachment.IAttachment.VTable{
+            .deinit = deinitImpl,
+        };
+    };
+
+    // Add attachment to buffer
+    var test_data = TestAttachment{ .value = 42 };
+    const att = attachment.IAttachment.init(&test_data, &TestAttachment.vtable_instance);
+    try buffer.attachments.add(TestAttachment, att);
+
+    try testing.expect(buffer.attachments.has(TestAttachment));
+
+    const retrieved = buffer.attachments.get(TestAttachment);
+    try testing.expectEqual(@as(i32, 42), retrieved.?.value);
 }

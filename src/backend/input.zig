@@ -969,7 +969,7 @@ pub const ISwitch = blk: {
     break :blk struct {
         base: BaseInterface,
 
-        pub const SwitchType = enum(u32) {
+        pub const Type = enum(u32) {
             unknown = 0,
             lid = 1,
             tablet_mode = 2,
@@ -1004,7 +1004,7 @@ pub const ITabletTool = blk: {
     break :blk struct {
         base: BaseInterface,
 
-        pub const ToolType = enum(u32) {
+        pub const Type = enum(u32) {
             invalid = 0,
             pen = 1,
             eraser = 2,
@@ -1184,9 +1184,9 @@ test "ISwitch - interface with SwitchType enum" {
     try testing.expectEqualStrings("Lid Switch", switch_dev.getName());
 
     // Test SwitchType enum
-    try testing.expectEqual(@as(u32, 0), @intFromEnum(ISwitch.SwitchType.unknown));
-    try testing.expectEqual(@as(u32, 1), @intFromEnum(ISwitch.SwitchType.lid));
-    try testing.expectEqual(@as(u32, 2), @intFromEnum(ISwitch.SwitchType.tablet_mode));
+    try testing.expectEqual(@as(u32, 0), @intFromEnum(ISwitch.Type.unknown));
+    try testing.expectEqual(@as(u32, 1), @intFromEnum(ISwitch.Type.lid));
+    try testing.expectEqual(@as(u32, 2), @intFromEnum(ISwitch.Type.tablet_mode));
 }
 
 test "ITablet - interface creation" {
@@ -1227,7 +1227,7 @@ test "ITabletTool - interface with ToolType enum" {
 
     const MockTabletTool = struct {
         name: []const u8,
-        tool_type: ITabletTool.ToolType,
+        type: ITabletTool.Type,
 
         fn getLibinputHandle(ptr: *anyopaque) ?*anyopaque {
             _ = ptr;
@@ -1250,16 +1250,16 @@ test "ITabletTool - interface with ToolType enum" {
         };
     };
 
-    var mock = MockTabletTool{ .name = "Pen", .tool_type = .pen };
+    var mock = MockTabletTool{ .name = "Pen", .type = .pen };
     const tool = ITabletTool.init(&mock, &MockTabletTool.vtable_instance);
 
     try testing.expectEqualStrings("Pen", tool.getName());
 
     // Test ToolType enum values
-    try testing.expectEqual(@as(u32, 0), @intFromEnum(ITabletTool.ToolType.invalid));
-    try testing.expectEqual(@as(u32, 1), @intFromEnum(ITabletTool.ToolType.pen));
-    try testing.expectEqual(@as(u32, 2), @intFromEnum(ITabletTool.ToolType.eraser));
-    try testing.expectEqual(@as(u32, 5), @intFromEnum(ITabletTool.ToolType.airbrush));
+    try testing.expectEqual(@as(u32, 0), @intFromEnum(ITabletTool.Type.invalid));
+    try testing.expectEqual(@as(u32, 1), @intFromEnum(ITabletTool.Type.pen));
+    try testing.expectEqual(@as(u32, 2), @intFromEnum(ITabletTool.Type.eraser));
+    try testing.expectEqual(@as(u32, 5), @intFromEnum(ITabletTool.Type.airbrush));
 }
 
 test "ITabletPad - interface creation" {
