@@ -1,0 +1,5 @@
+---
+alwaysApply: true
+---
+
+Do not return a large summary at the end of the tool run. Truncate summaries to 3 sentences maximum.

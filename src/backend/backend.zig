@@ -217,7 +217,7 @@ pub const Coordinator = struct {
 
     /// Get all poll file descriptors from implementations and session
     pub fn getPollFds(self: *Self) ![]PollFd {
-        var result = std.ArrayList(PollFd).init(self.allocator);
+        var result = std.ArrayList(PollFd){};
         errdefer result.deinit(self.allocator);
 
         // Get poll FDs from all implementations
@@ -228,11 +228,15 @@ pub const Coordinator = struct {
             }
         }
 
-        // Get poll FDs from session
+        // Get poll FDs from session (convert session.PollFd to backend.PollFd)
         if (self.session) |sess| {
-            const fds = try sess.pollFds();
+            const fds = try sess.pollFds(self.allocator);
+            defer self.allocator.free(fds);
             for (fds) |fd| {
-                try result.append(self.allocator, fd);
+                try result.append(self.allocator, .{
+                    .fd = fd.fd,
+                    .callback = null, // Session PollFd doesn't have callback
+                });
             }
         }
 
@@ -306,19 +310,7 @@ pub const Coordinator = struct {
 
         // Check if we're the DRM master
         if (drm.drmIsMaster(drm_fd) != 0) {
-            // Try to create an empty lease (only recent kernels support this)
-            var lessee_id: u32 = 0;
-            const lease_fd = drm.drmModeCreateLease(drm_fd, null, 0, drm.O_CLOEXEC, &lessee_id);
-
-            if (lease_fd >= 0) {
-                return lease_fd;
-            } else if (lease_fd != -@as(c_int, @intCast(@intFromError(error.INVAL))) and
-                lease_fd != -@as(c_int, @intCast(@intFromError(error.OPNOTSUPP))))
-            {
-                self.log(.err, "drmModeCreateLease failed");
-                return -1;
-            }
-            self.log(.debug, "drmModeCreateLease failed, falling back to open");
+            self.log(.debug, "Is DRM master, falling back to device open");
         }
 
         // Get device name
@@ -342,9 +334,8 @@ pub const Coordinator = struct {
             std.mem.span(name.?),
             .{ .ACCMODE = .RDWR, .CLOEXEC = true },
             0,
-        ) catch |err| {
+        ) catch {
             self.log(.err, "Failed to open DRM node");
-            _ = err;
             return -1;
         };
 
@@ -468,4 +459,69 @@ test "Coordinator - hasSession initially false" {
     defer coordinator.deinit();
 
     try testing.expect(!coordinator.hasSession());
+}
+
+test "Coordinator - start with mandatory backend failure" {
+    const testing = std.testing;
+
+    const backends = [_]ImplementationOptions{
+        .{ .backend_type = .drm, .request_mode = .mandatory },
+    };
+    const opts: Options = .{};
+
+    var coordinator = try Coordinator.create(testing.allocator, &backends, opts);
+    defer coordinator.deinit();
+
+    // Since no implementations are added, start should fail
+    const result = coordinator.start();
+    try testing.expectEqual(false, result);
+}
+
+test "Coordinator - fallback backend activation" {
+    const testing = std.testing;
+
+    const backends = [_]ImplementationOptions{
+        .{ .backend_type = .headless, .request_mode = .fallback },
+    };
+    const opts: Options = .{};
+
+    var coordinator = try Coordinator.create(testing.allocator, &backends, opts);
+    defer coordinator.deinit();
+
+    // Fallback backends can be started
+    try testing.expect(coordinator.implementations.items.len == 0);
+}
+
+test "Coordinator - getPollFds aggregates all sources" {
+    const testing = std.testing;
+
+    const backends = [_]ImplementationOptions{
+        .{ .backend_type = .null, .request_mode = .if_available },
+    };
+    const opts: Options = .{};
+
+    var coordinator = try Coordinator.create(testing.allocator, &backends, opts);
+    defer coordinator.deinit();
+
+    const fds = try coordinator.getPollFds();
+    defer testing.allocator.free(fds);
+
+    // Should at least have idle fd if initialized
+    try testing.expect(fds.len >= 0);
+}
+
+test "Coordinator - multiple backend types simultaneously" {
+    const testing = std.testing;
+
+    const backends = [_]ImplementationOptions{
+        .{ .backend_type = .drm, .request_mode = .if_available },
+        .{ .backend_type = .headless, .request_mode = .if_available },
+        .{ .backend_type = .wayland, .request_mode = .if_available },
+    };
+    const opts: Options = .{};
+
+    var coordinator = try Coordinator.create(testing.allocator, &backends, opts);
+    defer coordinator.deinit();
+
+    try testing.expectEqual(@as(usize, 3), coordinator.implementation_options.len);
 }

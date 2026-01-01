@@ -1,0 +1,7 @@
+---
+alwaysApply: true
+---
+# Overview
+
+- ArrayList API changed: Use `std.ArrayList(T)` and initialize with `std.ArrayList(T){}`
+- Do not use deprecated `init()` methods from older Zig versions

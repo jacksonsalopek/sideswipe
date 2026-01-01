@@ -9,6 +9,8 @@ const c = @cImport({
     @cInclude("libudev.h");
     @cInclude("libseat.h");
     @cInclude("libinput.h");
+    @cInclude("xf86drm.h");
+    @cInclude("xf86drmMode.h");
 });
 
 // External C library types
@@ -35,6 +37,51 @@ pub const ChangeEvent = struct {
         prop_id: u32 = 0,
     } = .{},
 };
+
+// Callback functions for C libraries
+
+/// Libseat seat enable/disable callback
+fn libseatHandleEnable(seat: ?*libseat, user_data: ?*anyopaque) callconv(.C) void {
+    _ = seat;
+    const session: *Type = @ptrCast(@alignCast(user_data orelse return));
+    session.active = true;
+    session.onReady();
+}
+
+fn libseatHandleDisable(seat: ?*libseat, user_data: ?*anyopaque) callconv(.C) void {
+    const handle = seat orelse return;
+    const session: *Type = @ptrCast(@alignCast(user_data orelse return));
+    session.active = false;
+
+    // Disable all devices
+    _ = c.libseat_disable_seat(handle);
+}
+
+/// Libinput open_restricted callback
+fn libinputOpenRestricted(path: [*c]const u8, flags: c_int, user_data: ?*anyopaque) callconv(.C) c_int {
+    const session: *Type = @ptrCast(@alignCast(user_data orelse return -1));
+    const handle = session.libseat_handle orelse return -1;
+
+    var device_id: c_int = undefined;
+    const fd = c.libseat_open_device(handle, path, &device_id);
+
+    if (fd < 0) return fd;
+
+    // Store device_id for later closing
+    // For now, just return the fd
+    _ = flags;
+    return fd;
+}
+
+/// Libinput close_restricted callback
+fn libinputCloseRestricted(fd: c_int, user_data: ?*anyopaque) callconv(.C) void {
+    const session: *Type = @ptrCast(@alignCast(user_data orelse return));
+    const handle = session.libseat_handle orelse return;
+
+    // Find device_id for this fd and close it
+    // For simplicity, just close the fd directly
+    _ = c.libseat_close_device(handle, fd);
+}
 
 /// Device (represents a DRM device opened through libseat)
 pub const Device = struct {
@@ -74,9 +121,20 @@ pub const Device = struct {
 
     /// Check if device supports KMS (Kernel Mode Setting)
     pub fn supportsKms(self: *Self) bool {
-        _ = self;
-        // TODO: Implement DRM capability checking
-        return false;
+        if (self.fd < 0) return false;
+
+        // Check if device has DRM capability
+        const version = c.drmGetVersion(self.fd);
+        if (version == null) return false;
+        defer c.drmFreeVersion(version);
+
+        // Try to get DRM resources to verify KMS support
+        const resources = c.drmModeGetResources(self.fd);
+        if (resources == null) return false;
+        defer c.drmModeFreeResources(resources);
+
+        // Device supports KMS if it has connectors and CRTCs
+        return resources.*.count_connectors > 0 and resources.*.count_crtcs > 0;
     }
 
     /// Open this device if it's a KMS device
@@ -112,10 +170,17 @@ pub const LibinputDevice = struct {
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
 
+        // Get device name from libinput
+        const name_ptr = c.libinput_device_get_name(device);
+        const name = if (name_ptr) |ptr|
+            try allocator.dupe(u8, std.mem.span(ptr))
+        else
+            try allocator.dupe(u8, "unknown");
+
         self.* = .{
             .device = device,
             .session = sess,
-            .name = "", // TODO: Get device name from libinput
+            .name = name,
             .allocator = allocator,
             .tablet_tools = std.ArrayList(*input.ITabletTool){},
         };
@@ -124,15 +189,50 @@ pub const LibinputDevice = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        // Cleanup tablet tools
+        for (self.tablet_tools.items) |tool| {
+            tool.deinit();
+        }
         self.tablet_tools.deinit(self.allocator);
-        // TODO: Cleanup device interfaces
+
+        // Cleanup device interfaces
+        if (self.keyboard) |kb| kb.deinit();
+        if (self.mouse) |ms| ms.deinit();
+        if (self.touch) |tc| tc.deinit();
+        if (self.switch_device) |sw| sw.deinit();
+        if (self.tablet) |tb| tb.deinit();
+        if (self.tablet_pad) |tp| tp.deinit();
+
+        self.allocator.free(self.name);
         self.allocator.destroy(self);
     }
 
     /// Initialize device capabilities (keyboard, mouse, etc.)
-    pub fn initDevices(self: *Self) void {
-        _ = self;
-        // TODO: Query libinput device capabilities and create appropriate interfaces
+    pub fn initDevices(self: *Self) !void {
+        // Query libinput device capabilities and create appropriate interfaces
+        if (c.libinput_device_has_capability(self.device, c.LIBINPUT_DEVICE_CAP_KEYBOARD) != 0) {
+            self.keyboard = try input.IKeyboard.init(self.allocator);
+        }
+
+        if (c.libinput_device_has_capability(self.device, c.LIBINPUT_DEVICE_CAP_POINTER) != 0) {
+            self.mouse = try input.IPointer.init(self.allocator);
+        }
+
+        if (c.libinput_device_has_capability(self.device, c.LIBINPUT_DEVICE_CAP_TOUCH) != 0) {
+            self.touch = try input.ITouch.init(self.allocator);
+        }
+
+        if (c.libinput_device_has_capability(self.device, c.LIBINPUT_DEVICE_CAP_SWITCH) != 0) {
+            self.switch_device = try input.ISwitch.init(self.allocator);
+        }
+
+        if (c.libinput_device_has_capability(self.device, c.LIBINPUT_DEVICE_CAP_TABLET_TOOL) != 0) {
+            self.tablet = try input.ITablet.init(self.allocator);
+        }
+
+        if (c.libinput_device_has_capability(self.device, c.LIBINPUT_DEVICE_CAP_TABLET_PAD) != 0) {
+            self.tablet_pad = try input.ITabletPad.init(self.allocator);
+        }
     }
 };
 
@@ -207,6 +307,10 @@ pub const Type = struct {
             _ = c.udev_unref(handle);
         }
 
+        if (self.seat_name.len > 0) {
+            self.allocator.free(self.seat_name);
+        }
+
         self.allocator.destroy(self);
     }
 
@@ -215,61 +319,228 @@ pub const Type = struct {
         const session = try Self.init(allocator, backend);
         errdefer session.deinit();
 
-        // TODO: Initialize libseat
-        // TODO: Initialize udev
-        // TODO: Initialize libinput
+        // Initialize libseat
+        const libseat_listener = c.libseat_seat_listener{
+            .enable_seat = libseatHandleEnable,
+            .disable_seat = libseatHandleDisable,
+        };
+
+        session.libseat_handle = c.libseat_open_seat(&libseat_listener, session);
+        if (session.libseat_handle == null) {
+            return error.LibseatInitFailed;
+        }
+
+        // Get seat name
+        const seat_name_ptr = c.libseat_seat_name(session.libseat_handle);
+        if (seat_name_ptr) |ptr| {
+            session.seat_name = try allocator.dupe(u8, std.mem.span(ptr));
+        }
+
+        // Initialize udev
+        session.udev_handle = c.udev_new();
+        if (session.udev_handle == null) {
+            return error.UdevInitFailed;
+        }
+
+        // Setup udev monitor for DRM devices
+        session.udev_monitor = c.udev_monitor_new_from_netlink(session.udev_handle, "udev");
+        if (session.udev_monitor == null) {
+            return error.UdevMonitorInitFailed;
+        }
+
+        _ = c.udev_monitor_filter_add_match_subsystem_devtype(session.udev_monitor, "drm", null);
+        _ = c.udev_monitor_enable_receiving(session.udev_monitor);
+
+        // Initialize libinput
+        const libinput_interface = c.libinput_interface{
+            .open_restricted = libinputOpenRestricted,
+            .close_restricted = libinputCloseRestricted,
+        };
+
+        session.libinput_handle = c.libinput_udev_create_context(&libinput_interface, session, session.udev_handle);
+        if (session.libinput_handle == null) {
+            return error.LibinputInitFailed;
+        }
+
+        const seat_name_cstr = if (session.seat_name.len > 0) session.seat_name.ptr else "seat0";
+        if (c.libinput_udev_assign_seat(session.libinput_handle, seat_name_cstr) != 0) {
+            return error.LibinputAssignSeatFailed;
+        }
 
         return session;
     }
 
     /// Get file descriptors that need polling
-    pub fn pollFds(self: *Self) ![]PollFd {
-        _ = self;
-        // TODO: Return fds for libseat, udev, and libinput
-        return &[_]PollFd{};
+    pub fn pollFds(self: *Self, allocator: std.mem.Allocator) ![]PollFd {
+        var fds = std.ArrayList(PollFd){};
+
+        // Add libseat fd
+        if (self.libseat_handle) |handle| {
+            const fd = c.libseat_get_fd(handle);
+            if (fd >= 0) {
+                try fds.append(allocator, .{ .fd = fd, .events = posix.POLL.IN });
+            }
+        }
+
+        // Add udev monitor fd
+        if (self.udev_monitor) |monitor| {
+            const fd = c.udev_monitor_get_fd(monitor);
+            if (fd >= 0) {
+                try fds.append(allocator, .{ .fd = fd, .events = posix.POLL.IN });
+            }
+        }
+
+        // Add libinput fd
+        if (self.libinput_handle) |handle| {
+            const fd = c.libinput_get_fd(handle);
+            if (fd >= 0) {
+                try fds.append(allocator, .{ .fd = fd, .events = posix.POLL.IN });
+            }
+        }
+
+        return fds.toOwnedSlice(allocator);
     }
 
     /// Dispatch pending events asynchronously
     pub fn dispatchPendingEventsAsync(self: *Self) void {
-        _ = self;
-        // TODO: Dispatch udev events
-        // TODO: Dispatch libinput events
-        // TODO: Dispatch libseat events
+        self.dispatchLibseatEvents();
+        self.dispatchUdevEvents();
+        self.dispatchLibinputEvents();
     }
 
     /// Switch to a different virtual terminal
     pub fn switchVt(self: *Self, vt: u32) bool {
-        _ = self;
-        _ = vt;
-        // TODO: Implement VT switching via libseat
-        return false;
+        const handle = self.libseat_handle orelse return false;
+        return c.libseat_switch_session(handle, @intCast(vt)) == 0;
     }
 
     /// Called when session is ready
     pub fn onReady(self: *Self) void {
-        _ = self;
-        // TODO: Emit ready signals, enumerate devices
+        // Enumerate existing DRM devices
+        if (self.udev_handle) |udev_ctx| {
+            const enumerate = c.udev_enumerate_new(udev_ctx);
+            if (enumerate) |enum_ctx| {
+                defer _ = c.udev_enumerate_unref(enum_ctx);
+
+                _ = c.udev_enumerate_add_match_subsystem(enum_ctx, "drm");
+                _ = c.udev_enumerate_scan_devices(enum_ctx);
+
+                var entry = c.udev_enumerate_get_list_entry(enum_ctx);
+                while (entry != null) : (entry = c.udev_list_entry_get_next(entry)) {
+                    const syspath = c.udev_list_entry_get_name(entry);
+                    if (syspath) |path| {
+                        const device = c.udev_device_new_from_syspath(udev_ctx, path);
+                        if (device) |dev| {
+                            defer _ = c.udev_device_unref(dev);
+
+                            const devnode = c.udev_device_get_devnode(dev);
+                            if (devnode) |node| {
+                                const devnode_str = std.mem.span(node);
+                                _ = Device.openIfKms(self.allocator, self, devnode_str) catch continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // TODO: Emit ready signal to backend
     }
 
     fn dispatchUdevEvents(self: *Self) void {
-        _ = self;
-        // TODO: Handle udev hotplug events
+        const monitor = self.udev_monitor orelse return;
+
+        while (true) {
+            const device = c.udev_monitor_receive_device(monitor) orelse break;
+            defer _ = c.udev_device_unref(device);
+
+            const action_ptr = c.udev_device_get_action(device);
+            const devnode_ptr = c.udev_device_get_devnode(device);
+
+            if (action_ptr == null or devnode_ptr == null) continue;
+
+            const action = std.mem.span(action_ptr);
+            const devnode = std.mem.span(devnode_ptr);
+
+            if (std.mem.eql(u8, action, "add")) {
+                // Device added - try to open as DRM card
+                _ = Device.openIfKms(self.allocator, self, devnode) catch continue;
+            } else if (std.mem.eql(u8, action, "remove")) {
+                // Device removed - find and close it
+                for (self.session_devices.items, 0..) |dev, i| {
+                    if (std.mem.eql(u8, dev.path, devnode)) {
+                        _ = self.session_devices.swapRemove(i);
+                        dev.deinit();
+                        break;
+                    }
+                }
+            } else if (std.mem.eql(u8, action, "change")) {
+                // Device changed - emit hotplug event
+                // TODO: Emit change event to backend
+            }
+        }
     }
 
     fn dispatchLibinputEvents(self: *Self) void {
-        _ = self;
-        // TODO: Process libinput events
+        const handle = self.libinput_handle orelse return;
+
+        _ = c.libinput_dispatch(handle);
+
+        while (c.libinput_get_event(handle)) |event| {
+            defer _ = c.libinput_event_destroy(event);
+            self.handleLibinputEvent(event);
+        }
     }
 
     fn dispatchLibseatEvents(self: *Self) void {
-        _ = self;
-        // TODO: Handle libseat seat enable/disable
+        const handle = self.libseat_handle orelse return;
+        _ = c.libseat_dispatch(handle, 0);
     }
 
     fn handleLibinputEvent(self: *Self, event: *libinput_event) void {
-        _ = self;
-        _ = event;
-        // TODO: Route libinput events to appropriate handlers
+        const event_type = c.libinput_event_get_type(event);
+        const device_ptr = c.libinput_event_get_device(event);
+
+        switch (event_type) {
+            c.LIBINPUT_EVENT_DEVICE_ADDED => {
+                // New device detected
+                const dev = LibinputDevice.init(self.allocator, device_ptr, self) catch return;
+                dev.initDevices() catch {
+                    dev.deinit();
+                    return;
+                };
+                self.libinput_devices.append(self.allocator, dev) catch {
+                    dev.deinit();
+                    return;
+                };
+            },
+            c.LIBINPUT_EVENT_DEVICE_REMOVED => {
+                // Device removed - find and remove it
+                for (self.libinput_devices.items, 0..) |dev, i| {
+                    if (dev.device == device_ptr) {
+                        _ = self.libinput_devices.swapRemove(i);
+                        dev.deinit();
+                        break;
+                    }
+                }
+            },
+            c.LIBINPUT_EVENT_KEYBOARD_KEY => {
+                // Keyboard event - route to keyboard interface
+                // TODO: Extract key event data and emit
+            },
+            c.LIBINPUT_EVENT_POINTER_MOTION, c.LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE, c.LIBINPUT_EVENT_POINTER_BUTTON, c.LIBINPUT_EVENT_POINTER_AXIS => {
+                // Pointer events - route to pointer interface
+                // TODO: Extract pointer event data and emit
+            },
+            c.LIBINPUT_EVENT_TOUCH_DOWN, c.LIBINPUT_EVENT_TOUCH_UP, c.LIBINPUT_EVENT_TOUCH_MOTION, c.LIBINPUT_EVENT_TOUCH_CANCEL, c.LIBINPUT_EVENT_TOUCH_FRAME => {
+                // Touch events - route to touch interface
+                // TODO: Extract touch event data and emit
+            },
+            else => {
+                // Other event types (switch, tablet, etc.)
+                // TODO: Handle remaining event types
+            },
+        }
     }
 };
 

@@ -238,13 +238,15 @@ pub const Logger = struct {
 
         // Print timestamp first if enabled
         if (self.time_enabled) {
-            const timestamp = std.time.timestamp();
-            const seconds_in_day = @rem(timestamp, 86400);
+            const timestamp_ms = std.time.milliTimestamp();
+            const total_seconds = @divFloor(timestamp_ms, 1000);
+            const millis: u64 = @intCast(@rem(timestamp_ms, 1000));
+            const seconds_in_day = @rem(total_seconds, 86400);
             const hours: u64 = @intCast(@divFloor(seconds_in_day, 3600));
             const minutes: u64 = @intCast(@divFloor(@rem(seconds_in_day, 3600), 60));
             const seconds: u64 = @intCast(@rem(seconds_in_day, 60));
 
-            try stdout.print("[{d:0>2}:{d:0>2}:{d:0>2}] ", .{ hours, minutes, seconds });
+            try stdout.print("[{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}] ", .{ hours, minutes, seconds, millis });
         }
 
         // Print log level with optional coloring

@@ -345,3 +345,199 @@ test "Buffer - attachments management" {
     const retrieved = buffer.attachments.get(TestAttachment);
     try testing.expectEqual(@as(i32, 42), retrieved.?.value);
 }
+
+test "Buffer - lock/unlock ref counting edge cases" {
+    const testing = std.testing;
+
+    var buffer = Buffer.init(testing.allocator);
+    defer buffer.deinit();
+
+    // Initial state
+    try testing.expectEqual(@as(i32, 0), buffer.locks);
+
+    // Multiple locks
+    Buffer.defaultLock(&buffer);
+    try testing.expectEqual(@as(i32, 1), buffer.locks);
+
+    Buffer.defaultLock(&buffer);
+    try testing.expectEqual(@as(i32, 2), buffer.locks);
+
+    Buffer.defaultLock(&buffer);
+    try testing.expectEqual(@as(i32, 3), buffer.locks);
+
+    // Unlock one by one
+    Buffer.defaultUnlock(&buffer);
+    try testing.expectEqual(@as(i32, 2), buffer.locks);
+
+    Buffer.defaultUnlock(&buffer);
+    try testing.expectEqual(@as(i32, 1), buffer.locks);
+
+    Buffer.defaultUnlock(&buffer);
+    try testing.expectEqual(@as(i32, 0), buffer.locks);
+}
+
+test "Buffer - attachment lifecycle with buffer destruction" {
+    const testing = std.testing;
+
+    var deinit_called = false;
+
+    const TestAttachment = struct {
+        flag: *bool,
+
+        fn deinitImpl(ptr: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.flag.* = true;
+        }
+
+        const vtable_instance = attachment.IAttachment.VTable{
+            .deinit = deinitImpl,
+        };
+    };
+
+    {
+        var buf = Buffer.init(testing.allocator);
+
+        var test_data = TestAttachment{ .flag = &deinit_called };
+        const att = attachment.IAttachment.init(&test_data, &TestAttachment.vtable_instance);
+        try buf.attachments.add(TestAttachment, att);
+
+        try testing.expect(!deinit_called);
+        // Buffer goes out of scope, should clean up attachments
+        buf.deinit();
+    }
+
+    try testing.expect(deinit_called);
+}
+
+test "Buffer - DMABUFAttrs validation (planes, strides, offsets)" {
+    const testing = std.testing;
+
+    const attrs = DMABUFAttrs{
+        .success = true,
+        .size = Vector2D.init(1920, 1080),
+        .format = 0x34325258,
+        .modifier = 0x0100000000000002,
+        .planes = 3,
+        .offsets = [_]u32{ 0, 2073600, 2073600 + 518400, 0 },
+        .strides = [_]u32{ 1920, 960, 960, 0 },
+        .fds = [_]i32{ 42, 42, 42, -1 },
+    };
+
+    try testing.expect(attrs.success);
+    try testing.expectEqual(@as(i32, 3), attrs.planes);
+    try testing.expectEqual(@as(u32, 1920), attrs.strides[0]);
+    try testing.expectEqual(@as(u32, 0), attrs.offsets[0]);
+    try testing.expectEqual(@as(i32, 42), attrs.fds[0]);
+}
+
+test "Buffer - simultaneous lock by multiple consumers" {
+    const testing = std.testing;
+
+    var buffer = Buffer.init(testing.allocator);
+    defer buffer.deinit();
+
+    // Simulate 5 consumers locking
+    var i: usize = 0;
+    while (i < 5) : (i += 1) {
+        Buffer.defaultLock(&buffer);
+    }
+
+    try testing.expectEqual(@as(i32, 5), buffer.locks);
+    try testing.expect(Buffer.defaultLocked(&buffer));
+
+    // Unlock 3 times - should still be locked
+    Buffer.defaultUnlock(&buffer);
+    Buffer.defaultUnlock(&buffer);
+    Buffer.defaultUnlock(&buffer);
+
+    try testing.expectEqual(@as(i32, 2), buffer.locks);
+    try testing.expect(Buffer.defaultLocked(&buffer));
+
+    // Unlock remaining
+    Buffer.defaultUnlock(&buffer);
+    Buffer.defaultUnlock(&buffer);
+
+    try testing.expectEqual(@as(i32, 0), buffer.locks);
+    try testing.expect(!Buffer.defaultLocked(&buffer));
+}
+
+test "Buffer - sendRelease called only when fully unlocked" {
+    const testing = std.testing;
+
+    var release_count: u32 = 0;
+
+    const TestBuffer = struct {
+        base: Buffer,
+        release_counter: *u32,
+
+        fn sendReleaseImpl(ptr: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.release_counter.* += 1;
+        }
+
+        fn lockImpl(ptr: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.base.locks += 1;
+        }
+
+        fn unlockImpl(ptr: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.base.locks -= 1;
+            if (self.base.locks <= 0) {
+                sendReleaseImpl(ptr);
+            }
+        }
+
+        fn lockedImpl(ptr: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return self.base.locks > 0;
+        }
+
+        fn deinitImpl(ptr: *anyopaque) void {
+            _ = ptr;
+        }
+
+        const vtable_instance = IBuffer.VTable{
+            .caps = undefined,
+            .type = undefined,
+            .update = undefined,
+            .is_synchronous = undefined,
+            .good = undefined,
+            .dmabuf = Buffer.defaultDmabuf,
+            .shm = Buffer.defaultShm,
+            .begin_data_ptr = Buffer.defaultBeginDataPtr,
+            .end_data_ptr = Buffer.defaultEndDataPtr,
+            .send_release = sendReleaseImpl,
+            .lock = lockImpl,
+            .unlock = unlockImpl,
+            .locked = lockedImpl,
+            .deinit = deinitImpl,
+        };
+    };
+
+    var test_buf = TestBuffer{
+        .base = Buffer.init(testing.allocator),
+        .release_counter = &release_count,
+    };
+    defer test_buf.base.deinit();
+
+    const ibuf = IBuffer{
+        .ptr = &test_buf,
+        .vtable = &TestBuffer.vtable_instance,
+    };
+
+    // Lock 3 times
+    ibuf.lock();
+    ibuf.lock();
+    ibuf.lock();
+    try testing.expectEqual(@as(u32, 0), release_count);
+
+    // Unlock twice - should not release yet
+    ibuf.unlock();
+    ibuf.unlock();
+    try testing.expectEqual(@as(u32, 0), release_count);
+
+    // Final unlock - should call sendRelease
+    ibuf.unlock();
+    try testing.expectEqual(@as(u32, 1), release_count);
+}
