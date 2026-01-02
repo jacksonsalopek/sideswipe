@@ -143,10 +143,18 @@ pub const Output = struct {
             if (self.surface) |surf| {
                 self.xdg_surface = c.xdg_wm_base_get_xdg_surface(xdg, surf);
                 if (self.xdg_surface) |xdg_surf| {
-                    // TODO: Add xdg_surface listener
+                    const xdg_surface_listener = c.xdg_surface_listener{
+                        .configure = xdgSurfaceHandleConfigure,
+                    };
+                    _ = c.xdg_surface_add_listener(xdg_surf, &xdg_surface_listener, self);
+
                     self.xdg_toplevel = c.xdg_surface_get_toplevel(xdg_surf);
                     if (self.xdg_toplevel) |toplevel| {
-                        // TODO: Add toplevel listener
+                        const toplevel_listener = c.xdg_toplevel_listener{
+                            .configure = xdgToplevelHandleConfigure,
+                            .close = xdgToplevelHandleClose,
+                        };
+                        _ = c.xdg_toplevel_add_listener(toplevel, &toplevel_listener, self);
                         c.xdg_toplevel_set_title(toplevel, self.name.ptr);
                         c.wl_surface_commit(surf);
                     }
@@ -309,9 +317,32 @@ pub const Output = struct {
     }
 
     pub fn setCursorVisible(self: *Self, visible: bool) void {
-        _ = self;
-        _ = visible;
-        // TODO: Implement cursor visibility
+        if (self.backend.pointers.items.len == 0) return;
+        if (self.cursor_serial == 0) return;
+
+        const pointer = self.backend.pointers.items[0];
+
+        if (visible) {
+            // Show cursor with current surface
+            if (self.cursor_surface) |surf| {
+                c.wl_pointer_set_cursor(
+                    pointer.wl_pointer,
+                    self.cursor_serial,
+                    surf,
+                    @intFromFloat(self.cursor_hotspot.x),
+                    @intFromFloat(self.cursor_hotspot.y),
+                );
+            }
+        } else {
+            // Hide cursor by setting surface to null
+            c.wl_pointer_set_cursor(
+                pointer.wl_pointer,
+                self.cursor_serial,
+                null,
+                0,
+                0,
+            );
+        }
     }
 
     pub fn cursorPlaneSize(self: *Self) Vector2D {
@@ -371,7 +402,32 @@ pub const Output = struct {
         self.ready_for_frame_callback = false;
 
         self.frame_callback = c.wl_surface_frame(self.surface.?);
-        // TODO: Add frame callback listener
+        if (self.frame_callback) |cb| {
+            const listener = c.wl_callback_listener{
+                .done = frameCallbackDone,
+            };
+            _ = c.wl_callback_add_listener(cb, &listener, self);
+        }
+    }
+
+    fn frameCallbackDone(data: ?*anyopaque, callback: ?*c.wl_callback, callback_data: u32) callconv(.C) void {
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
+        _ = callback_data;
+
+        // Destroy the callback
+        if (callback) |cb| {
+            c.wl_callback_destroy(cb);
+        }
+        self.frame_callback = null;
+
+        // If a frame was scheduled while waiting, schedule another
+        if (self.frame_scheduled_while_waiting) {
+            self.frame_scheduled_while_waiting = false;
+            self.frame_scheduled = false;
+            self.scheduleFrame(.unknown);
+        }
+
+        // TODO: Emit frame event to coordinator
     }
 
     pub fn onEnter(self: *Self, serial: u32) void {
@@ -389,6 +445,30 @@ pub const Output = struct {
                 @intFromFloat(self.cursor_hotspot.y),
             );
         }
+    }
+
+    // XDG surface callbacks
+    fn xdgSurfaceHandleConfigure(data: ?*anyopaque, xdg_surface: ?*c.xdg_surface, serial: u32) callconv(.C) void {
+        _ = data;
+        if (xdg_surface) |surf| {
+            c.xdg_surface_ack_configure(surf, serial);
+        }
+    }
+
+    fn xdgToplevelHandleConfigure(data: ?*anyopaque, xdg_toplevel: ?*c.xdg_toplevel, _width: i32, _height: i32, states: ?*c.wl_array) callconv(.C) void {
+        _ = data;
+        _ = xdg_toplevel;
+        _ = _width;
+        _ = _height;
+        _ = states;
+        // TODO: Update output mode with new dimensions when compositor requests resize
+    }
+
+    fn xdgToplevelHandleClose(data: ?*anyopaque, xdg_toplevel: ?*c.xdg_toplevel) callconv(.C) void {
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
+        _ = xdg_toplevel;
+        // Output should be closed/destroyed
+        _ = self.destroy();
     }
 
     // VTable implementation
@@ -656,6 +736,39 @@ pub const Backend = struct {
         return .wayland;
     }
 
+    // Registry callbacks
+    fn registryHandleGlobal(data: ?*anyopaque, registry: ?*c.wl_registry, name: u32, interface: [*c]const u8, version: u32) callconv(.C) void {
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
+        const reg = registry orelse return;
+        const interface_name = std.mem.span(interface);
+
+        if (std.mem.eql(u8, interface_name, "wl_compositor")) {
+            self.wayland_state.compositor = @ptrCast(c.wl_registry_bind(reg, name, &c.wl_compositor_interface, @min(version, 4)));
+            self.coordinator.log(.debug, "Bound wl_compositor");
+        } else if (std.mem.eql(u8, interface_name, "wl_seat")) {
+            self.wayland_state.seat = @ptrCast(c.wl_registry_bind(reg, name, &c.wl_seat_interface, @min(version, 7)));
+            self.initSeat();
+            self.coordinator.log(.debug, "Bound wl_seat");
+        } else if (std.mem.eql(u8, interface_name, "xdg_wm_base")) {
+            self.wayland_state.xdg_wm_base = @ptrCast(c.wl_registry_bind(reg, name, &c.xdg_wm_base_interface, @min(version, 2)));
+            self.initShell();
+            self.coordinator.log(.debug, "Bound xdg_wm_base");
+        } else if (std.mem.eql(u8, interface_name, "zwp_linux_dmabuf_v1")) {
+            self.wayland_state.dmabuf = @ptrCast(c.wl_registry_bind(reg, name, &c.zwp_linux_dmabuf_v1_interface, @min(version, 4)));
+            _ = self.initDmabuf() catch {
+                self.wayland_state.dmabuf_failed = true;
+            };
+            self.coordinator.log(.debug, "Bound zwp_linux_dmabuf_v1");
+        }
+    }
+
+    fn registryHandleGlobalRemove(data: ?*anyopaque, registry: ?*c.wl_registry, name: u32) callconv(.C) void {
+        _ = data;
+        _ = registry;
+        _ = name;
+        // Handle global removal if needed
+    }
+
     pub fn start(self: *Self) bool {
         self.coordinator.log(.debug, "Starting Wayland backend");
 
@@ -679,8 +792,14 @@ pub const Backend = struct {
             return false;
         }
 
-        // TODO: Setup registry listener
-        // For now, do a roundtrip
+        // Setup registry listener
+        const listener = c.wl_registry_listener{
+            .global = registryHandleGlobal,
+            .global_remove = registryHandleGlobalRemove,
+        };
+        _ = c.wl_registry_add_listener(self.wayland_state.registry.?, &listener, self);
+
+        // Do roundtrip to process registry events
         _ = c.wl_display_roundtrip(self.wayland_state.display.?);
 
         return true;
@@ -723,23 +842,258 @@ pub const Backend = struct {
         try self.outputs.append(self.allocator, output);
     }
 
+    // Seat capability callbacks
+    fn seatHandleCapabilities(data: ?*anyopaque, seat: ?*c.wl_seat, capabilities: u32) callconv(.C) void {
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
+        const seat_ptr = seat orelse return;
+
+        // Handle pointer capability
+        if (capabilities & c.WL_SEAT_CAPABILITY_POINTER != 0) {
+            if (self.pointers.items.len == 0) {
+                const wl_pointer = c.wl_seat_get_pointer(seat_ptr);
+                if (wl_pointer) |ptr| {
+                    const pointer = Pointer.create(self.allocator, ptr, self) catch return;
+                    self.pointers.append(self.allocator, pointer) catch {
+                        pointer.deinit();
+                        return;
+                    };
+
+                    const listener = c.wl_pointer_listener{
+                        .enter = pointerHandleEnter,
+                        .leave = pointerHandleLeave,
+                        .motion = pointerHandleMotion,
+                        .button = pointerHandleButton,
+                        .axis = pointerHandleAxis,
+                        .frame = pointerHandleFrame,
+                        .axis_source = pointerHandleAxisSource,
+                        .axis_stop = pointerHandleAxisStop,
+                        .axis_discrete = pointerHandleAxisDiscrete,
+                    };
+                    _ = c.wl_pointer_add_listener(ptr, &listener, self);
+                }
+            }
+        } else {
+            // Pointer capability removed
+            for (self.pointers.items) |pointer| {
+                pointer.deinit();
+            }
+            self.pointers.clearRetainingCapacity();
+        }
+
+        // Handle keyboard capability
+        if (capabilities & c.WL_SEAT_CAPABILITY_KEYBOARD != 0) {
+            if (self.keyboards.items.len == 0) {
+                const wl_keyboard = c.wl_seat_get_keyboard(seat_ptr);
+                if (wl_keyboard) |kbd| {
+                    const keyboard = Keyboard.create(self.allocator, kbd, self) catch return;
+                    self.keyboards.append(self.allocator, keyboard) catch {
+                        keyboard.deinit();
+                        return;
+                    };
+
+                    const listener = c.wl_keyboard_listener{
+                        .keymap = keyboardHandleKeymap,
+                        .enter = keyboardHandleEnter,
+                        .leave = keyboardHandleLeave,
+                        .key = keyboardHandleKey,
+                        .modifiers = keyboardHandleModifiers,
+                        .repeat_info = keyboardHandleRepeatInfo,
+                    };
+                    _ = c.wl_keyboard_add_listener(kbd, &listener, self);
+                }
+            }
+        } else {
+            // Keyboard capability removed
+            for (self.keyboards.items) |keyboard| {
+                keyboard.deinit();
+            }
+            self.keyboards.clearRetainingCapacity();
+        }
+    }
+
+    fn seatHandleName(data: ?*anyopaque, seat: ?*c.wl_seat, name: [*c]const u8) callconv(.C) void {
+        _ = data;
+        _ = seat;
+        _ = name;
+    }
+
+    // Pointer event callbacks
+    fn pointerHandleEnter(data: ?*anyopaque, pointer: ?*c.wl_pointer, serial: u32, surface: ?*c.wl_surface, surface_x: c.wl_fixed_t, surface_y: c.wl_fixed_t) callconv(.C) void {
+        _ = pointer;
+        _ = surface_x;
+        _ = surface_y;
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
+        const surf = surface orelse return;
+
+        self.last_enter_serial = serial;
+
+        // Find which output this surface belongs to
+        for (self.outputs.items) |output| {
+            if (output.surface == surf) {
+                self.focused_output = output;
+                output.onEnter(serial);
+                break;
+            }
+        }
+    }
+
+    fn pointerHandleLeave(data: ?*anyopaque, pointer: ?*c.wl_pointer, serial: u32, surface: ?*c.wl_surface) callconv(.C) void {
+        _ = pointer;
+        _ = serial;
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
+        const surf = surface orelse return;
+
+        // Clear focused output if it matches
+        if (self.focused_output) |output| {
+            if (output.surface == surf) {
+                self.focused_output = null;
+            }
+        }
+    }
+
+    fn pointerHandleMotion(data: ?*anyopaque, pointer: ?*c.wl_pointer, time: u32, surface_x: c.wl_fixed_t, surface_y: c.wl_fixed_t) callconv(.C) void {
+        _ = data;
+        _ = pointer;
+        _ = time;
+        _ = surface_x;
+        _ = surface_y;
+        // TODO: Emit pointer motion event
+    }
+
+    fn pointerHandleButton(data: ?*anyopaque, pointer: ?*c.wl_pointer, serial: u32, time: u32, button: u32, state: u32) callconv(.C) void {
+        _ = data;
+        _ = pointer;
+        _ = serial;
+        _ = time;
+        _ = button;
+        _ = state;
+        // TODO: Emit pointer button event
+    }
+
+    fn pointerHandleAxis(data: ?*anyopaque, pointer: ?*c.wl_pointer, time: u32, axis: u32, value: c.wl_fixed_t) callconv(.C) void {
+        _ = data;
+        _ = pointer;
+        _ = time;
+        _ = axis;
+        _ = value;
+        // TODO: Emit pointer axis event
+    }
+
+    fn pointerHandleFrame(data: ?*anyopaque, pointer: ?*c.wl_pointer) callconv(.C) void {
+        _ = data;
+        _ = pointer;
+    }
+
+    fn pointerHandleAxisSource(data: ?*anyopaque, pointer: ?*c.wl_pointer, axis_source: u32) callconv(.C) void {
+        _ = data;
+        _ = pointer;
+        _ = axis_source;
+    }
+
+    fn pointerHandleAxisStop(data: ?*anyopaque, pointer: ?*c.wl_pointer, time: u32, axis: u32) callconv(.C) void {
+        _ = data;
+        _ = pointer;
+        _ = time;
+        _ = axis;
+    }
+
+    fn pointerHandleAxisDiscrete(data: ?*anyopaque, pointer: ?*c.wl_pointer, axis: u32, discrete: i32) callconv(.C) void {
+        _ = data;
+        _ = pointer;
+        _ = axis;
+        _ = discrete;
+    }
+
+    // Keyboard event callbacks
+    fn keyboardHandleKeymap(data: ?*anyopaque, keyboard: ?*c.wl_keyboard, format: u32, fd: i32, size: u32) callconv(.C) void {
+        _ = data;
+        _ = keyboard;
+        _ = format;
+        _ = size;
+        // Close the keymap fd
+        std.posix.close(fd);
+        // TODO: Parse and store keymap
+    }
+
+    fn keyboardHandleEnter(data: ?*anyopaque, keyboard: ?*c.wl_keyboard, serial: u32, surface: ?*c.wl_surface, keys: ?*c.wl_array) callconv(.C) void {
+        _ = data;
+        _ = keyboard;
+        _ = serial;
+        _ = surface;
+        _ = keys;
+        // TODO: Handle keyboard focus
+    }
+
+    fn keyboardHandleLeave(data: ?*anyopaque, keyboard: ?*c.wl_keyboard, serial: u32, surface: ?*c.wl_surface) callconv(.C) void {
+        _ = data;
+        _ = keyboard;
+        _ = serial;
+        _ = surface;
+        // TODO: Handle keyboard focus loss
+    }
+
+    fn keyboardHandleKey(data: ?*anyopaque, keyboard: ?*c.wl_keyboard, serial: u32, time: u32, key: u32, state: u32) callconv(.C) void {
+        _ = data;
+        _ = keyboard;
+        _ = serial;
+        _ = time;
+        _ = key;
+        _ = state;
+        // TODO: Emit keyboard key event
+    }
+
+    fn keyboardHandleModifiers(data: ?*anyopaque, keyboard: ?*c.wl_keyboard, serial: u32, mods_depressed: u32, mods_latched: u32, mods_locked: u32, group: u32) callconv(.C) void {
+        _ = data;
+        _ = keyboard;
+        _ = serial;
+        _ = mods_depressed;
+        _ = mods_latched;
+        _ = mods_locked;
+        _ = group;
+        // TODO: Handle modifier state changes
+    }
+
+    fn keyboardHandleRepeatInfo(data: ?*anyopaque, keyboard: ?*c.wl_keyboard, rate: i32, delay: i32) callconv(.C) void {
+        _ = data;
+        _ = keyboard;
+        _ = rate;
+        _ = delay;
+        // TODO: Store repeat info
+    }
+
     fn initSeat(self: *Self) void {
         if (self.wayland_state.seat == null) return;
 
-        // TODO: Add seat listeners for keyboard, pointer, etc.
+        const seat = self.wayland_state.seat.?;
+        const listener = c.wl_seat_listener{
+            .capabilities = seatHandleCapabilities,
+            .name = seatHandleName,
+        };
+        _ = c.wl_seat_add_listener(seat, &listener, self);
     }
 
     fn initShell(self: *Self) void {
         if (self.wayland_state.xdg_wm_base == null) return;
 
-        // TODO: Add xdg_wm_base listener
+        const xdg = self.wayland_state.xdg_wm_base.?;
+        const listener = c.xdg_wm_base_listener{
+            .ping = xdgWmBasePing,
+        };
+        _ = c.xdg_wm_base_add_listener(xdg, &listener, self);
+    }
+
+    fn xdgWmBasePing(data: ?*anyopaque, xdg_wm_base: ?*c.xdg_wm_base, serial: u32) callconv(.C) void {
+        _ = data;
+        if (xdg_wm_base) |xdg| {
+            c.xdg_wm_base_pong(xdg, serial);
+        }
     }
 
     fn initDmabuf(self: *Self) !bool {
         if (self.wayland_state.dmabuf == null) return false;
 
         // TODO: Setup dmabuf listeners and format enumeration
-        
+
         return true;
     }
 

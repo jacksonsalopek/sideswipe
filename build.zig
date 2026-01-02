@@ -143,6 +143,19 @@ pub fn build(b: *std.Build) void {
     // Note: backend.drm uses relative imports and is tested via backend module tests
     // Cannot be tested standalone due to module path restrictions
 
+    // IPC module for inter-process communication
+    const ipc_mod = b.addModule("ipc", .{
+        .root_source_file = b.path("src/ipc/root.zig"),
+        .target = target,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "core", .module = core_mod },
+            .{ .name = "backend", .module = backend_mod },
+        },
+    });
+    ipc_mod.addImport("core.math", core_math_mod);
+    ipc_mod.addImport("core.os", core_os_mod);
+
     // Wayland protocol sources
     const xdg_shell_c = b.addObject(.{
         .name = "xdg-shell-protocol",
@@ -184,6 +197,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "core", .module = core_mod },
                 .{ .name = "backend", .module = backend_mod },
+                .{ .name = "ipc", .module = ipc_mod },
             },
         }),
     });
@@ -343,6 +357,25 @@ pub fn build(b: *std.Build) void {
 
     // Test backend.drm module (uses relative imports, tested via backend tests)
 
+    // Test IPC module
+    const ipc_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/ipc/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "core", .module = core_mod },
+                .{ .name = "backend", .module = backend_mod },
+                .{ .name = "core.math", .module = core_math_mod },
+                .{ .name = "core.os", .module = core_os_mod },
+            },
+        }),
+    });
+    ipc_tests.linkLibC();
+    const run_ipc_tests = b.addRunArtifact(ipc_tests);
+    test_step.dependOn(&run_ipc_tests.step);
+
     // Test a specific file with module access
     const test_file_step = b.step("test-file", "Run tests for a specific file with module access");
     if (b.option([]const u8, "file", "Path to file to test")) |file_path| {
@@ -360,6 +393,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "core.i18n", .module = core_i18n_mod },
                     .{ .name = "core.string", .module = core_string_mod },
                     .{ .name = "backend", .module = backend_mod },
+                    .{ .name = "ipc", .module = ipc_mod },
                 },
             }),
         });
