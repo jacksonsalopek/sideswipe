@@ -2,6 +2,7 @@ const std = @import("std");
 const backend = @import("backend");
 const core = @import("core");
 const cli = @import("core.cli");
+const wayland = @import("wayland");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -55,40 +56,43 @@ pub fn main() !void {
         logger.debug("Logger initialized successfully", .{});
     }
 
-    if (parser.getString("output")) |output| {
-        logger.info("Output file: {s}", .{output});
-    }
+    // Initialize Wayland server
+    logger.info("Initializing Wayland server...", .{});
+    var server = try wayland.Server.init(allocator, null);
+    defer server.deinit();
 
-    // Test backend functionality
-    const is_enabled = backend.util.Env.enabled("SIDESWIPE_ENABLED");
-    const is_disabled = backend.util.Env.explicitlyDisabled("SIDESWIPE_DISABLED");
-    const trace = backend.util.Env.isTrace();
+    const socket_name = server.getSocketName();
+    logger.info("Wayland server listening on: {s}", .{socket_name});
+    logger.info("Set WAYLAND_DISPLAY={s} to connect clients", .{socket_name});
 
-    logger.debug("Backend enabled: {}", .{is_enabled});
-    logger.debug("Backend explicitly disabled: {}", .{is_disabled});
-    logger.trace("Trace enabled: {}", .{trace});
+    // TODO: Set up signal handlers for graceful shutdown (SIGINT, SIGTERM)
 
-    // Test format name conversion
-    const invalid_format_name = try backend.util.Fmt.fourccToName(0, allocator);
-    defer allocator.free(invalid_format_name);
-    logger.debug("Format 0 name: {s}", .{invalid_format_name});
+    // TODO: Register protocol globals
+    // - wl_compositor for surface creation
+    // - wl_subcompositor for subsurfaces
+    // - xdg_wm_base for XDG shell protocol
+    // - wl_seat for input devices
+    // - wl_output for display information
+    // - wl_data_device_manager for clipboard/drag-and-drop
 
-    // Test with a known format (XRGB8888)
-    const DRM_FORMAT_XRGB8888: u32 = ('X') | (@as(u32, 'R') << 8) | (@as(u32, '2') << 16) | (@as(u32, '4') << 24);
-    const xrgb_name = try backend.util.Fmt.fourccToName(DRM_FORMAT_XRGB8888, allocator);
-    defer allocator.free(xrgb_name);
-    logger.debug("XRGB8888 format name: {s}", .{xrgb_name});
+    // TODO: Initialize backend
+    // - Detect and initialize DRM/KMS for native rendering
+    // - Or use Wayland backend for nested compositor testing
+    // - Set up output configuration
+    // - Initialize renderer (EGL/OpenGL ES)
 
-    // Demonstrate different log levels
-    logger.trace("This is a trace message", .{});
-    logger.warn("This is a warning", .{});
-    logger.err("This is an error (don't worry, it's just a demo)", .{});
+    // TODO: Initialize input management
+    // - Set up libinput for keyboard/mouse/touch
+    // - Create seat and input device handlers
 
-    // Demonstrate logger connection
-    var conn = cli.LoggerConnection.init(allocator, &logger);
-    defer conn.deinit();
-    try conn.setName("MainModule");
-    conn.debug("Message from logger connection", .{});
+    logger.info("Starting compositor event loop...", .{});
+    logger.info("Press Ctrl+C to exit", .{});
 
-    logger.info("Sideswipe initialization complete", .{});
+    // Run the main event loop
+    // In production, we'd integrate with:
+    // - Backend rendering loop
+    // - Input event processing
+    // - Client protocol handlers
+    // - Animation frame callbacks
+    server.run();
 }

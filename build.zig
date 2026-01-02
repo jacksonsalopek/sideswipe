@@ -163,6 +163,14 @@ pub fn build(b: *std.Build) void {
     ipc_mod.addImport("core.math", core_math_mod);
     ipc_mod.addImport("core.os", core_os_mod);
 
+    // Wayland server module
+    const wayland_mod = b.addModule("wayland", .{
+        .root_source_file = b.path("src/wayland/root.zig"),
+        .target = target,
+        .link_libc = true,
+    });
+    wayland_mod.linkSystemLibrary("wayland-server", .{});
+
     // Wayland protocol sources
     const xdg_shell_c = b.addObject(.{
         .name = "xdg-shell-protocol",
@@ -206,6 +214,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "core.cli", .module = core_cli_mod },
                 .{ .name = "backend", .module = backend_mod },
                 .{ .name = "ipc", .module = ipc_mod },
+                .{ .name = "wayland", .module = wayland_mod },
             },
         }),
     });
@@ -221,6 +230,7 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("libudev");
     exe.linkSystemLibrary("libseat");
     exe.linkSystemLibrary("wayland-client");
+    exe.linkSystemLibrary("wayland-server");
     exe.linkSystemLibrary("wayland-cursor");
     exe.linkSystemLibrary("libdisplay-info");
     exe.linkLibC();
@@ -399,6 +409,23 @@ pub fn build(b: *std.Build) void {
     const run_ipc_tests = b.addRunArtifact(ipc_tests);
     test_step.dependOn(&run_ipc_tests.step);
 
+    // Test Wayland module
+    const wayland_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/wayland/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "core", .module = core_mod },
+            },
+        }),
+    });
+    wayland_tests.linkSystemLibrary("wayland-server");
+    wayland_tests.linkLibC();
+    const run_wayland_tests = b.addRunArtifact(wayland_tests);
+    test_step.dependOn(&run_wayland_tests.step);
+
     // Test a specific file with module access
     const test_file_step = b.step("test-file", "Run tests for a specific file with module access");
     if (b.option([]const u8, "file", "Path to file to test")) |file_path| {
@@ -418,6 +445,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "core.string", .module = core_string_mod },
                     .{ .name = "backend", .module = backend_mod },
                     .{ .name = "ipc", .module = ipc_mod },
+                    .{ .name = "wayland", .module = wayland_mod },
                 },
             }),
         });
@@ -433,6 +461,7 @@ pub fn build(b: *std.Build) void {
         file_tests.linkSystemLibrary("libudev");
         file_tests.linkSystemLibrary("libseat");
         file_tests.linkSystemLibrary("wayland-client");
+        file_tests.linkSystemLibrary("wayland-server");
         file_tests.linkSystemLibrary("wayland-cursor");
         file_tests.linkSystemLibrary("libdisplay-info");
         file_tests.linkLibC();
