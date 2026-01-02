@@ -2,8 +2,9 @@
 //! Coordinates multiple backend implementations, session, and allocators
 
 const std = @import("std");
-const allocator_mod = @import("allocator.zig");
-const session_mod = @import("session.zig");
+const Interface = @import("core").vtable.Interface;
+const allocator = @import("allocator.zig");
+const session = @import("session.zig");
 const misc = @import("misc.zig");
 
 /// Backend type enumeration
@@ -51,11 +52,10 @@ pub const PollFd = struct {
 };
 
 /// Backend implementation interface
-pub const IBackendImplementation = struct {
-    ptr: *anyopaque,
-    vtable: *const VTable,
+pub const Implementation = struct {
+    base: Interface(VTableDef),
 
-    pub const VTable = struct {
+    pub const VTableDef = struct {
         backend_type: *const fn (ptr: *anyopaque) Type,
         start: *const fn (ptr: *anyopaque) bool,
         poll_fds: *const fn (ptr: *anyopaque) []const PollFd,
@@ -66,36 +66,42 @@ pub const IBackendImplementation = struct {
         deinit: *const fn (ptr: *anyopaque) void,
     };
 
-    pub fn backendType(self: IBackendImplementation) Type {
-        return self.vtable.backend_type(self.ptr);
+    const Self = @This();
+
+    pub fn init(ptr: anytype, vtable: *const VTableDef) Self {
+        return .{ .base = Interface(VTableDef).init(ptr, vtable) };
     }
 
-    pub fn start(self: IBackendImplementation) bool {
-        return self.vtable.start(self.ptr);
+    pub fn backendType(self: Self) Type {
+        return self.base.vtable.backend_type(self.base.ptr);
     }
 
-    pub fn pollFds(self: IBackendImplementation) []const PollFd {
-        return self.vtable.poll_fds(self.ptr);
+    pub fn start(self: Self) bool {
+        return self.base.vtable.start(self.base.ptr);
     }
 
-    pub fn drmFd(self: IBackendImplementation) i32 {
-        return self.vtable.drm_fd(self.ptr);
+    pub fn pollFds(self: Self) []const PollFd {
+        return self.base.vtable.poll_fds(self.base.ptr);
     }
 
-    pub fn drmRenderNodeFd(self: IBackendImplementation) i32 {
-        return self.vtable.drm_render_node_fd(self.ptr);
+    pub fn drmFd(self: Self) i32 {
+        return self.base.vtable.drm_fd(self.base.ptr);
     }
 
-    pub fn getRenderFormats(self: IBackendImplementation) []const misc.DRMFormat {
-        return self.vtable.get_render_formats(self.ptr);
+    pub fn drmRenderNodeFd(self: Self) i32 {
+        return self.base.vtable.drm_render_node_fd(self.base.ptr);
     }
 
-    pub fn onReady(self: IBackendImplementation) void {
-        self.vtable.on_ready(self.ptr);
+    pub fn getRenderFormats(self: Self) []const misc.DRMFormat {
+        return self.base.vtable.get_render_formats(self.base.ptr);
     }
 
-    pub fn deinit(self: IBackendImplementation) void {
-        self.vtable.deinit(self.ptr);
+    pub fn onReady(self: Self) void {
+        self.base.vtable.on_ready(self.base.ptr);
+    }
+
+    pub fn deinit(self: Self) void {
+        self.base.vtable.deinit(self.base.ptr);
     }
 };
 
@@ -104,9 +110,9 @@ pub const Coordinator = struct {
     allocator: std.mem.Allocator,
     options: Options,
     implementation_options: []const ImplementationOptions,
-    implementations: std.ArrayList(IBackendImplementation),
-    primary_allocator: ?allocator_mod.IAllocator = null,
-    session: ?*session_mod.Type = null,
+    implementations: std.ArrayList(Implementation),
+    primary_allocator: ?allocator.Interface = null,
+    session: ?*session.Type = null,
     ready: bool = false,
     idle_fd: i32 = -1,
 
@@ -114,7 +120,7 @@ pub const Coordinator = struct {
 
     /// Create a new backend with the given implementations and options
     pub fn create(
-        allocator: std.mem.Allocator,
+        alloc: std.mem.Allocator,
         backends: []const ImplementationOptions,
         options: Options,
     ) !*Self {
@@ -122,14 +128,14 @@ pub const Coordinator = struct {
             return error.NoBackendsSpecified;
         }
 
-        const self = try allocator.create(Self);
-        errdefer allocator.destroy(self);
+        const self = try alloc.create(Self);
+        errdefer alloc.destroy(self);
 
         self.* = .{
-            .allocator = allocator,
+            .allocator = alloc,
             .options = options,
             .implementation_options = backends,
-            .implementations = std.ArrayList(IBackendImplementation){},
+            .implementations = std.ArrayList(Implementation){},
         };
 
         // Create timerfd for idle events

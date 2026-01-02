@@ -1,5 +1,5 @@
 const std = @import("std");
-const Transform = @import("transform.zig").Transform;
+const Transform = @import("transform.zig").Direction;
 
 pub const Type = struct {
     v: @Vector(2, f32) = @splat(0),

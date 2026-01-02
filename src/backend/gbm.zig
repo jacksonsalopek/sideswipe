@@ -3,9 +3,9 @@
 
 const std = @import("std");
 const math = @import("core.math");
-const Vector2D = math.Vector2D;
-const allocator_mod = @import("allocator.zig");
-const buffer_mod = @import("buffer.zig");
+const Vector2D = math.vector2d.Type;
+const allocator = @import("allocator.zig");
+const Buffer = @import("buffer.zig").Interface;
 
 const gbm = @cImport({
     @cInclude("gbm.h");
@@ -13,30 +13,30 @@ const gbm = @cImport({
 
 /// GBM allocator using libgbm
 pub const GBMAllocator = struct {
-    base: allocator_mod.Allocator,
+    base: allocator.Implementation,
     drm_fd: i32,
     gbm_device: ?*gbm.struct_gbm_device = null,
 
     const Self = @This();
 
     /// Create a GBM allocator for the given DRM file descriptor
-    pub fn create(allocator: std.mem.Allocator, drm_fd: i32) !*Self {
+    pub fn create(alloc: std.mem.Allocator, drm_fd: i32) !*Self {
         if (drm_fd < 0) {
             return error.InvalidDrmFd;
         }
 
-        const self = try allocator.create(Self);
-        errdefer allocator.destroy(self);
+        const self = try alloc.create(Self);
+        errdefer alloc.destroy(self);
 
         self.* = .{
-            .base = allocator_mod.Allocator.init(allocator),
+            .base = allocator.Implementation.init(alloc),
             .drm_fd = drm_fd,
         };
 
         // Initialize GBM device
         self.gbm_device = gbm.gbm_create_device(drm_fd);
         if (self.gbm_device == null) {
-            allocator.destroy(self);
+            alloc.destroy(self);
             return error.GbmDeviceCreationFailed;
         }
 
@@ -54,8 +54,8 @@ pub const GBMAllocator = struct {
     }
 
     /// Get the VTable for this allocator to use as IAllocator
-    pub fn asInterface(self: *Self) allocator_mod.IAllocator {
-        const vtable = comptime allocator_mod.IAllocator.VTable{
+    pub fn asInterface(self: *Self) allocator.Interface {
+        const vtable = comptime allocator.Interface.VTableDef{
             .acquire = acquireImpl,
             .get_backend = getBackendImpl,
             .drm_fd = drmFdImpl,
@@ -64,17 +64,14 @@ pub const GBMAllocator = struct {
             .deinit = deinitImpl,
         };
 
-        return .{
-            .ptr = self,
-            .vtable = &vtable,
-        };
+        return allocator.Interface.init(self, &vtable);
     }
 
     fn acquireImpl(
         ptr: *anyopaque,
-        params: *const allocator_mod.BufferParams,
+        params: *const allocator.BufferParams,
         swapchain: ?*anyopaque,
-    ) anyerror!buffer_mod.IBuffer {
+    ) anyerror!Buffer {
         const self: *Self = @ptrCast(@alignCast(ptr));
         _ = swapchain; // TODO: Use for buffer tracking
 
@@ -100,7 +97,7 @@ pub const GBMAllocator = struct {
             return error.GbmAllocationFailed;
         }
 
-        // TODO: Wrap GBM BO in IBuffer and return
+        // TODO: Wrap GBM BO in Buffer and return
         // For now, clean up and return error
         gbm.gbm_bo_destroy(bo);
         return error.NotFullyImplemented;
@@ -116,7 +113,7 @@ pub const GBMAllocator = struct {
         return self.drm_fd;
     }
 
-    fn allocatorTypeImpl(ptr: *anyopaque) allocator_mod.Type {
+    fn allocatorTypeImpl(ptr: *anyopaque) allocator.Type {
         _ = ptr;
         return .gbm;
     }
@@ -145,12 +142,12 @@ test "GBMAllocator - interface type is GBM" {
 
     // Use a fake fd for testing (won't actually initialize GBM)
     var alloc_impl = GBMAllocator{
-        .base = allocator_mod.Allocator.init(testing.allocator),
+        .base = allocator.Implementation.init(testing.allocator),
         .drm_fd = 99,
     };
     defer alloc_impl.base.deinit();
 
     const interface = alloc_impl.asInterface();
-    try testing.expectEqual(allocator_mod.Type.gbm, interface.allocatorType());
+    try testing.expectEqual(allocator.Type.gbm, interface.allocatorType());
     try testing.expectEqual(@as(i32, 99), interface.drmFd());
 }

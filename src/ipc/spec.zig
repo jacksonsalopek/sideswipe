@@ -1,6 +1,7 @@
 //! Protocol specification system
 
 const std = @import("std");
+const Interface = @import("core").vtable.Interface;
 const message = @import("message.zig");
 const Magic = message.Magic;
 
@@ -13,11 +14,10 @@ pub const Method = struct {
 };
 
 /// Object specification interface
-pub const ObjectSpec = struct {
-    ptr: *anyopaque,
-    vtable: *const VTable,
+pub const Object = struct {
+    base: Interface(VTableDef),
 
-    pub const VTable = struct {
+    pub const VTableDef = struct {
         object_name: *const fn (ptr: *anyopaque) []const u8,
         /// Client-to-server methods
         c2s: *const fn (ptr: *anyopaque) []const Method,
@@ -26,53 +26,64 @@ pub const ObjectSpec = struct {
         deinit: *const fn (ptr: *anyopaque) void,
     };
 
-    pub fn objectName(self: ObjectSpec) []const u8 {
-        return self.vtable.object_name(self.ptr);
+    const Self = @This();
+
+    pub fn init(ptr: anytype, vtable: *const VTableDef) Self {
+        return .{ .base = Interface(VTableDef).init(ptr, vtable) };
     }
 
-    pub fn clientToServer(self: ObjectSpec) []const Method {
-        return self.vtable.c2s(self.ptr);
+    pub fn objectName(self: Self) []const u8 {
+        return self.base.vtable.object_name(self.base.ptr);
     }
 
-    pub fn serverToClient(self: ObjectSpec) []const Method {
-        return self.vtable.s2c(self.ptr);
+    pub fn clientToServer(self: Self) []const Method {
+        return self.base.vtable.c2s(self.base.ptr);
     }
 
-    pub fn deinit(self: ObjectSpec) void {
-        self.vtable.deinit(self.ptr);
+    pub fn serverToClient(self: Self) []const Method {
+        return self.base.vtable.s2c(self.base.ptr);
+    }
+
+    pub fn deinit(self: Self) void {
+        self.base.vtable.deinit(self.base.ptr);
     }
 };
 
 /// Protocol specification interface
 pub const Protocol = struct {
-    ptr: *anyopaque,
-    vtable: *const VTable,
+    base: Interface(VTableDef),
 
-    pub const VTable = struct {
+    pub const VTableDef = struct {
         spec_name: *const fn (ptr: *anyopaque) []const u8,
         spec_ver: *const fn (ptr: *anyopaque) u32,
-        objects: *const fn (ptr: *anyopaque) []const ObjectSpec,
+        objects: *const fn (ptr: *anyopaque) []const Object,
         deinit: *const fn (ptr: *anyopaque) void,
     };
 
-    pub fn specName(self: Protocol) []const u8 {
-        return self.vtable.spec_name(self.ptr);
+    const Self = @This();
+
+    pub fn init(ptr: anytype, vtable: *const VTableDef) Self {
+        return .{ .base = Interface(VTableDef).init(ptr, vtable) };
     }
 
-    pub fn specVer(self: Protocol) u32 {
-        return self.vtable.spec_ver(self.ptr);
+    pub fn specName(self: Self) []const u8 {
+        return self.base.vtable.spec_name(self.base.ptr);
     }
 
-    pub fn objects(self: Protocol) []const ObjectSpec {
-        return self.vtable.objects(self.ptr);
+    pub fn specVer(self: Self) u32 {
+        return self.base.vtable.spec_ver(self.base.ptr);
     }
 
-    pub fn deinit(self: Protocol) void {
-        self.vtable.deinit(self.ptr);
+    pub fn objects(self: Self) []const Object {
+        return self.base.vtable.objects(self.base.ptr);
+    }
+
+    pub fn deinit(self: Self) void {
+        self.base.vtable.deinit(self.base.ptr);
     }
 
     /// Format as protocol spec string (name@version)
-    pub fn formatSpec(self: Protocol, allocator: std.mem.Allocator) ![]u8 {
+    pub fn formatSpec(self: Self, allocator: std.mem.Allocator) ![]u8 {
         return try std.fmt.allocPrint(allocator, "{s}@{d}", .{ self.specName(), self.specVer() });
     }
 };
@@ -165,11 +176,11 @@ test "Instance - destroy callback" {
     State.destroyed = false;
 
     var obj = Instance.init(testing.allocator, 1, "test", 1);
-    
+
     var dummy_data: u32 = 0;
     obj.setData(&dummy_data);
     obj.setOnDestroy(State.destroyCallback);
-    
+
     obj.deinit();
 
     try testing.expect(State.destroyed);
@@ -202,7 +213,7 @@ test "ObjectSpec - interface" {
             _ = ptr;
         }
 
-        const vtable_instance = ObjectSpec.VTable{
+        const vtable_instance = Object.VTableDef{
             .object_name = objectNameFn,
             .c2s = c2sFn,
             .s2c = s2cFn,
@@ -223,10 +234,7 @@ test "ObjectSpec - interface" {
         .s2c_methods = &[_]Method{},
     };
 
-    const spec = ObjectSpec{
-        .ptr = &mock,
-        .vtable = &MockObjectSpec.vtable_instance,
-    };
+    const spec = Object.init(&mock, &MockObjectSpec.vtable_instance);
 
     try testing.expectEqualStrings("TestObject", spec.objectName());
     try testing.expectEqual(@as(usize, 1), spec.clientToServer().len);
@@ -239,7 +247,7 @@ test "Protocol - interface" {
     const MockProtocolSpec = struct {
         name: []const u8,
         version: u32,
-        object_specs: []const ObjectSpec,
+        object_specs: []const Object,
 
         fn specNameFn(ptr: *anyopaque) []const u8 {
             const self: *@This() = @ptrCast(@alignCast(ptr));
@@ -251,7 +259,7 @@ test "Protocol - interface" {
             return self.version;
         }
 
-        fn objectsFn(ptr: *anyopaque) []const ObjectSpec {
+        fn objectsFn(ptr: *anyopaque) []const Object {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             return self.object_specs;
         }
@@ -260,7 +268,7 @@ test "Protocol - interface" {
             _ = ptr;
         }
 
-        const vtable_instance = Protocol.VTable{
+        const vtable_instance = Protocol.VTableDef{
             .spec_name = specNameFn,
             .spec_ver = specVerFn,
             .objects = objectsFn,
@@ -271,13 +279,10 @@ test "Protocol - interface" {
     var mock = MockProtocolSpec{
         .name = "test_protocol",
         .version = 1,
-        .object_specs = &[_]ObjectSpec{},
+        .object_specs = &[_]Object{},
     };
 
-    const spec = Protocol{
-        .ptr = &mock,
-        .vtable = &MockProtocolSpec.vtable_instance,
-    };
+    const spec = Protocol.init(&mock, &MockProtocolSpec.vtable_instance);
 
     try testing.expectEqualStrings("test_protocol", spec.specName());
     try testing.expectEqual(@as(u32, 1), spec.specVer());

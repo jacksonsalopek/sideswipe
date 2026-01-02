@@ -1,6 +1,7 @@
-const Box = @import("box.zig").Box;
-const Mat3x3 = @import("mat3x3.zig").Mat3x3;
-const Transform = @import("transform.zig").Transform;
+const std = @import("std");
+const Box = @import("box.zig").Type;
+const Mat3x3 = @import("mat3x3.zig").Type;
+const Transform = @import("transform.zig").Direction;
 
 pub fn transformBox(box: Box, t: Transform, box_width: f32, box_height: f32) Box {
     _ = box_width;
@@ -30,8 +31,6 @@ pub fn transformBox(box: Box, t: Transform, box_width: f32, box_height: f32) Box
         .height = y2 - y1,
     };
 }
-
-const std = @import("std");
 
 test "transformBox - identity transform" {
     const box = Box{ .x = 10, .y = 20, .width = 100, .height = 50 };

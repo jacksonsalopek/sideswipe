@@ -929,7 +929,7 @@ pub const IKeyboard = blk: {
         deinit: *const fn (ptr: *anyopaque) void,
     };
 
-    const Base = core.vtable.VTable(VTableDef);
+    const Base = core.vtable.Interface(VTableDef);
 
     break :blk struct {
         base: Base,
@@ -1438,7 +1438,7 @@ test "Manager - recover from libinput context failure" {
     // The Manager.init function should handle these error cases:
     // - error.LibinputContextFailed: when libinput_udev_create_context fails
     // - error.SeatAssignFailed: when libinput_udev_assign_seat fails
-    
+
     // In production code, these errors would be caught and handled appropriately
     // by the caller (e.g., retrying initialization or falling back to a different backend)
 }

@@ -10,7 +10,7 @@ pub const IAttachment = blk: {
         deinit: *const fn (ptr: *anyopaque) void,
     };
 
-    const Base = core.vtable.VTable(VTableDef);
+    const Base = core.vtable.Interface(VTableDef);
 
     break :blk struct {
         base: Base,

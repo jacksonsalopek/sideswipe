@@ -7,7 +7,7 @@ const string = @import("core.string").string;
 const F_DUPFD_CLOEXEC: i32 = 1030;
 
 /// Errors that can occur when reading files
-pub const FileError = error{
+pub const Error = error{
     FileNotFound,
     AccessDenied,
     IsDirectory,
@@ -16,18 +16,18 @@ pub const FileError = error{
 };
 
 /// RAII wrapper for Unix file descriptors
-/// Inspired by hyprutils CFileDescriptor
-pub const FileDescriptor = struct {
+/// Inspired by hyprutils CDescriptor
+pub const Descriptor = struct {
     fd: posix.fd_t = -1,
 
     const Self = @This();
 
-    /// Create a FileDescriptor from a raw file descriptor
+    /// Create a Descriptor from a raw file descriptor
     pub fn init(fd: posix.fd_t) Self {
         return .{ .fd = fd };
     }
 
-    /// Create an invalid FileDescriptor
+    /// Create an invalid Descriptor
     pub fn initInvalid() Self {
         return .{ .fd = -1 };
     }
@@ -49,14 +49,14 @@ pub const FileDescriptor = struct {
 
     /// Get file descriptor flags
     pub fn getFlags(self: Self) !i32 {
-        if (!self.isValid()) return error.InvalidFileDescriptor;
+        if (!self.isValid()) return error.InvalidDescriptor;
         const result = try posix.fcntl(self.fd, posix.F.GETFD, 0);
         return @intCast(result);
     }
 
     /// Set file descriptor flags
     pub fn setFlags(self: Self, flags: i32) !void {
-        if (!self.isValid()) return error.InvalidFileDescriptor;
+        if (!self.isValid()) return error.InvalidDescriptor;
         _ = try posix.fcntl(self.fd, posix.F.SETFD, @as(u32, @intCast(flags)));
     }
 
@@ -127,13 +127,13 @@ pub const FileDescriptor = struct {
 
 /// Read entire file contents as a string
 /// Caller owns the returned memory and must free it
-pub fn readFileAsString(allocator: std.mem.Allocator, path: string) (FileError || std.fs.File.OpenError || std.fs.File.ReadError)![]u8 {
+pub fn readFileAsString(allocator: std.mem.Allocator, path: string) (Error || std.fs.File.OpenError || std.fs.File.ReadError)![]u8 {
     // Check if file exists and is accessible
     const file = std.fs.cwd().openFile(path, .{}) catch |err| {
         return switch (err) {
-            error.FileNotFound => FileError.FileNotFound,
-            error.AccessDenied => FileError.AccessDenied,
-            error.IsDir => FileError.IsDirectory,
+            error.FileNotFound => Error.FileNotFound,
+            error.AccessDenied => Error.AccessDenied,
+            error.IsDir => Error.IsDirectory,
             else => err,
         };
     };
@@ -150,12 +150,12 @@ pub fn readFileAsString(allocator: std.mem.Allocator, path: string) (FileError |
 
 /// Read entire file contents as a string with a maximum size limit
 /// Caller owns the returned memory and must free it
-pub fn readFileAsStringWithLimit(allocator: std.mem.Allocator, path: string, max_size: usize) (FileError || std.fs.File.OpenError || std.fs.File.ReadError)![]u8 {
+pub fn readFileAsStringWithLimit(allocator: std.mem.Allocator, path: string, max_size: usize) (Error || std.fs.File.OpenError || std.fs.File.ReadError)![]u8 {
     const file = std.fs.cwd().openFile(path, .{}) catch |err| {
         return switch (err) {
-            error.FileNotFound => FileError.FileNotFound,
-            error.AccessDenied => FileError.AccessDenied,
-            error.IsDir => FileError.IsDirectory,
+            error.FileNotFound => Error.FileNotFound,
+            error.AccessDenied => Error.AccessDenied,
+            error.IsDir => Error.IsDirectory,
             else => err,
         };
     };
@@ -194,7 +194,7 @@ test "readFileAsString - file not found" {
     const allocator = std.testing.allocator;
 
     const result = readFileAsString(allocator, "/nonexistent/file/path/does/not/exist.txt");
-    try std.testing.expectError(FileError.FileNotFound, result);
+    try std.testing.expectError(Error.FileNotFound, result);
 }
 
 test "readFileAsStringWithLimit - respect size limit" {
@@ -243,7 +243,7 @@ test "readFileAsString - empty file" {
     try std.testing.expectEqual(@as(usize, 0), contents.len);
 }
 
-test "FileDescriptor - basic operations" {
+test "Descriptor - basic operations" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
@@ -251,7 +251,7 @@ test "FileDescriptor - basic operations" {
     defer test_file.close();
 
     const raw_fd = test_file.handle;
-    var fd = FileDescriptor.init(raw_fd);
+    var fd = Descriptor.init(raw_fd);
 
     try std.testing.expect(fd.isValid());
     try std.testing.expectEqual(raw_fd, fd.get());
@@ -261,22 +261,22 @@ test "FileDescriptor - basic operations" {
     _ = taken;
 }
 
-test "FileDescriptor - invalid descriptor" {
-    var fd = FileDescriptor.initInvalid();
+test "Descriptor - invalid descriptor" {
+    var fd = Descriptor.initInvalid();
     defer fd.deinit();
 
     try std.testing.expect(!fd.isValid());
     try std.testing.expectEqual(@as(posix.fd_t, -1), fd.get());
 }
 
-test "FileDescriptor - take ownership" {
+test "Descriptor - take ownership" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
     const test_file = try test_dir.dir.createFile("test.txt", .{});
     const raw_fd = test_file.handle;
 
-    var fd = FileDescriptor.init(raw_fd);
+    var fd = Descriptor.init(raw_fd);
     try std.testing.expect(fd.isValid());
 
     const taken_fd = fd.take();
@@ -287,14 +287,14 @@ test "FileDescriptor - take ownership" {
     posix.close(taken_fd);
 }
 
-test "FileDescriptor - reset" {
+test "Descriptor - reset" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
     const test_file = try test_dir.dir.createFile("test.txt", .{});
     const raw_fd = test_file.handle;
 
-    var fd = FileDescriptor.init(raw_fd);
+    var fd = Descriptor.init(raw_fd);
     try std.testing.expect(fd.isValid());
 
     // Don't close via test_file since fd now owns it
@@ -304,7 +304,7 @@ test "FileDescriptor - reset" {
     try std.testing.expect(!fd.isValid());
 }
 
-test "FileDescriptor - duplicate" {
+test "Descriptor - duplicate" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
@@ -312,7 +312,7 @@ test "FileDescriptor - duplicate" {
     defer test_file.close();
 
     const raw_fd = test_file.handle;
-    const fd1 = FileDescriptor.init(raw_fd);
+    const fd1 = Descriptor.init(raw_fd);
 
     // Duplicate with CLOEXEC flag
     var fd2 = try fd1.duplicate(F_DUPFD_CLOEXEC);
@@ -327,7 +327,7 @@ test "FileDescriptor - duplicate" {
     _ = taken;
 }
 
-test "FileDescriptor - isReadable" {
+test "Descriptor - isReadable" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
@@ -342,7 +342,7 @@ test "FileDescriptor - isReadable" {
     const test_file = try test_dir.dir.openFile("test.txt", .{});
     defer test_file.close();
 
-    var fd = FileDescriptor.init(test_file.handle);
+    var fd = Descriptor.init(test_file.handle);
 
     // File should be readable (has content)
     try std.testing.expect(fd.isReadable());
@@ -352,14 +352,14 @@ test "FileDescriptor - isReadable" {
     _ = taken;
 }
 
-test "FileDescriptor - getFlags and setFlags" {
+test "Descriptor - getFlags and setFlags" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
     const test_file = try test_dir.dir.createFile("test.txt", .{});
     defer test_file.close();
 
-    var fd = FileDescriptor.init(test_file.handle);
+    var fd = Descriptor.init(test_file.handle);
     defer {
         const taken = fd.take();
         _ = taken;
@@ -375,7 +375,7 @@ test "FileDescriptor - getFlags and setFlags" {
     try std.testing.expectEqual(@as(i32, posix.FD_CLOEXEC), new_flags);
 }
 
-test "FileDescriptor - comprehensive duplicate test" {
+test "Descriptor - comprehensive duplicate test" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
@@ -383,7 +383,7 @@ test "FileDescriptor - comprehensive duplicate test" {
     const raw_fd = test_file.handle;
 
     // fd1 wraps raw_fd but doesn't own it (test_file owns it)
-    var fd1 = FileDescriptor.init(raw_fd);
+    var fd1 = Descriptor.init(raw_fd);
 
     // Both should be valid and readable initially
     try std.testing.expect(fd1.isValid());
@@ -401,7 +401,7 @@ test "FileDescriptor - comprehensive duplicate test" {
 
     // Take ownership from fd2 to fd3 (ownership transfer)
     const fd3_raw = fd2.take();
-    var fd3 = FileDescriptor.init(fd3_raw);
+    var fd3 = Descriptor.init(fd3_raw);
 
     // fd2 is now invalid (ownership transferred)
     try std.testing.expect(fd1.isValid());
@@ -428,14 +428,14 @@ test "FileDescriptor - comprehensive duplicate test" {
     test_file.close();
 }
 
-test "FileDescriptor - reset makes non-readable" {
+test "Descriptor - reset makes non-readable" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
     const test_file = try test_dir.dir.createFile("test.txt", .{});
     const raw_fd = test_file.handle;
 
-    var fd = FileDescriptor.init(raw_fd);
+    var fd = Descriptor.init(raw_fd);
     try std.testing.expect(fd.isValid());
 
     // Reset should close and make it non-readable
@@ -447,14 +447,14 @@ test "FileDescriptor - reset makes non-readable" {
     _ = test_file.handle;
 }
 
-test "FileDescriptor - isClosed after close" {
+test "Descriptor - isClosed after close" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
     const test_file = try test_dir.dir.createFile("test.txt", .{});
     const raw_fd = test_file.handle;
 
-    var fd = FileDescriptor.init(raw_fd);
+    var fd = Descriptor.init(raw_fd);
     try std.testing.expect(!fd.isClosed());
 
     fd.reset();
@@ -463,7 +463,7 @@ test "FileDescriptor - isClosed after close" {
     _ = test_file.handle;
 }
 
-test "FileDescriptor - double take is safe" {
+test "Descriptor - double take is safe" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
@@ -471,7 +471,7 @@ test "FileDescriptor - double take is safe" {
     defer test_file.close();
     const raw_fd = test_file.handle;
 
-    var fd = FileDescriptor.init(raw_fd);
+    var fd = Descriptor.init(raw_fd);
 
     // First take
     const taken1 = fd.take();
@@ -484,14 +484,14 @@ test "FileDescriptor - double take is safe" {
     try std.testing.expect(!fd.isValid());
 }
 
-test "FileDescriptor - deinit after take is safe" {
+test "Descriptor - deinit after take is safe" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
     const test_file = try test_dir.dir.createFile("test.txt", .{});
     const raw_fd = test_file.handle;
 
-    var fd = FileDescriptor.init(raw_fd);
+    var fd = Descriptor.init(raw_fd);
 
     // Take ownership
     const taken = fd.take();
@@ -508,7 +508,7 @@ test "FileDescriptor - deinit after take is safe" {
     _ = test_file.handle;
 }
 
-test "FileDescriptor - multiple duplicates from same source" {
+test "Descriptor - multiple duplicates from same source" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
@@ -516,7 +516,7 @@ test "FileDescriptor - multiple duplicates from same source" {
     defer test_file.close();
     const raw_fd = test_file.handle;
 
-    var fd1 = FileDescriptor.init(raw_fd);
+    var fd1 = Descriptor.init(raw_fd);
 
     // Create multiple duplicates
     var fd2 = try fd1.duplicate(F_DUPFD_CLOEXEC);
@@ -541,14 +541,14 @@ test "FileDescriptor - multiple duplicates from same source" {
     _ = fd1.take();
 }
 
-test "FileDescriptor - reset multiple times is safe" {
+test "Descriptor - reset multiple times is safe" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
     const test_file = try test_dir.dir.createFile("test.txt", .{});
     const raw_fd = test_file.handle;
 
-    var fd = FileDescriptor.init(raw_fd);
+    var fd = Descriptor.init(raw_fd);
 
     // First reset
     fd.reset();
@@ -565,8 +565,8 @@ test "FileDescriptor - reset multiple times is safe" {
     _ = test_file.handle;
 }
 
-test "FileDescriptor - operations on invalid fd" {
-    var fd = FileDescriptor.initInvalid();
+test "Descriptor - operations on invalid fd" {
+    var fd = Descriptor.initInvalid();
 
     // All operations should handle invalid fd gracefully
     try std.testing.expect(!fd.isValid());
@@ -575,11 +575,11 @@ test "FileDescriptor - operations on invalid fd" {
 
     // getFlags on invalid should error
     const flags_result = fd.getFlags();
-    try std.testing.expectError(error.InvalidFileDescriptor, flags_result);
+    try std.testing.expectError(error.InvalidDescriptor, flags_result);
 
     // setFlags on invalid should error
     const set_result = fd.setFlags(posix.FD_CLOEXEC);
-    try std.testing.expectError(error.InvalidFileDescriptor, set_result);
+    try std.testing.expectError(error.InvalidDescriptor, set_result);
 
     // duplicate on invalid should return invalid
     const dup = try fd.duplicate(F_DUPFD_CLOEXEC);

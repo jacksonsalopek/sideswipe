@@ -1,18 +1,19 @@
 const std = @import("std");
+const VTable = @import("core").vtable.Interface;
 const math = @import("core.math");
-const Vector2D = math.Vector2D;
+const vector2d = math.vector2d;
 const attachment = @import("attachment.zig");
 
 /// Buffer capability flags
-pub const BufferCapability = packed struct(u32) {
+pub const Capability = packed struct(u32) {
     dataptr: bool = false,
     _padding: u31 = 0,
 
-    pub const none: BufferCapability = .{};
+    pub const none: Capability = .{};
 };
 
 /// Buffer type enumeration
-pub const BufferType = enum(u32) {
+pub const Type = enum(u32) {
     dmabuf = 0,
     shm = 1,
     misc = 2,
@@ -21,7 +22,7 @@ pub const BufferType = enum(u32) {
 /// DMA-BUF attributes
 pub const DMABUFAttrs = struct {
     success: bool = false,
-    size: Vector2D = .{},
+    size: vector2d.Type = .{},
     format: u32 = 0, // fourcc
     modifier: u64 = 0,
     planes: i32 = 1,
@@ -35,7 +36,7 @@ pub const SSHMAttrs = struct {
     success: bool = false,
     fd: i32 = 0,
     format: u32 = 0,
-    size: Vector2D = .{},
+    size: vector2d.Type = .{},
     stride: i32 = 0,
     offset: i64 = 0,
 };
@@ -48,15 +49,14 @@ pub const DataPtrResult = struct {
 };
 
 /// Buffer interface using vtable pattern
-pub const IBuffer = struct {
-    ptr: *anyopaque,
-    vtable: *const VTable,
+pub const Interface = struct {
+    base: VTable(VTableDef),
 
-    pub const VTable = struct {
+    pub const VTableDef = struct {
         /// Get buffer capabilities
-        caps: *const fn (ptr: *anyopaque) BufferCapability,
+        caps: *const fn (ptr: *anyopaque) Capability,
         /// Get buffer type
-        type: *const fn (ptr: *anyopaque) BufferType,
+        type: *const fn (ptr: *anyopaque) Type,
         /// Update buffer with damage region
         update: *const fn (ptr: *anyopaque, damage: *const anyopaque) void,
         /// Check if buffer updates are synchronous (CPU-based)
@@ -83,66 +83,72 @@ pub const IBuffer = struct {
         deinit: *const fn (ptr: *anyopaque) void,
     };
 
-    pub fn caps(self: IBuffer) BufferCapability {
-        return self.vtable.caps(self.ptr);
+    const Self = @This();
+
+    pub fn init(ptr: anytype, vtable: *const VTableDef) Self {
+        return .{ .base = VTable(VTableDef).init(ptr, vtable) };
     }
 
-    pub fn bufferType(self: IBuffer) BufferType {
-        return self.vtable.type(self.ptr);
+    pub fn caps(self: Self) Capability {
+        return self.base.vtable.caps(self.base.ptr);
     }
 
-    pub fn update(self: IBuffer, damage: *const anyopaque) void {
-        self.vtable.update(self.ptr, damage);
+    pub fn bufferType(self: Self) Type {
+        return self.base.vtable.type(self.base.ptr);
     }
 
-    pub fn isSynchronous(self: IBuffer) bool {
-        return self.vtable.is_synchronous(self.ptr);
+    pub fn update(self: Self, damage: *const anyopaque) void {
+        self.base.vtable.update(self.base.ptr, damage);
     }
 
-    pub fn good(self: IBuffer) bool {
-        return self.vtable.good(self.ptr);
+    pub fn isSynchronous(self: Self) bool {
+        return self.base.vtable.is_synchronous(self.base.ptr);
     }
 
-    pub fn dmabuf(self: IBuffer) DMABUFAttrs {
-        return self.vtable.dmabuf(self.ptr);
+    pub fn good(self: Self) bool {
+        return self.base.vtable.good(self.base.ptr);
     }
 
-    pub fn shm(self: IBuffer) SSHMAttrs {
-        return self.vtable.shm(self.ptr);
+    pub fn dmabuf(self: Self) DMABUFAttrs {
+        return self.base.vtable.dmabuf(self.base.ptr);
     }
 
-    pub fn beginDataPtr(self: IBuffer, flags: u32) DataPtrResult {
-        return self.vtable.begin_data_ptr(self.ptr, flags);
+    pub fn shm(self: Self) SSHMAttrs {
+        return self.base.vtable.shm(self.base.ptr);
     }
 
-    pub fn endDataPtr(self: IBuffer) void {
-        self.vtable.end_data_ptr(self.ptr);
+    pub fn beginDataPtr(self: Self, flags: u32) DataPtrResult {
+        return self.base.vtable.begin_data_ptr(self.base.ptr, flags);
     }
 
-    pub fn sendRelease(self: IBuffer) void {
-        self.vtable.send_release(self.ptr);
+    pub fn endDataPtr(self: Self) void {
+        self.base.vtable.end_data_ptr(self.base.ptr);
     }
 
-    pub fn lock(self: IBuffer) void {
-        self.vtable.lock(self.ptr);
+    pub fn sendRelease(self: Self) void {
+        self.base.vtable.send_release(self.base.ptr);
     }
 
-    pub fn unlock(self: IBuffer) void {
-        self.vtable.unlock(self.ptr);
+    pub fn lock(self: Self) void {
+        self.base.vtable.lock(self.base.ptr);
     }
 
-    pub fn locked(self: IBuffer) bool {
-        return self.vtable.locked(self.ptr);
+    pub fn unlock(self: Self) void {
+        self.base.vtable.unlock(self.base.ptr);
     }
 
-    pub fn deinit(self: IBuffer) void {
-        self.vtable.deinit(self.ptr);
+    pub fn locked(self: Self) bool {
+        return self.base.vtable.locked(self.base.ptr);
+    }
+
+    pub fn deinit(self: Self) void {
+        self.base.vtable.deinit(self.base.ptr);
     }
 };
 
 /// Base buffer implementation with default behavior
 pub const Buffer = struct {
-    size: Vector2D = .{},
+    size: vector2d.Type = .{},
     is_opaque: bool = false,
     locked_by_backend: bool = false,
     locks: i32 = 0,
@@ -228,18 +234,15 @@ pub const ExampleBuffer = struct {
         self.base.deinit();
     }
 
-    pub fn interface(self: *Self) IBuffer {
-        return .{
-            .ptr = self,
-            .vtable = &vtable,
-        };
+    pub fn interface(self: *Self) Interface {
+        return Interface.init(self, &vtable);
     }
 
-    fn caps(_: *anyopaque) BufferCapability {
-        return BufferCapability.none;
+    fn caps(_: *anyopaque) Capability {
+        return Capability.none;
     }
 
-    fn bufferType(_: *anyopaque) BufferType {
+    fn bufferType(_: *anyopaque) Type {
         return .misc;
     }
 
@@ -260,7 +263,7 @@ pub const ExampleBuffer = struct {
         self.deinit();
     }
 
-    const vtable = IBuffer.VTable{
+    const vtable = Interface.VTableDef{
         .caps = caps,
         .type = bufferType,
         .update = update,
@@ -278,18 +281,18 @@ pub const ExampleBuffer = struct {
     };
 };
 
-test "BufferCapability - flags" {
-    const cap1 = BufferCapability.none;
+test "Capability - flags" {
+    const cap1 = Capability.none;
     try std.testing.expect(!cap1.dataptr);
 
-    const cap2 = BufferCapability{ .dataptr = true };
+    const cap2 = Capability{ .dataptr = true };
     try std.testing.expect(cap2.dataptr);
 }
 
-test "BufferType - enumeration" {
-    try std.testing.expectEqual(BufferType.dmabuf, .dmabuf);
-    try std.testing.expectEqual(BufferType.shm, .shm);
-    try std.testing.expectEqual(BufferType.misc, .misc);
+test "Type - enumeration" {
+    try std.testing.expectEqual(Type.dmabuf, .dmabuf);
+    try std.testing.expectEqual(Type.shm, .shm);
+    try std.testing.expectEqual(Type.misc, .misc);
 }
 
 test "DMABUFAttrs - default values" {
@@ -307,7 +310,7 @@ test "ExampleBuffer - interface and locking" {
     const ibuf = buffer.interface();
     try std.testing.expect(ibuf.good());
     try std.testing.expect(ibuf.isSynchronous());
-    try std.testing.expectEqual(BufferType.misc, ibuf.bufferType());
+    try std.testing.expectEqual(Type.misc, ibuf.bufferType());
 
     // Test locking mechanism
     try std.testing.expect(!ibuf.locked());
@@ -414,7 +417,7 @@ test "Buffer - DMABUFAttrs validation (planes, strides, offsets)" {
 
     const attrs = DMABUFAttrs{
         .success = true,
-        .size = Vector2D.init(1920, 1080),
+        .size = vector2d.Type.init(1920, 1080),
         .format = 0x34325258,
         .modifier = 0x0100000000000002,
         .planes = 3,
@@ -497,7 +500,7 @@ test "Buffer - sendRelease called only when fully unlocked" {
             _ = ptr;
         }
 
-        const vtable_instance = IBuffer.VTable{
+        const vtable_instance = Interface.VTableDef{
             .caps = undefined,
             .type = undefined,
             .update = undefined,
@@ -521,10 +524,7 @@ test "Buffer - sendRelease called only when fully unlocked" {
     };
     defer test_buf.base.deinit();
 
-    const ibuf = IBuffer{
-        .ptr = &test_buf,
-        .vtable = &TestBuffer.vtable_instance,
-    };
+    const ibuf = Interface.init(&test_buf, &TestBuffer.vtable_instance);
 
     // Lock 3 times
     ibuf.lock();

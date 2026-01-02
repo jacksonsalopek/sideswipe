@@ -2,13 +2,13 @@
 //! Provides compositor-hosted backend using Wayland protocol
 
 const std = @import("std");
-const backend_mod = @import("backend.zig");
-const output_mod = @import("output.zig");
-const input_mod = @import("input.zig");
-const buffer_mod = @import("buffer.zig");
+const backend = @import("backend.zig");
+const output = @import("output.zig");
+const input = @import("input.zig");
+const buffer = @import("buffer.zig");
 const misc = @import("misc.zig");
 const math = @import("core.math");
-const Vector2D = math.Vector2D;
+const Vector2D = math.vector2d.Type;
 
 const c = @cImport({
     @cInclude("wayland-client.h");
@@ -25,25 +25,25 @@ const c = @cImport({
 /// Wayland buffer wrapper
 pub const Buffer = struct {
     wl_buffer: ?*c.wl_buffer = null,
-    buffer: buffer_mod.IBuffer,
+    buffer: buffer.Interface,
     backend: *Backend,
     pending_release: bool = false,
     allocator: std.mem.Allocator,
 
     const Self = @This();
 
-    pub fn create(allocator: std.mem.Allocator, buf: buffer_mod.IBuffer, backend: *Backend) !*Self {
+    pub fn create(allocator: std.mem.Allocator, buf: buffer.Interface, be: *Backend) !*Self {
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
 
         self.* = .{
             .buffer = buf,
-            .backend = backend,
+            .backend = be,
             .allocator = allocator,
         };
 
         // Create wl_buffer from dmabuf
-        if (backend.wayland_state.dmabuf) |dmabuf| {
+        if (be.wayland_state.dmabuf) |dmabuf| {
             const params = c.zwp_linux_dmabuf_v1_create_params(dmabuf);
             if (params == null) {
                 return error.FailedToCreateDmabufParams;
@@ -93,7 +93,7 @@ pub const Output = struct {
     name: []const u8,
     backend: *Backend,
     allocator: std.mem.Allocator,
-    state: output_mod.State,
+    state: output.State,
     needs_frame: bool = false,
     frame_scheduled: bool = false,
     frame_scheduled_while_waiting: bool = false,
@@ -107,7 +107,7 @@ pub const Output = struct {
     frame_callback: ?*c.wl_callback = null,
 
     // Cursor state
-    cursor_buffer: ?buffer_mod.IBuffer = null,
+    cursor_buffer: ?buffer.Interface = null,
     cursor_surface: ?*c.wl_surface = null,
     cursor_wl_buffer: ?*c.wl_buffer = null,
     cursor_serial: u32 = 0,
@@ -115,7 +115,7 @@ pub const Output = struct {
 
     const Self = @This();
 
-    pub fn create(allocator: std.mem.Allocator, name: []const u8, backend: *Backend) !*Self {
+    pub fn create(allocator: std.mem.Allocator, name: []const u8, be: *Backend) !*Self {
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
 
@@ -124,14 +124,14 @@ pub const Output = struct {
 
         self.* = .{
             .name = name_copy,
-            .backend = backend,
+            .backend = be,
             .allocator = allocator,
-            .state = output_mod.State.init(allocator),
+            .state = output.State.init(allocator),
             .buffers = std.ArrayList(*Buffer){},
         };
 
         // Create Wayland surface
-        if (backend.wayland_state.compositor) |compositor| {
+        if (be.wayland_state.compositor) |compositor| {
             self.surface = c.wl_compositor_create_surface(compositor);
             if (self.surface == null) {
                 return error.FailedToCreateSurface;
@@ -246,18 +246,18 @@ pub const Output = struct {
         return self.backend.dmabuf_formats.items;
     }
 
-    pub fn preferredMode(self: *Self) ?*output_mod.Mode {
+    pub fn preferredMode(self: *Self) ?*output.Mode {
         _ = self;
         return null; // Wayland outputs don't have fixed modes
     }
 
-    pub fn setCursor(self: *Self, buffer: buffer_mod.IBuffer, hotspot: Vector2D) bool {
-        self.cursor_buffer = buffer;
+    pub fn setCursor(self: *Self, buf: buffer.Interface, hotspot: Vector2D) bool {
+        self.cursor_buffer = buf;
         self.cursor_hotspot = hotspot;
 
         if (self.cursor_surface == null) return false;
 
-        const attrs = buffer.dmabuf();
+        const attrs = buf.dmabuf();
 
         // Create cursor wl_buffer
         if (self.backend.wayland_state.dmabuf) |dmabuf| {
@@ -350,7 +350,7 @@ pub const Output = struct {
         return Vector2D.init(-1, -1); // No limit
     }
 
-    pub fn scheduleFrame(self: *Self, reason: output_mod.ScheduleReason) void {
+    pub fn scheduleFrame(self: *Self, reason: output.ScheduleReason) void {
         _ = reason;
         self.needs_frame = true;
 
@@ -381,7 +381,7 @@ pub const Output = struct {
         return true;
     }
 
-    fn wlBufferFromBuffer(self: *Self, buf: buffer_mod.IBuffer) !*Buffer {
+    fn wlBufferFromBuffer(self: *Self, buf: buffer.Interface) !*Buffer {
         // Check if buffer already exists
         for (self.buffers.items) |wl_buf| {
             if (wl_buf.buffer.ptr == buf.ptr) {
@@ -472,7 +472,7 @@ pub const Output = struct {
     }
 
     // VTable implementation
-    pub fn iface(self: *Self) output_mod.IOutput {
+    pub fn iface(self: *Self) output.IOutput {
         return .{
             .ptr = @ptrCast(self),
             .vtable = &.{
@@ -514,14 +514,14 @@ pub const Output = struct {
         return self.getRenderFormats();
     }
 
-    fn preferredModeFn(ptr: *anyopaque) ?*output_mod.Mode {
+    fn preferredModeFn(ptr: *anyopaque) ?*output.Mode {
         const self: *Self = @ptrCast(@alignCast(ptr));
         return self.preferredMode();
     }
 
-    fn setCursorFn(ptr: *anyopaque, buffer: buffer_mod.IBuffer, hotspot: Vector2D) bool {
+    fn setCursorFn(ptr: *anyopaque, buf: buffer.Interface, hotspot: Vector2D) bool {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        return self.setCursor(buffer, hotspot);
+        return self.setCursor(buf, hotspot);
     }
 
     fn moveCursorFn(ptr: *anyopaque, coord: Vector2D, skip_schedule: bool) void {
@@ -539,7 +539,7 @@ pub const Output = struct {
         return self.cursorPlaneSize();
     }
 
-    fn scheduleFrameFn(ptr: *anyopaque, reason: output_mod.ScheduleReason) void {
+    fn scheduleFrameFn(ptr: *anyopaque, reason: output.ScheduleReason) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.scheduleFrame(reason);
     }
@@ -574,11 +574,11 @@ pub const Keyboard = struct {
 
     const Self = @This();
 
-    pub fn create(allocator: std.mem.Allocator, wl_keyboard: *c.wl_keyboard, backend: *Backend) !*Self {
+    pub fn create(allocator: std.mem.Allocator, wl_keyboard: *c.wl_keyboard, be: *Backend) !*Self {
         const self = try allocator.create(Self);
         self.* = .{
             .wl_keyboard = wl_keyboard,
-            .backend = backend,
+            .backend = be,
             .allocator = allocator,
         };
         return self;
@@ -603,11 +603,11 @@ pub const Pointer = struct {
 
     const Self = @This();
 
-    pub fn create(allocator: std.mem.Allocator, wl_pointer: *c.wl_pointer, backend: *Backend) !*Self {
+    pub fn create(allocator: std.mem.Allocator, wl_pointer: *c.wl_pointer, be: *Backend) !*Self {
         const self = try allocator.create(Self);
         self.* = .{
             .wl_pointer = wl_pointer,
-            .backend = backend,
+            .backend = be,
             .allocator = allocator,
         };
         return self;
@@ -625,7 +625,7 @@ pub const Pointer = struct {
 
 /// Main Wayland backend implementation
 pub const Backend = struct {
-    coordinator: *backend_mod.Coordinator,
+    coordinator: *backend.Coordinator,
     allocator: std.mem.Allocator,
     outputs: std.ArrayList(*Output),
     keyboards: std.ArrayList(*Keyboard),
@@ -656,7 +656,7 @@ pub const Backend = struct {
 
     const Self = @This();
 
-    pub fn create(allocator: std.mem.Allocator, coordinator: *backend_mod.Coordinator) !*Self {
+    pub fn create(allocator: std.mem.Allocator, coordinator: *backend.Coordinator) !*Self {
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
 
@@ -674,8 +674,8 @@ pub const Backend = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        for (self.outputs.items) |output| {
-            output.deinit();
+        for (self.outputs.items) |out| {
+            out.deinit();
         }
         self.outputs.deinit(self.allocator);
 
@@ -731,7 +731,7 @@ pub const Backend = struct {
         self.allocator.destroy(self);
     }
 
-    pub fn backendType(self: *const Self) backend_mod.Type {
+    pub fn backendType(self: *const Self) backend.Type {
         _ = self;
         return .wayland;
     }
@@ -805,13 +805,13 @@ pub const Backend = struct {
         return true;
     }
 
-    pub fn pollFds(self: *Self) []const backend_mod.PollFd {
+    pub fn pollFds(self: *Self) []const backend.PollFd {
         if (self.wayland_state.display) |disp| {
             const fd = c.wl_display_get_fd(disp);
             // TODO: Return proper poll fd array
             _ = fd;
         }
-        return &[_]backend_mod.PollFd{};
+        return &[_]backend.PollFd{};
     }
 
     pub fn drmFd(self: *const Self) i32 {
@@ -838,8 +838,8 @@ pub const Backend = struct {
             break :blk try std.fmt.bufPrint(&buf, "WL-{d}", .{self.last_output_id});
         };
 
-        const output = try Output.create(self.allocator, output_name, self);
-        try self.outputs.append(self.allocator, output);
+        const out = try Output.create(self.allocator, output_name, self);
+        try self.outputs.append(self.allocator, out);
     }
 
     // Seat capability callbacks
@@ -928,10 +928,10 @@ pub const Backend = struct {
         self.last_enter_serial = serial;
 
         // Find which output this surface belongs to
-        for (self.outputs.items) |output| {
-            if (output.surface == surf) {
-                self.focused_output = output;
-                output.onEnter(serial);
+        for (self.outputs.items) |out| {
+            if (out.surface == surf) {
+                self.focused_output = out;
+                out.onEnter(serial);
                 break;
             }
         }
@@ -944,8 +944,8 @@ pub const Backend = struct {
         const surf = surface orelse return;
 
         // Clear focused output if it matches
-        if (self.focused_output) |output| {
-            if (output.surface == surf) {
+        if (self.focused_output) |out| {
+            if (out.surface == surf) {
                 self.focused_output = null;
             }
         }
@@ -1098,7 +1098,7 @@ pub const Backend = struct {
     }
 
     // VTable implementation
-    pub fn iface(self: *Self) backend_mod.IBackendImplementation {
+    pub fn iface(self: *Self) backend.Implementation {
         return .{
             .ptr = @ptrCast(self),
             .vtable = &.{
@@ -1114,7 +1114,7 @@ pub const Backend = struct {
         };
     }
 
-    fn backendTypeFn(ptr: *anyopaque) backend_mod.Type {
+    fn backendTypeFn(ptr: *anyopaque) backend.Type {
         const self: *Self = @ptrCast(@alignCast(ptr));
         return self.backendType();
     }
@@ -1124,7 +1124,7 @@ pub const Backend = struct {
         return self.start();
     }
 
-    fn pollFdsFn(ptr: *anyopaque) []const backend_mod.PollFd {
+    fn pollFdsFn(ptr: *anyopaque) []const backend.PollFd {
         const self: *Self = @ptrCast(@alignCast(ptr));
         return self.pollFds();
     }
@@ -1159,34 +1159,34 @@ pub const Backend = struct {
 test "Backend - creation and cleanup" {
     const testing = std.testing;
 
-    const backends = [_]backend_mod.ImplementationOptions{
+    const backends = [_]backend.ImplementationOptions{
         .{ .backend_type = .wayland, .request_mode = .if_available },
     };
-    const opts: backend_mod.Options = .{};
+    const opts: backend.Options = .{};
 
-    var coordinator = try backend_mod.Coordinator.create(testing.allocator, &backends, opts);
+    var coordinator = try backend.Coordinator.create(testing.allocator, &backends, opts);
     defer coordinator.deinit();
 
-    var backend = try Backend.create(testing.allocator, coordinator);
-    defer backend.deinit();
+    var backend_impl = try Backend.create(testing.allocator, coordinator);
+    defer backend_impl.deinit();
 
-    try testing.expectEqual(backend_mod.Type.wayland, backend.backendType());
-    try testing.expectEqual(@as(i32, -1), backend.drmFd());
+    try testing.expectEqual(backend.Type.wayland, backend_impl.backendType());
+    try testing.expectEqual(@as(i32, -1), backend_impl.drmFd());
 }
 
 test "Backend - output creation" {
     const testing = std.testing;
 
-    const backends = [_]backend_mod.ImplementationOptions{
+    const backends = [_]backend.ImplementationOptions{
         .{ .backend_type = .wayland, .request_mode = .if_available },
     };
-    const opts: backend_mod.Options = .{};
+    const opts: backend.Options = .{};
 
-    var coordinator = try backend_mod.Coordinator.create(testing.allocator, &backends, opts);
+    var coordinator = try backend.Coordinator.create(testing.allocator, &backends, opts);
     defer coordinator.deinit();
 
-    var backend = try Backend.create(testing.allocator, coordinator);
-    defer backend.deinit();
+    var backend_impl = try Backend.create(testing.allocator, coordinator);
+    defer backend_impl.deinit();
 
-    try testing.expectEqual(@as(usize, 0), backend.outputs.items.len);
+    try testing.expectEqual(@as(usize, 0), backend_impl.outputs.items.len);
 }

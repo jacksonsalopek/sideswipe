@@ -1,11 +1,9 @@
-pub const Box = @import("box.zig").Box;
-pub const Extents = @import("box.zig").Extents;
-pub const Mat3x3 = @import("mat3x3.zig").Mat3x3;
-pub const Region = @import("region.zig").Region;
-pub const Transform = @import("transform.zig").Transform;
-pub const vector2d = @import("vector2d.zig");
-pub const Vector2D = vector2d.Type; // Backward compatibility
+pub const box = @import("box.zig");
+pub const mat3x3 = @import("mat3x3.zig");
+pub const region = @import("region.zig");
+pub const transform = @import("transform.zig");
 pub const transforms = @import("transforms.zig");
+pub const vector2d = @import("vector2d.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

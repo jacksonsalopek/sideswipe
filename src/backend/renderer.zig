@@ -3,8 +3,8 @@
 
 const std = @import("std");
 const math = @import("core.math");
-const Vector2D = math.Vector2D;
-const buffer_mod = @import("buffer.zig");
+const Vector2D = math.vector2d.Type;
+const buffer = @import("buffer.zig");
 const misc = @import("misc.zig");
 
 // Import EGL and OpenGL ES headers
@@ -197,8 +197,8 @@ pub const Renderer = struct {
     /// Blit from one buffer to another (for multi-GPU or format conversion)
     pub fn blit(
         self: *Self,
-        from: buffer_mod.IBuffer,
-        to: buffer_mod.IBuffer,
+        from: buffer.Interface,
+        to: buffer.Interface,
     ) BlitResult {
         _ = self;
         _ = from;
@@ -214,7 +214,7 @@ pub const Renderer = struct {
     }
 
     /// Verify a buffer can be used as blit destination
-    pub fn verifyDestinationDmabuf(self: *Self, attrs: buffer_mod.DMABUFAttrs) bool {
+    pub fn verifyDestinationDmabuf(self: *Self, attrs: buffer.DMABUFAttrs) bool {
         for (self.formats.items) |fmt| {
             if (fmt.drm_format != attrs.format) continue;
             if (fmt.modifier != attrs.modifier) continue;
@@ -233,11 +233,11 @@ pub const Renderer = struct {
     /// Read buffer contents to CPU memory (for multi-GPU)
     pub fn readBuffer(
         self: *Self,
-        buffer: buffer_mod.IBuffer,
+        buf: buffer.Interface,
         out_data: []u8,
     ) bool {
         _ = self;
-        _ = buffer;
+        _ = buf;
         _ = out_data;
 
         // TODO: glReadPixels from buffer

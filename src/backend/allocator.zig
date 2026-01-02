@@ -2,10 +2,10 @@
 //! Provides abstraction for different buffer allocation methods (GBM, DRM dumb buffers)
 
 const std = @import("std");
+const VTable = @import("core").vtable.Interface;
 const math = @import("core.math");
-const Vector2D = math.Vector2D;
+const Vector2D = math.vector2d.Type;
 const buffer = @import("buffer.zig");
-const IBuffer = buffer.IBuffer;
 
 /// DRM format constants (from drm_fourcc.h)
 pub const DRM_FORMAT_INVALID: u32 = 0;
@@ -26,17 +26,16 @@ pub const Type = enum(u32) {
 };
 
 /// Allocator interface using vtable pattern
-pub const IAllocator = struct {
-    ptr: *anyopaque,
-    vtable: *const VTable,
+pub const Interface = struct {
+    base: VTable(VTableDef),
 
-    pub const VTable = struct {
+    pub const VTableDef = struct {
         /// Acquire/allocate a new buffer with the given parameters
         acquire: *const fn (
             ptr: *anyopaque,
             params: *const BufferParams,
             swapchain: ?*anyopaque,
-        ) anyerror!IBuffer,
+        ) anyerror!buffer.Interface,
 
         /// Get the backend associated with this allocator
         get_backend: *const fn (ptr: *anyopaque) ?*anyopaque,
@@ -54,54 +53,60 @@ pub const IAllocator = struct {
         deinit: *const fn (ptr: *anyopaque) void,
     };
 
+    const Self = @This();
+
+    pub fn init(ptr: anytype, vtable: *const VTableDef) Self {
+        return .{ .base = VTable(VTableDef).init(ptr, vtable) };
+    }
+
     /// Acquire a new buffer with the given parameters
     pub fn acquire(
-        self: IAllocator,
+        self: Self,
         params: *const BufferParams,
         swapchain: ?*anyopaque,
-    ) !IBuffer {
-        return self.vtable.acquire(self.ptr, params, swapchain);
+    ) !buffer.Interface {
+        return self.base.vtable.acquire(self.base.ptr, params, swapchain);
     }
 
     /// Get the backend associated with this allocator
-    pub fn getBackend(self: IAllocator) ?*anyopaque {
-        return self.vtable.get_backend(self.ptr);
+    pub fn getBackend(self: Self) ?*anyopaque {
+        return self.base.vtable.get_backend(self.base.ptr);
     }
 
     /// Get the DRM file descriptor
-    pub fn drmFd(self: IAllocator) i32 {
-        return self.vtable.drm_fd(self.ptr);
+    pub fn drmFd(self: Self) i32 {
+        return self.base.vtable.drm_fd(self.base.ptr);
     }
 
     /// Get the allocator type
-    pub fn allocatorType(self: IAllocator) Type {
-        return self.vtable.allocator_type(self.ptr);
+    pub fn allocatorType(self: Self) Type {
+        return self.base.vtable.allocator_type(self.base.ptr);
     }
 
     /// Destroy all buffers allocated by this allocator
-    pub fn destroyBuffers(self: IAllocator) void {
-        self.vtable.destroy_buffers(self.ptr);
+    pub fn destroyBuffers(self: Self) void {
+        self.base.vtable.destroy_buffers(self.base.ptr);
     }
 
     /// Cleanup the allocator
-    pub fn deinit(self: IAllocator) void {
-        self.vtable.deinit(self.ptr);
+    pub fn deinit(self: Self) void {
+        self.base.vtable.deinit(self.base.ptr);
     }
 };
 
 /// Base allocator implementation with common functionality
-pub const Allocator = struct {
+pub const Implementation = struct {
     allocator: std.mem.Allocator,
     drm_fd_value: i32 = -1,
     backend_ptr: ?*anyopaque = null,
-    buffers: std.ArrayList(IBuffer),
+    buffers: std.ArrayList(buffer.Interface),
 
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
             .allocator = allocator,
-            .buffers = std.ArrayList(IBuffer){},
+            .buffers = std.ArrayList(buffer.Interface){},
         };
     }
 
@@ -119,12 +124,12 @@ pub const Allocator = struct {
     }
 
     /// Helper to track a newly allocated buffer
-    pub fn trackBuffer(self: *Self, buf: IBuffer) !void {
+    pub fn trackBuffer(self: *Self, buf: Implementation) !void {
         try self.buffers.append(buf);
     }
 
     /// Helper to untrack a buffer (without destroying it)
-    pub fn untrackBuffer(self: *Self, buf: IBuffer) void {
+    pub fn untrackBuffer(self: *Self, buf: Implementation) void {
         for (self.buffers.items, 0..) |tracked, i| {
             if (tracked.ptr == buf.ptr) {
                 _ = self.buffers.swapRemove(i);
@@ -138,7 +143,7 @@ pub const Allocator = struct {
 test "Allocator - init and deinit" {
     const testing = std.testing;
 
-    var alloc = Allocator.init(testing.allocator);
+    var alloc = Implementation.init(testing.allocator);
     defer alloc.deinit();
 
     try testing.expectEqual(@as(i32, -1), alloc.drm_fd_value);

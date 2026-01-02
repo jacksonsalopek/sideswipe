@@ -1,7 +1,8 @@
 const std = @import("std");
 const Vector2D = @import("vector2d.zig").Type;
-const Box = @import("box.zig").Box;
-const Transform = @import("transform.zig").Transform;
+const Box = @import("box.zig").Type;
+const Transform = @import("transform.zig").Direction;
+const transforms = @import("transforms.zig");
 
 // Import pixman
 const c = @cImport({
@@ -10,11 +11,11 @@ const c = @cImport({
 
 const MAX_REGION_SIDE: i64 = 10000000;
 
-pub const Region = struct {
+pub const Type = struct {
     region: c.pixman_region32_t,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator) Region {
+    pub fn init(allocator: std.mem.Allocator) Type {
         var region: c.pixman_region32_t = undefined;
         c.pixman_region32_init(&region);
         return .{
@@ -23,7 +24,7 @@ pub const Region = struct {
         };
     }
 
-    pub fn initFromPixman(allocator: std.mem.Allocator, ref: *const c.pixman_region32_t) Region {
+    pub fn initFromPixman(allocator: std.mem.Allocator, ref: *const c.pixman_region32_t) Type {
         var region: c.pixman_region32_t = undefined;
         c.pixman_region32_init(&region);
         _ = c.pixman_region32_copy(&region, ref);
@@ -33,7 +34,7 @@ pub const Region = struct {
         };
     }
 
-    pub fn initRect(allocator: std.mem.Allocator, x: f32, y: f32, w: f32, h: f32) Region {
+    pub fn initRect(allocator: std.mem.Allocator, x: f32, y: f32, w: f32, h: f32) Type {
         var region: c.pixman_region32_t = undefined;
         c.pixman_region32_init_rect(&region, @intFromFloat(x), @intFromFloat(y), @intFromFloat(w), @intFromFloat(h));
         return .{
@@ -42,11 +43,11 @@ pub const Region = struct {
         };
     }
 
-    pub fn initFromBox(allocator: std.mem.Allocator, box: Box) Region {
+    pub fn initFromBox(allocator: std.mem.Allocator, box: Box) Type {
         return initRect(allocator, box.x, box.y, box.width, box.height);
     }
 
-    pub fn initFromPixmanBox(allocator: std.mem.Allocator, box: *c.pixman_box32_t) Region {
+    pub fn initFromPixmanBox(allocator: std.mem.Allocator, box: *c.pixman_box32_t) Type {
         var region: c.pixman_region32_t = undefined;
         c.pixman_region32_init_rect(&region, box.x1, box.y1, box.x2 - box.x1, box.y2 - box.y1);
         return .{
@@ -55,11 +56,11 @@ pub const Region = struct {
         };
     }
 
-    pub fn deinit(self: *Region) void {
+    pub fn deinit(self: *Type) void {
         c.pixman_region32_fini(&self.region);
     }
 
-    pub fn clone(self: *const Region) Region {
+    pub fn clone(self: *const Type) Type {
         var region: c.pixman_region32_t = undefined;
         c.pixman_region32_init(&region);
         _ = c.pixman_region32_copy(&region, &self.region);
@@ -69,51 +70,51 @@ pub const Region = struct {
         };
     }
 
-    pub fn clear(self: *Region) *Region {
+    pub fn clear(self: *Type) *Type {
         c.pixman_region32_clear(&self.region);
         return self;
     }
 
-    pub fn set(self: *Region, other: *const Region) *Region {
+    pub fn set(self: *Type, other: *const Type) *Type {
         _ = c.pixman_region32_copy(&self.region, &other.region);
         return self;
     }
 
-    pub fn add(self: *Region, other: *const Region) *Region {
+    pub fn add(self: *Type, other: *const Type) *Type {
         _ = c.pixman_region32_union(&self.region, &self.region, &other.region);
         return self;
     }
 
-    pub fn addRect(self: *Region, x: f32, y: f32, w: f32, h: f32) *Region {
+    pub fn addRect(self: *Type, x: f32, y: f32, w: f32, h: f32) *Type {
         _ = c.pixman_region32_union_rect(&self.region, &self.region, @intFromFloat(x), @intFromFloat(y), @intFromFloat(w), @intFromFloat(h));
         return self;
     }
 
-    pub fn addBox(self: *Region, box: Box) *Region {
+    pub fn addBox(self: *Type, box: Box) *Type {
         return self.addRect(box.x, box.y, box.width, box.height);
     }
 
-    pub fn subtract(self: *Region, other: *const Region) *Region {
+    pub fn subtract(self: *Type, other: *const Type) *Type {
         _ = c.pixman_region32_subtract(&self.region, &self.region, &other.region);
         return self;
     }
 
-    pub fn intersect(self: *Region, other: *const Region) *Region {
+    pub fn intersect(self: *Type, other: *const Type) *Type {
         _ = c.pixman_region32_intersect(&self.region, &self.region, &other.region);
         return self;
     }
 
-    pub fn intersectRect(self: *Region, x: f32, y: f32, w: f32, h: f32) *Region {
+    pub fn intersectRect(self: *Type, x: f32, y: f32, w: f32, h: f32) *Type {
         _ = c.pixman_region32_intersect_rect(&self.region, &self.region, @intFromFloat(x), @intFromFloat(y), @intFromFloat(w), @intFromFloat(h));
         return self;
     }
 
-    pub fn invert(self: *Region, box: *c.pixman_box32_t) *Region {
+    pub fn invert(self: *Type, box: *c.pixman_box32_t) *Type {
         _ = c.pixman_region32_inverse(&self.region, &self.region, box);
         return self;
     }
 
-    pub fn invertBox(self: *Region, box: Box) *Region {
+    pub fn invertBox(self: *Type, box: Box) *Type {
         var pixman_box = c.pixman_box32_t{
             .x1 = @intFromFloat(box.x),
             .y1 = @intFromFloat(box.y),
@@ -123,12 +124,12 @@ pub const Region = struct {
         return self.invert(&pixman_box);
     }
 
-    pub fn translate(self: *Region, vec: Vector2D) *Region {
+    pub fn translate(self: *Type, vec: Vector2D) *Type {
         c.pixman_region32_translate(&self.region, @intFromFloat(vec.getX()), @intFromFloat(vec.getY()));
         return self;
     }
 
-    pub fn transform(self: *Region, t: Transform, w: f32, h: f32) !*Region {
+    pub fn transform(self: *Type, t: Transform, w: f32, h: f32) !*Type {
         if (t == .normal) return self;
 
         const rects = try self.getRects();
@@ -136,7 +137,6 @@ pub const Region = struct {
 
         _ = self.clear();
 
-        const transforms_module = @import("transforms.zig");
         for (rects) |r| {
             var xfmd = Box{
                 .x = @floatFromInt(r.x1),
@@ -144,14 +144,14 @@ pub const Region = struct {
                 .width = @as(f32, @floatFromInt(r.x2)) - @as(f32, @floatFromInt(r.x1)),
                 .height = @as(f32, @floatFromInt(r.y2)) - @as(f32, @floatFromInt(r.y1)),
             };
-            xfmd = transforms_module.transformBox(xfmd, t, w, h);
+            xfmd = transforms.transformBox(xfmd, t, w, h);
             _ = self.addBox(xfmd);
         }
 
         return self;
     }
 
-    pub fn expand(self: *Region, units: f32) !*Region {
+    pub fn expand(self: *Type, units: f32) !*Type {
         const rects = try self.getRects();
         defer self.allocator.free(rects);
 
@@ -170,7 +170,7 @@ pub const Region = struct {
         return self;
     }
 
-    pub fn rationalize(self: *Region) *Region {
+    pub fn rationalize(self: *Type) *Type {
         const bounds = Box{
             .x = -MAX_REGION_SIDE,
             .y = -MAX_REGION_SIDE,
@@ -180,11 +180,11 @@ pub const Region = struct {
         return self.intersectRect(bounds.x, bounds.y, bounds.width, bounds.height);
     }
 
-    pub fn scaleScalar(self: *Region, scale_factor: f32) !*Region {
+    pub fn scaleScalar(self: *Type, scale_factor: f32) !*Type {
         return self.scale(Vector2D.init(scale_factor, scale_factor));
     }
 
-    pub fn scale(self: *Region, scale_vec: Vector2D) !*Region {
+    pub fn scale(self: *Type, scale_vec: Vector2D) !*Type {
         if (scale_vec.getX() == 1.0 and scale_vec.getY() == 1.0) return self;
 
         var rects_num: c_int = 0;
@@ -205,7 +205,7 @@ pub const Region = struct {
         return self;
     }
 
-    pub fn getRects(self: *const Region) ![]c.pixman_box32_t {
+    pub fn getRects(self: *const Type) ![]c.pixman_box32_t {
         var rects_num: c_int = 0;
         const rects_arr = c.pixman_region32_rectangles(&self.region, &rects_num);
 
@@ -215,7 +215,7 @@ pub const Region = struct {
         return result;
     }
 
-    pub fn getExtents(self: *Region) Box {
+    pub fn getExtents(self: *Type) Box {
         const box = c.pixman_region32_extents(&self.region);
         return Box{
             .x = @floatFromInt(box.*.x1),
@@ -225,15 +225,15 @@ pub const Region = struct {
         };
     }
 
-    pub fn containsPoint(self: *const Region, vec: Vector2D) bool {
+    pub fn containsPoint(self: *const Type, vec: Vector2D) bool {
         return c.pixman_region32_contains_point(&self.region, @intFromFloat(vec.getX()), @intFromFloat(vec.getY()), null) != 0;
     }
 
-    pub fn empty(self: *const Region) bool {
+    pub fn empty(self: *const Type) bool {
         return c.pixman_region32_not_empty(&self.region) == 0;
     }
 
-    pub fn closestPoint(self: *const Region, vec: Vector2D) !Vector2D {
+    pub fn closestPoint(self: *const Type, vec: Vector2D) !Vector2D {
         if (self.containsPoint(vec)) return vec;
 
         var best_dist: f32 = std.math.floatMax(f32);
@@ -272,20 +272,20 @@ pub const Region = struct {
         return leader;
     }
 
-    pub fn pixman(self: *const Region) *const c.pixman_region32_t {
+    pub fn pixman(self: *const Type) *const c.pixman_region32_t {
         return &self.region;
     }
 };
 
-test "Region.init and deinit" {
-    var region = Region.init(std.testing.allocator);
+test "Type.init and deinit" {
+    var region = Type.init(std.testing.allocator);
     defer region.deinit();
 
     try std.testing.expect(region.empty());
 }
 
-test "Region.initRect" {
-    var region = Region.initRect(std.testing.allocator, 10, 20, 100, 50);
+test "Type.initRect" {
+    var region = Type.initRect(std.testing.allocator, 10, 20, 100, 50);
     defer region.deinit();
 
     try std.testing.expect(!region.empty());
@@ -297,19 +297,19 @@ test "Region.initRect" {
     try std.testing.expectEqual(@as(f32, 50), extents.height);
 }
 
-test "Region.containsPoint" {
-    var region = Region.initRect(std.testing.allocator, 0, 0, 100, 100);
+test "Type.containsPoint" {
+    var region = Type.initRect(std.testing.allocator, 0, 0, 100, 100);
     defer region.deinit();
 
     try std.testing.expect(region.containsPoint(Vector2D.init(50, 50)));
     try std.testing.expect(!region.containsPoint(Vector2D.init(150, 50)));
 }
 
-test "Region.add" {
-    var region1 = Region.initRect(std.testing.allocator, 0, 0, 50, 50);
+test "Type.add" {
+    var region1 = Type.initRect(std.testing.allocator, 0, 0, 50, 50);
     defer region1.deinit();
 
-    var region2 = Region.initRect(std.testing.allocator, 25, 25, 50, 50);
+    var region2 = Type.initRect(std.testing.allocator, 25, 25, 50, 50);
     defer region2.deinit();
 
     _ = region1.add(&region2);
@@ -321,11 +321,11 @@ test "Region.add" {
     try std.testing.expectEqual(@as(f32, 75), extents.height);
 }
 
-test "Region.intersect" {
-    var region1 = Region.initRect(std.testing.allocator, 0, 0, 100, 100);
+test "Type.intersect" {
+    var region1 = Type.initRect(std.testing.allocator, 0, 0, 100, 100);
     defer region1.deinit();
 
-    var region2 = Region.initRect(std.testing.allocator, 50, 50, 100, 100);
+    var region2 = Type.initRect(std.testing.allocator, 50, 50, 100, 100);
     defer region2.deinit();
 
     _ = region1.intersect(&region2);
@@ -337,11 +337,11 @@ test "Region.intersect" {
     try std.testing.expectEqual(@as(f32, 50), extents.height);
 }
 
-test "Region.subtract" {
-    var region1 = Region.initRect(std.testing.allocator, 0, 0, 100, 100);
+test "Type.subtract" {
+    var region1 = Type.initRect(std.testing.allocator, 0, 0, 100, 100);
     defer region1.deinit();
 
-    var region2 = Region.initRect(std.testing.allocator, 25, 25, 50, 50);
+    var region2 = Type.initRect(std.testing.allocator, 25, 25, 50, 50);
     defer region2.deinit();
 
     _ = region1.subtract(&region2);
@@ -349,8 +349,8 @@ test "Region.subtract" {
     try std.testing.expect(!region1.empty());
 }
 
-test "Region.translate" {
-    var region = Region.initRect(std.testing.allocator, 0, 0, 100, 100);
+test "Type.translate" {
+    var region = Type.initRect(std.testing.allocator, 0, 0, 100, 100);
     defer region.deinit();
 
     _ = region.translate(Vector2D.init(50, 50));
@@ -360,8 +360,8 @@ test "Region.translate" {
     try std.testing.expectEqual(@as(f64, 50), extents.y);
 }
 
-test "Region.scale" {
-    var region = Region.initRect(std.testing.allocator, 10, 10, 100, 50);
+test "Type.scale" {
+    var region = Type.initRect(std.testing.allocator, 10, 10, 100, 50);
     defer region.deinit();
 
     _ = try region.scale(Vector2D.init(2, 2));
@@ -373,39 +373,39 @@ test "Region.scale" {
     try std.testing.expectEqual(@as(f32, 100), extents.height);
 }
 
-test "Region - empty region operations" {
-    var empty = Region.init(std.testing.allocator);
+test "Type - empty region operations" {
+    var empty = Type.init(std.testing.allocator);
     defer empty.deinit();
-    
+
     try std.testing.expect(empty.empty());
-    
-    var other = Region.initRect(std.testing.allocator, 10, 10, 50, 50);
+
+    var other = Type.initRect(std.testing.allocator, 10, 10, 50, 50);
     defer other.deinit();
-    
+
     // Add to empty
     var result1 = empty.clone();
     defer result1.deinit();
     _ = result1.add(&other);
     try std.testing.expect(!result1.empty());
-    
+
     // Subtract from empty
     var result2 = empty.clone();
     defer result2.deinit();
     _ = result2.subtract(&other);
     try std.testing.expect(result2.empty());
-    
+
     // Intersect with empty
     var result3 = other.clone();
     defer result3.deinit();
     _ = result3.intersect(&empty);
     try std.testing.expect(result3.empty());
-    
+
     // Translate empty
     var result4 = empty.clone();
     defer result4.deinit();
     _ = result4.translate(Vector2D.init(100, 100));
     try std.testing.expect(result4.empty());
-    
+
     // Scale empty
     var result5 = empty.clone();
     defer result5.deinit();
@@ -413,97 +413,97 @@ test "Region - empty region operations" {
     try std.testing.expect(result5.empty());
 }
 
-test "Region - at MAX_REGION_SIDE boundaries" {
+test "Type - at MAX_REGION_SIDE boundaries" {
     const max = MAX_REGION_SIDE;
-    
-    // Region at positive boundary
-    var region1 = Region.initRect(std.testing.allocator, @floatFromInt(max - 100), @floatFromInt(max - 100), 50, 50);
+
+    // Type at positive boundary
+    var region1 = Type.initRect(std.testing.allocator, @floatFromInt(max - 100), @floatFromInt(max - 100), 50, 50);
     defer region1.deinit();
-    
+
     try std.testing.expect(!region1.empty());
-    
-    // Region at negative boundary
-    var region2 = Region.initRect(std.testing.allocator, @floatFromInt(-max + 100), @floatFromInt(-max + 100), 50, 50);
+
+    // Type at negative boundary
+    var region2 = Type.initRect(std.testing.allocator, @floatFromInt(-max + 100), @floatFromInt(-max + 100), 50, 50);
     defer region2.deinit();
-    
+
     try std.testing.expect(!region2.empty());
-    
+
     // Operations should work
     _ = region1.add(&region2);
     try std.testing.expect(!region1.empty());
 }
 
-test "Region.transform - large dimensions" {
-    var region = Region.initRect(std.testing.allocator, 0, 0, 100, 100);
+test "Type.transform - large dimensions" {
+    var region = Type.initRect(std.testing.allocator, 0, 0, 100, 100);
     defer region.deinit();
-    
+
     // Transform with large but safe dimensions
     _ = try region.transform(.@"90", 10000, 10000);
-    
+
     // Transform may rationalize or clip, just verify no crash
     _ = region.empty(); // Call to verify region is still valid
 }
 
-test "Region.scale - with zero" {
-    var region = Region.initRect(std.testing.allocator, 10, 10, 100, 100);
+test "Type.scale - with zero" {
+    var region = Type.initRect(std.testing.allocator, 10, 10, 100, 100);
     defer region.deinit();
-    
+
     _ = try region.scaleScalar(0.0);
-    
+
     // Zero scale should create empty or point region
     const extents = region.getExtents();
     try std.testing.expectEqual(@as(f32, 0), extents.width);
     try std.testing.expectEqual(@as(f32, 0), extents.height);
 }
 
-test "Region.scale - with very large factor" {
-    var region = Region.initRect(std.testing.allocator, 10, 10, 100, 100);
+test "Type.scale - with very large factor" {
+    var region = Type.initRect(std.testing.allocator, 10, 10, 100, 100);
     defer region.deinit();
-    
+
     // Scale with very large factor
     _ = try region.scale(Vector2D.init(1e6, 1e6));
-    
+
     // Should produce very large region
     const extents = region.getExtents();
     try std.testing.expect(extents.width > 1e7);
     try std.testing.expect(extents.height > 1e7);
 }
 
-test "Region.rationalize - already outside MAX_REGION_SIDE" {
+test "Type.rationalize - already outside MAX_REGION_SIDE" {
     const max = MAX_REGION_SIDE;
-    
+
     // Create region way outside boundaries
-    var region = Region.initRect(std.testing.allocator, @floatFromInt(max * 2), @floatFromInt(max * 2), 1000, 1000);
+    var region = Type.initRect(std.testing.allocator, @floatFromInt(max * 2), @floatFromInt(max * 2), 1000, 1000);
     defer region.deinit();
-    
+
     // Rationalize should clip it
     _ = region.rationalize();
-    
+
     // After rationalization, should be empty (clipped away)
     try std.testing.expect(region.empty());
 }
 
-test "Region.rationalize - partially outside boundaries" {
+test "Type.rationalize - partially outside boundaries" {
     const max = MAX_REGION_SIDE;
-    
-    // Region that straddles the boundary
-    var region = Region.initRect(std.testing.allocator, @floatFromInt(max - 50), @floatFromInt(max - 50), 100, 100);
+
+    // Type that straddles the boundary
+    var region = Type.initRect(std.testing.allocator, @floatFromInt(max - 50), @floatFromInt(max - 50), 100, 100);
     defer region.deinit();
-    
+
     _ = region.rationalize();
-    
+
     // Should be clipped but not empty
     const extents = region.getExtents();
     try std.testing.expect(extents.width > 0);
     try std.testing.expect(extents.width < 100); // Clipped
 }
 
-test "Region.expand - negative values (shrink)" {
-    var region = Region.initRect(std.testing.allocator, 10, 10, 100, 100);
+test "Type.expand - negative values (shrink)" {
+    var region = Type.initRect(std.testing.allocator, 10, 10, 100, 100);
     defer region.deinit();
-    
+
     _ = try region.expand(-10);
-    
+
     // Should shrink the region
     const extents = region.getExtents();
     try std.testing.expectApproxEqAbs(@as(f32, 20), extents.x, 1.0);
@@ -512,48 +512,48 @@ test "Region.expand - negative values (shrink)" {
     try std.testing.expectApproxEqAbs(@as(f32, 80), extents.height, 1.0);
 }
 
-test "Region.expand - over-shrink creates empty" {
-    var region = Region.initRect(std.testing.allocator, 10, 10, 40, 40);
+test "Type.expand - over-shrink creates empty" {
+    var region = Type.initRect(std.testing.allocator, 10, 10, 40, 40);
     defer region.deinit();
-    
+
     // Shrink by less than half the size
     _ = try region.expand(-15);
-    
+
     // Should shrink but not become empty (40 - 30 = 10 remaining)
     const extents = region.getExtents();
     try std.testing.expect(extents.width > 0);
     try std.testing.expect(extents.height > 0);
 }
 
-test "Region.closestPoint - on empty region" {
-    var empty = Region.init(std.testing.allocator);
+test "Type.closestPoint - on empty region" {
+    var empty = Type.init(std.testing.allocator);
     defer empty.deinit();
-    
+
     const point = Vector2D.init(50, 50);
-    
+
     // Should handle gracefully (may return input or zero)
-    const result = Region.closestPoint(&empty, point) catch point;
-    
+    const result = Type.closestPoint(&empty, point) catch point;
+
     // Just verify it doesn't crash
     try std.testing.expect(std.math.isFinite(result.getX()));
     try std.testing.expect(std.math.isFinite(result.getY()));
 }
 
-test "Region.transform - all 8 transforms" {
-    const transforms = [_]Transform{
-        .normal, .@"90", .@"180", .@"270",
+test "Type.transform - all 8 transforms" {
+    const all_transforms = [_]Transform{
+        .normal,  .@"90",      .@"180",      .@"270",
         .flipped, .flipped_90, .flipped_180, .flipped_270,
     };
-    
-    for (transforms) |t| {
-        var region = Region.initRect(std.testing.allocator, 10, 20, 100, 50);
+
+    for (all_transforms) |t| {
+        var region = Type.initRect(std.testing.allocator, 10, 20, 100, 50);
         defer region.deinit();
-        
+
         _ = try region.transform(t, 1920, 1080);
-        
+
         // Should not be empty after transform
         try std.testing.expect(!region.empty());
-        
+
         const extents = region.getExtents();
         // Dimensions should be reasonable
         try std.testing.expect(extents.width > 0);
@@ -561,99 +561,99 @@ test "Region.transform - all 8 transforms" {
     }
 }
 
-test "Region - multiple rectangles with operations" {
-    var region = Region.initRect(std.testing.allocator, 0, 0, 50, 50);
+test "Type - multiple rectangles with operations" {
+    var region = Type.initRect(std.testing.allocator, 0, 0, 50, 50);
     defer region.deinit();
-    
+
     // Add multiple non-overlapping rectangles
     _ = region.addRect(100, 0, 50, 50);
     _ = region.addRect(0, 100, 50, 50);
     _ = region.addRect(100, 100, 50, 50);
-    
-    // Region should not be empty
+
+    // Type should not be empty
     try std.testing.expect(!region.empty());
-    
+
     // Scale all rectangles
     _ = try region.scaleScalar(2.0);
     try std.testing.expect(!region.empty());
-    
+
     // Translate all
     _ = region.translate(Vector2D.init(10, 10));
     try std.testing.expect(!region.empty());
 }
 
-test "Region - subtract larger from smaller" {
-    var small = Region.initRect(std.testing.allocator, 10, 10, 50, 50);
+test "Type - subtract larger from smaller" {
+    var small = Type.initRect(std.testing.allocator, 10, 10, 50, 50);
     defer small.deinit();
-    
-    var large = Region.initRect(std.testing.allocator, 0, 0, 100, 100);
+
+    var large = Type.initRect(std.testing.allocator, 0, 0, 100, 100);
     defer large.deinit();
-    
+
     // Subtract larger from smaller
     _ = small.subtract(&large);
-    
+
     // Should be empty (completely subtracted)
     try std.testing.expect(small.empty());
 }
 
-test "Region - intersect non-overlapping" {
-    var region1 = Region.initRect(std.testing.allocator, 0, 0, 50, 50);
+test "Type - intersect non-overlapping" {
+    var region1 = Type.initRect(std.testing.allocator, 0, 0, 50, 50);
     defer region1.deinit();
-    
-    var region2 = Region.initRect(std.testing.allocator, 100, 100, 50, 50);
+
+    var region2 = Type.initRect(std.testing.allocator, 100, 100, 50, 50);
     defer region2.deinit();
-    
+
     _ = region1.intersect(&region2);
-    
+
     // Non-overlapping regions produce empty intersection
     try std.testing.expect(region1.empty());
 }
 
-test "Region - containsPoint at exact boundaries" {
-    var region = Region.initRect(std.testing.allocator, 10, 10, 100, 100);
+test "Type - containsPoint at exact boundaries" {
+    var region = Type.initRect(std.testing.allocator, 10, 10, 100, 100);
     defer region.deinit();
-    
+
     // Point at top-left corner
     try std.testing.expect(region.containsPoint(Vector2D.init(10, 10)));
-    
+
     // Point at bottom-right corner (exclusive)
     try std.testing.expect(!region.containsPoint(Vector2D.init(110, 110)));
-    
+
     // Point just inside
     try std.testing.expect(region.containsPoint(Vector2D.init(10.1, 10.1)));
-    
+
     // Point just outside
     try std.testing.expect(!region.containsPoint(Vector2D.init(110.1, 110.1)));
 }
 
-test "Region - transform with multiple rectangles" {
-    var region = Region.initRect(std.testing.allocator, 0, 0, 50, 50);
+test "Type - transform with multiple rectangles" {
+    var region = Type.initRect(std.testing.allocator, 0, 0, 50, 50);
     defer region.deinit();
-    
+
     _ = region.addRect(100, 0, 50, 50);
     _ = region.addRect(0, 100, 50, 50);
-    
+
     const rects_before = try region.getRects();
     const count_before = rects_before.len;
     std.testing.allocator.free(rects_before);
-    
+
     try std.testing.expect(count_before > 0);
-    
+
     // Transform should work with multiple rectangles (may merge or clip)
     _ = try region.transform(.@"90", 200, 200);
-    
+
     // Verify region is still valid (may be empty after transform due to clipping)
     _ = region.empty();
 }
 
-test "Region - scale with different X and Y factors" {
-    var region = Region.initRect(std.testing.allocator, 10, 10, 100, 100);
+test "Type - scale with different X and Y factors" {
+    var region = Type.initRect(std.testing.allocator, 10, 10, 100, 100);
     defer region.deinit();
-    
+
     _ = try region.scale(Vector2D.init(2.0, 0.5));
-    
+
     const extents = region.getExtents();
-    
+
     // Width doubled, height halved
     try std.testing.expectApproxEqAbs(@as(f32, 20), extents.x, 1.0);
     try std.testing.expectApproxEqAbs(@as(f32, 5), extents.y, 1.0);
@@ -661,19 +661,19 @@ test "Region - scale with different X and Y factors" {
     try std.testing.expectApproxEqAbs(@as(f32, 50), extents.height, 1.0);
 }
 
-test "Region - invert creates complement" {
-    var region = Region.initRect(std.testing.allocator, 25, 25, 50, 50);
+test "Type - invert creates complement" {
+    var region = Type.initRect(std.testing.allocator, 25, 25, 50, 50);
     defer region.deinit();
-    
+
     const bounds = Box.init(0, 0, 100, 100);
     _ = region.invertBox(bounds);
-    
+
     // Inverted region should not be empty
     try std.testing.expect(!region.empty());
-    
+
     // Original center point should NOT be in inverted region
     try std.testing.expect(!region.containsPoint(Vector2D.init(50, 50)));
-    
+
     // Corners should be in inverted region
     try std.testing.expect(region.containsPoint(Vector2D.init(5, 5)));
 }

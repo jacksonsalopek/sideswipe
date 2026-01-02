@@ -1,4 +1,4 @@
-pub const Transform = enum {
+pub const Direction = enum {
     normal,
     @"90",
     @"180",

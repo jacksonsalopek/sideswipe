@@ -4,7 +4,7 @@ const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
 const os = @import("core.os");
-const FileDescriptor = os.file.FileDescriptor;
+const FileDescriptor = os.file.Descriptor;
 const protocol = @import("protocol.zig");
 const message = @import("message.zig");
 

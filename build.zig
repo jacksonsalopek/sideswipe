@@ -137,6 +137,7 @@ pub fn build(b: *std.Build) void {
     backend_mod.linkSystemLibrary("libseat", .{});
     backend_mod.linkSystemLibrary("wayland-client", .{});
     backend_mod.linkSystemLibrary("wayland-cursor", .{});
+    backend_mod.linkSystemLibrary("libdisplay-info", .{});
     backend_mod.addImport("core.string", core_string_mod);
     backend_mod.addImport("core.math", core_math_mod);
 
@@ -214,6 +215,7 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("libseat");
     exe.linkSystemLibrary("wayland-client");
     exe.linkSystemLibrary("wayland-cursor");
+    exe.linkSystemLibrary("libdisplay-info");
     exe.linkLibC();
 
     b.installArtifact(exe);
@@ -351,6 +353,7 @@ pub fn build(b: *std.Build) void {
     backend_tests.linkSystemLibrary("libseat");
     backend_tests.linkSystemLibrary("wayland-client");
     backend_tests.linkSystemLibrary("wayland-cursor");
+    backend_tests.linkSystemLibrary("libdisplay-info");
     backend_tests.linkLibC();
     const run_backend_tests = b.addRunArtifact(backend_tests);
     test_step.dependOn(&run_backend_tests.step);
@@ -410,6 +413,7 @@ pub fn build(b: *std.Build) void {
         file_tests.linkSystemLibrary("libseat");
         file_tests.linkSystemLibrary("wayland-client");
         file_tests.linkSystemLibrary("wayland-cursor");
+        file_tests.linkSystemLibrary("libdisplay-info");
         file_tests.linkLibC();
 
         if (b.option([]const u8, "filter", "Test name filter")) |filter| {

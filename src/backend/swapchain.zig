@@ -2,15 +2,9 @@
 
 const std = @import("std");
 const math = @import("core.math");
-const Vector2D = math.Vector2D;
-const buffer_mod = @import("buffer.zig");
-const allocator_mod = @import("allocator.zig");
-
-// Forward declarations to avoid circular dependencies
-// We don't import backend.zig here!
-const IBuffer = buffer_mod.IBuffer;
-const IAllocator = allocator_mod.IAllocator;
-const BufferParams = allocator_mod.BufferParams;
+const Vector2D = math.vector2d.Type;
+const buffer = @import("buffer.zig");
+const allocator = @import("allocator.zig");
 
 /// Swapchain options
 pub const Options = struct {
@@ -25,30 +19,30 @@ pub const Options = struct {
 
 /// Swapchain manages a rotating buffer pool
 pub const Swapchain = struct {
-    allocator: std.mem.Allocator,
-    buffer_allocator: IAllocator,
+    alloc: std.mem.Allocator,
+    buffer_allocator: allocator.Interface,
     backend_impl: ?*anyopaque = null, // Opaque pointer to IBackendImplementation
     options: Options,
-    buffers: std.ArrayList(IBuffer),
+    buffers: std.ArrayList(buffer.Interface),
     last_acquired: isize = 0,
 
     const Self = @This();
 
     /// Create a new swapchain
     pub fn create(
-        allocator: std.mem.Allocator,
-        buffer_allocator: IAllocator,
+        alloc: std.mem.Allocator,
+        buffer_allocator: allocator.Interface,
         backend_impl: ?*anyopaque,
     ) !*Self {
-        const self = try allocator.create(Self);
-        errdefer allocator.destroy(self);
+        const self = try alloc.create(Self);
+        errdefer alloc.destroy(self);
 
         self.* = .{
-            .allocator = allocator,
+            .alloc = alloc,
             .buffer_allocator = buffer_allocator,
             .backend_impl = backend_impl,
             .options = .{},
-            .buffers = std.ArrayList(IBuffer){},
+            .buffers = std.ArrayList(buffer.Interface){},
         };
 
         return self;
@@ -58,8 +52,8 @@ pub const Swapchain = struct {
         for (self.buffers.items) |buf| {
             buf.deinit();
         }
-        self.buffers.deinit(self.allocator);
-        self.allocator.destroy(self);
+        self.buffers.deinit(self.alloc);
+        self.alloc.destroy(self);
     }
 
     /// Reconfigure the swapchain with new options
@@ -109,7 +103,7 @@ pub const Swapchain = struct {
     }
 
     /// Get the next buffer in rotation
-    pub fn next(self: *Self, age: ?*i32) ?IBuffer {
+    pub fn next(self: *Self, age: ?*i32) ?buffer.Interface {
         if (self.options.length == 0) {
             return null;
         }
@@ -125,9 +119,9 @@ pub const Swapchain = struct {
     }
 
     /// Check if swapchain contains a buffer
-    pub fn contains(self: *Self, buf: IBuffer) bool {
+    pub fn contains(self: *Self, buf: buffer.Interface) bool {
         for (self.buffers.items) |swapchain_buf| {
-            if (swapchain_buf.ptr == buf.ptr) {
+            if (swapchain_buf.base.ptr == buf.base.ptr) {
                 return true;
             }
         }
@@ -140,7 +134,7 @@ pub const Swapchain = struct {
     }
 
     /// Get the allocator used by this swapchain
-    pub fn getAllocator(self: *Self) IAllocator {
+    pub fn getAllocator(self: *Self) allocator.Interface {
         return self.buffer_allocator;
     }
 
@@ -154,15 +148,15 @@ pub const Swapchain = struct {
 
     /// Full reconfiguration - reallocate all buffers
     fn fullReconfigure(self: *Self, new_options: Options) !bool {
-        var new_buffers = std.ArrayList(IBuffer){};
+        var new_buffers = std.ArrayList(buffer.Interface){};
         errdefer {
             for (new_buffers.items) |buf| {
                 buf.deinit();
             }
-            new_buffers.deinit(self.allocator);
+            new_buffers.deinit(self.alloc);
         }
 
-        const params = BufferParams{
+        const params = allocator.BufferParams{
             .size = new_options.size,
             .format = new_options.format,
             .scanout = new_options.scanout,
@@ -175,14 +169,14 @@ pub const Swapchain = struct {
             const buf = self.buffer_allocator.acquire(&params, null) catch {
                 return false;
             };
-            try new_buffers.append(self.allocator, buf);
+            try new_buffers.append(self.alloc, buf);
         }
 
         // Success - replace old buffers
         for (self.buffers.items) |buf| {
             buf.deinit();
         }
-        self.buffers.deinit(self.allocator);
+        self.buffers.deinit(self.alloc);
         self.buffers = new_buffers;
 
         return true;
@@ -194,7 +188,7 @@ pub const Swapchain = struct {
             return true;
         }
 
-        const params = BufferParams{
+        const params = allocator.BufferParams{
             .size = self.options.size,
             .format = self.options.format,
             .scanout = self.options.scanout,
@@ -214,7 +208,7 @@ pub const Swapchain = struct {
                 const buf = self.buffer_allocator.acquire(&params, null) catch {
                     return false;
                 };
-                try self.buffers.append(self.allocator, buf);
+                try self.buffers.append(self.alloc, buf);
             }
         }
 
@@ -226,7 +220,7 @@ pub const Swapchain = struct {
 
 // Shared mock allocator for tests - doesn't actually allocate buffers
 const TestMockAlloc = struct {
-    fn acquire(ptr: *anyopaque, params: *const BufferParams, swapchain_ptr: ?*anyopaque) anyerror!IBuffer {
+    fn acquire(ptr: *anyopaque, params: *const allocator.BufferParams, swapchain_ptr: ?*anyopaque) anyerror!buffer.Interface {
         _ = ptr;
         _ = params;
         _ = swapchain_ptr;
@@ -243,7 +237,7 @@ const TestMockAlloc = struct {
         return -1;
     }
 
-    fn allocatorType(ptr: *anyopaque) allocator_mod.Type {
+    fn allocatorType(ptr: *anyopaque) allocator.Type {
         _ = ptr;
         return .gbm;
     }
@@ -257,7 +251,7 @@ const TestMockAlloc = struct {
     }
 
     var instance: u8 = 0;
-    const vtable_instance = IAllocator.VTable{
+    const vtable_instance = allocator.Interface.VTableDef{
         .acquire = acquire,
         .get_backend = getBackend,
         .drm_fd = drmFd,
@@ -266,11 +260,8 @@ const TestMockAlloc = struct {
         .deinit = deinitFn,
     };
 
-    fn get() IAllocator {
-        return IAllocator{
-            .ptr = &instance,
-            .vtable = &vtable_instance,
-        };
+    fn get() allocator.Interface {
+        return allocator.Interface.init(&instance, &vtable_instance);
     }
 };
 
@@ -380,7 +371,7 @@ test "Swapchain - format auto-selection from allocator" {
     const testing = std.testing;
 
     const MockAlloc = struct {
-        fn acquire(ptr: *anyopaque, params: *const BufferParams, swapchain_ptr: ?*anyopaque) anyerror!IBuffer {
+        fn acquire(ptr: *anyopaque, params: *const allocator.BufferParams, swapchain_ptr: ?*anyopaque) anyerror!buffer.Interface {
             _ = ptr;
             _ = swapchain_ptr;
 
@@ -397,7 +388,7 @@ test "Swapchain - format auto-selection from allocator" {
             _ = ptr;
             return -1;
         }
-        fn allocatorType(ptr: *anyopaque) allocator_mod.Type {
+        fn allocatorType(ptr: *anyopaque) allocator.Type {
             _ = ptr;
             return .gbm;
         }
@@ -409,7 +400,7 @@ test "Swapchain - format auto-selection from allocator" {
         }
 
         var instance: u8 = 0;
-        const vtable_instance = IAllocator.VTable{
+        const vtable_instance = allocator.Interface.VTableDef{
             .acquire = acquire,
             .get_backend = getBackend,
             .drm_fd = drmFd,
@@ -419,10 +410,7 @@ test "Swapchain - format auto-selection from allocator" {
         };
     };
 
-    const mock_alloc = IAllocator{
-        .ptr = &MockAlloc.instance,
-        .vtable = &MockAlloc.vtable_instance,
-    };
+    const mock_alloc = allocator.Interface.init(&MockAlloc.instance, &MockAlloc.vtable_instance);
 
     var swapchain = try Swapchain.create(testing.allocator, mock_alloc, null);
     defer swapchain.deinit();
@@ -451,7 +439,7 @@ test "Swapchain - next() cycling with age tracking" {
     swapchain.options.length = 0;
     var age: i32 = 0;
     const buf = swapchain.next(&age);
-    try testing.expectEqual(@as(?IBuffer, null), buf);
+    try testing.expectEqual(@as(?buffer.Interface, null), buf);
 
     // Test cycling math behavior
     swapchain.options.length = 3;
@@ -481,11 +469,11 @@ test "Swapchain - contains() with non-swapchain buffer" {
 
     // Create a non-swapchain buffer with minimal vtable
     const MockBuffer = struct {
-        fn capsFn(ptr: *anyopaque) buffer_mod.BufferCapability {
+        fn capsFn(ptr: *anyopaque) buffer.Capability {
             _ = ptr;
             return .{};
         }
-        fn typeFn(ptr: *anyopaque) buffer_mod.BufferType {
+        fn typeFn(ptr: *anyopaque) buffer.Type {
             _ = ptr;
             return .dmabuf;
         }
@@ -501,15 +489,15 @@ test "Swapchain - contains() with non-swapchain buffer" {
             _ = ptr;
             return true;
         }
-        fn dmabufFn(ptr: *anyopaque) buffer_mod.DMABUFAttrs {
+        fn dmabufFn(ptr: *anyopaque) buffer.DMABUFAttrs {
             _ = ptr;
             return .{};
         }
-        fn shmFn(ptr: *anyopaque) buffer_mod.SSHMAttrs {
+        fn shmFn(ptr: *anyopaque) buffer.SSHMAttrs {
             _ = ptr;
             return .{};
         }
-        fn beginDataPtrFn(ptr: *anyopaque, flags: u32) buffer_mod.DataPtrResult {
+        fn beginDataPtrFn(ptr: *anyopaque, flags: u32) buffer.DataPtrResult {
             _ = ptr;
             _ = flags;
             return .{ .ptr = null, .flags = 0, .size = 0 };
@@ -534,7 +522,7 @@ test "Swapchain - contains() with non-swapchain buffer" {
             _ = ptr;
         }
 
-        const vtable_instance = buffer_mod.IBuffer.VTable{
+        const vtable_instance = buffer.Interface.VTableDef{
             .caps = capsFn,
             .type = typeFn,
             .update = updateFn,
@@ -553,10 +541,7 @@ test "Swapchain - contains() with non-swapchain buffer" {
     };
 
     var external_buf_storage: MockBuffer = .{};
-    const external_buf = IBuffer{
-        .ptr = @ptrCast(&external_buf_storage),
-        .vtable = &MockBuffer.vtable_instance,
-    };
+    const external_buf = buffer.Interface.init(@as(*anyopaque, @ptrCast(&external_buf_storage)), &MockBuffer.vtable_instance);
 
     // External buffer should not be in swapchain
     try testing.expect(!swapchain.contains(external_buf));

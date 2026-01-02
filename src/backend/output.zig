@@ -2,12 +2,13 @@
 //! Handles display outputs, modes, and state management
 
 const std = @import("std");
+const Interface = @import("core").vtable.Interface;
 const math = @import("core.math");
-const Vector2D = math.Vector2D;
-const Region = math.Region;
-const Mat3x3 = math.Mat3x3;
-const buffer_mod = @import("buffer.zig");
-const swapchain_mod = @import("swapchain.zig");
+const Vector2D = math.vector2d.Type;
+const Region = math.region.Type;
+const Mat3x3 = math.mat3x3.Type;
+const buffer = @import("buffer.zig");
+const swapchain = @import("swapchain.zig");
 const misc = @import("misc.zig");
 
 /// Output mode information
@@ -74,7 +75,7 @@ pub const State = struct {
     mode: ?*Mode = null,
     custom_mode: ?*Mode = null,
     drm_format: u32 = 0, // DRM_FORMAT_INVALID
-    buffer: ?buffer_mod.IBuffer = null,
+    buffer: ?buffer.Interface = null,
     explicit_in_fence: i32 = -1,
     explicit_out_fence: i32 = -1,
     ctm: Mat3x3 = Mat3x3.identity(),
@@ -152,7 +153,7 @@ pub const State = struct {
         self.committed.format = true;
     }
 
-    pub fn setBuffer(self: *Self, buf: buffer_mod.IBuffer) void {
+    pub fn setBuffer(self: *Self, buf: buffer.Interface) void {
         self.buffer = buf;
         self.committed.buffer = true;
     }
@@ -205,16 +206,15 @@ pub const ScheduleReason = enum(u32) {
 
 /// Output interface
 pub const IOutput = struct {
-    ptr: *anyopaque,
-    vtable: *const VTable,
+    base: Interface(VTableDef),
 
-    pub const VTable = struct {
+    pub const VTableDef = struct {
         commit: *const fn (ptr: *anyopaque) bool,
         test_commit: *const fn (ptr: *anyopaque) bool,
         get_backend: *const fn (ptr: *anyopaque) ?*anyopaque,
         get_render_formats: *const fn (ptr: *anyopaque) []const misc.DRMFormat,
         preferred_mode: *const fn (ptr: *anyopaque) ?*Mode,
-        set_cursor: *const fn (ptr: *anyopaque, buffer: buffer_mod.IBuffer, hotspot: Vector2D) bool,
+        set_cursor: *const fn (ptr: *anyopaque, buffer: buffer.Interface, hotspot: Vector2D) bool,
         move_cursor: *const fn (ptr: *anyopaque, coord: Vector2D, skip_schedule: bool) void,
         set_cursor_visible: *const fn (ptr: *anyopaque, visible: bool) void,
         cursor_plane_size: *const fn (ptr: *anyopaque) Vector2D,
@@ -225,60 +225,66 @@ pub const IOutput = struct {
         deinit: *const fn (ptr: *anyopaque) void,
     };
 
-    pub fn commit(self: IOutput) bool {
-        return self.vtable.commit(self.ptr);
+    const Self = @This();
+
+    pub fn init(ptr: anytype, vtable: *const VTableDef) Self {
+        return .{ .base = Interface(VTableDef).init(ptr, vtable) };
     }
 
-    pub fn testCommit(self: IOutput) bool {
-        return self.vtable.test_commit(self.ptr);
+    pub fn commit(self: Self) bool {
+        return self.base.vtable.commit(self.base.ptr);
     }
 
-    pub fn getBackend(self: IOutput) ?*anyopaque {
-        return self.vtable.get_backend(self.ptr);
+    pub fn testCommit(self: Self) bool {
+        return self.base.vtable.test_commit(self.base.ptr);
     }
 
-    pub fn getRenderFormats(self: IOutput) []const misc.DRMFormat {
-        return self.vtable.get_render_formats(self.ptr);
+    pub fn getBackend(self: Self) ?*anyopaque {
+        return self.base.vtable.get_backend(self.base.ptr);
     }
 
-    pub fn preferredMode(self: IOutput) ?*Mode {
-        return self.vtable.preferred_mode(self.ptr);
+    pub fn getRenderFormats(self: Self) []const misc.DRMFormat {
+        return self.base.vtable.get_render_formats(self.base.ptr);
     }
 
-    pub fn setCursor(self: IOutput, buf: buffer_mod.IBuffer, hotspot: Vector2D) bool {
-        return self.vtable.set_cursor(self.ptr, buf, hotspot);
+    pub fn preferredMode(self: Self) ?*Mode {
+        return self.base.vtable.preferred_mode(self.base.ptr);
     }
 
-    pub fn moveCursor(self: IOutput, coord: Vector2D, skip_schedule: bool) void {
-        self.vtable.move_cursor(self.ptr, coord, skip_schedule);
+    pub fn setCursor(self: Self, buf: buffer.Interface, hotspot: Vector2D) bool {
+        return self.base.vtable.set_cursor(self.base.ptr, buf, hotspot);
     }
 
-    pub fn setCursorVisible(self: IOutput, visible: bool) void {
-        self.vtable.set_cursor_visible(self.ptr, visible);
+    pub fn moveCursor(self: Self, coord: Vector2D, skip_schedule: bool) void {
+        self.base.vtable.move_cursor(self.base.ptr, coord, skip_schedule);
     }
 
-    pub fn cursorPlaneSize(self: IOutput) Vector2D {
-        return self.vtable.cursor_plane_size(self.ptr);
+    pub fn setCursorVisible(self: Self, visible: bool) void {
+        self.base.vtable.set_cursor_visible(self.base.ptr, visible);
     }
 
-    pub fn scheduleFrame(self: IOutput, reason: ScheduleReason) void {
-        self.vtable.schedule_frame(self.ptr, reason);
+    pub fn cursorPlaneSize(self: Self) Vector2D {
+        return self.base.vtable.cursor_plane_size(self.base.ptr);
     }
 
-    pub fn getGammaSize(self: IOutput) usize {
-        return self.vtable.get_gamma_size(self.ptr);
+    pub fn scheduleFrame(self: Self, reason: ScheduleReason) void {
+        self.base.vtable.schedule_frame(self.base.ptr, reason);
     }
 
-    pub fn getDeGammaSize(self: IOutput) usize {
-        return self.vtable.get_degamma_size(self.ptr);
+    pub fn getGammaSize(self: Self) usize {
+        return self.base.vtable.get_gamma_size(self.base.ptr);
     }
 
-    pub fn destroy(self: IOutput) bool {
-        return self.vtable.destroy(self.ptr);
+    pub fn getDeGammaSize(self: Self) usize {
+        return self.base.vtable.get_degamma_size(self.base.ptr);
     }
 
-    pub fn deinit(self: IOutput) void {
-        self.vtable.deinit(self.ptr);
+    pub fn destroy(self: Self) bool {
+        return self.base.vtable.destroy(self.base.ptr);
+    }
+
+    pub fn deinit(self: Self) void {
+        self.base.vtable.deinit(self.base.ptr);
     }
 };
 

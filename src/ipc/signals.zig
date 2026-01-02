@@ -4,8 +4,8 @@
 const std = @import("std");
 const core = @import("core");
 const Signal = core.events.Signal;
-const backend_mod = @import("backend");
-const BackendType = backend_mod.backend.Type;
+const backend = @import("backend");
+const BackendType = backend.backend.Type;
 const math = @import("core.math");
 const Vector2D = math.Vector2D;
 
