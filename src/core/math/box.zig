@@ -626,3 +626,215 @@ test "Type.extentsFrom - various configurations" {
     try std.testing.expect(extents_beyond.bottom < 0); // Extends beyond
     try std.testing.expect(extents_beyond.right < 0); // Extends beyond
 }
+
+test "Type.roundInternal" {
+    const box = Type.init(10.7, 20.3, 100.6, 50.8);
+    const rounded = box.roundInternal();
+
+    // Floor the position
+    try std.testing.expectEqual(@as(f32, 10), rounded.x);
+    try std.testing.expectEqual(@as(f32, 20), rounded.y);
+
+    // Round the extent (x + width and y + height)
+    try std.testing.expectEqual(@as(f32, 101), rounded.width); // round(10.7 + 100.6 - 10) = round(101.3) = 101
+    try std.testing.expectEqual(@as(f32, 51), rounded.height); // round(20.3 + 50.8 - 20) = round(51.1) = 51
+}
+
+test "Type.round" {
+    const box = Type.init(10.4, 20.6, 100.3, 50.7);
+    const rounded = box.round();
+
+    try std.testing.expectEqual(@as(f32, 10), rounded.x);
+    try std.testing.expectEqual(@as(f32, 21), rounded.y);
+    try std.testing.expectEqual(@as(f32, 100), rounded.width);
+    try std.testing.expectEqual(@as(f32, 51), rounded.height);
+}
+
+test "Type.floor" {
+    const box = Type.init(10.9, 20.9, 100.9, 50.9);
+    const floored = box.floor();
+
+    try std.testing.expectEqual(@as(f32, 10), floored.x);
+    try std.testing.expectEqual(@as(f32, 20), floored.y);
+    try std.testing.expectEqual(@as(f32, 100), floored.width);
+    try std.testing.expectEqual(@as(f32, 50), floored.height);
+}
+
+test "Type.eql" {
+    const box1 = Type.init(10, 20, 100, 50);
+    const box2 = Type.init(10, 20, 100, 50);
+    const box3 = Type.init(10, 20, 100, 51);
+    const box4 = Type.init(11, 20, 100, 50);
+
+    try std.testing.expect(box1.eql(box2));
+    try std.testing.expect(!box1.eql(box3));
+    try std.testing.expect(!box1.eql(box4));
+    try std.testing.expect(box1.eql(box1));
+}
+
+test "Type.closest - point inside box" {
+    const box = Type.init(10, 10, 100, 100);
+    const point = Vector2D.init(50, 50);
+    const closest_point = box.closest(point);
+
+    // Point inside should return the point itself
+    try std.testing.expectEqual(@as(f32, 50), closest_point.getX());
+    try std.testing.expectEqual(@as(f32, 50), closest_point.getY());
+}
+
+test "Type.closest - point outside box" {
+    const box = Type.init(10, 10, 100, 100);
+
+    // Point to the right
+    const point_right = Vector2D.init(200, 50);
+    const closest_right = box.closest(point_right);
+    try std.testing.expectEqual(@as(f32, 110), closest_right.getX()); // Clamped to right edge
+    try std.testing.expectEqual(@as(f32, 50), closest_right.getY());
+
+    // Point to the left
+    const point_left = Vector2D.init(-50, 50);
+    const closest_left = box.closest(point_left);
+    try std.testing.expectEqual(@as(f32, 10), closest_left.getX()); // Clamped to left edge
+    try std.testing.expectEqual(@as(f32, 50), closest_left.getY());
+
+    // Point below
+    const point_below = Vector2D.init(50, 200);
+    const closest_below = box.closest(point_below);
+    try std.testing.expectEqual(@as(f32, 50), closest_below.getX());
+    try std.testing.expectEqual(@as(f32, 110), closest_below.getY()); // Clamped to bottom edge
+
+    // Point above
+    const point_above = Vector2D.init(50, -50);
+    const closest_above = box.closest(point_above);
+    try std.testing.expectEqual(@as(f32, 50), closest_above.getX());
+    try std.testing.expectEqual(@as(f32, 10), closest_above.getY()); // Clamped to top edge
+}
+
+test "Type.closest - point at corner" {
+    const box = Type.init(10, 10, 100, 100);
+
+    // Point at diagonal corner (bottom-right outside)
+    const point_corner = Vector2D.init(200, 200);
+    const closest_corner = box.closest(point_corner);
+
+    try std.testing.expectEqual(@as(f32, 110), closest_corner.getX());
+    try std.testing.expectEqual(@as(f32, 110), closest_corner.getY());
+}
+
+test "Type.addExtents" {
+    const box = Type.init(10, 10, 100, 50);
+    const extents = Extents{
+        .top = 5,
+        .bottom = 5,
+        .left = 10,
+        .right = 10,
+    };
+
+    const result = box.addExtents(extents);
+
+    try std.testing.expectEqual(@as(f32, 0), result.x); // 10 - 10
+    try std.testing.expectEqual(@as(f32, 5), result.y); // 10 - 5
+    try std.testing.expectEqual(@as(f32, 120), result.width); // 100 + 10 + 10
+    try std.testing.expectEqual(@as(f32, 60), result.height); // 50 + 5 + 5
+}
+
+test "Type.subtractExtents" {
+    const box = Type.init(10, 10, 100, 50);
+    const extents = Extents{
+        .top = 5,
+        .bottom = 5,
+        .left = 10,
+        .right = 10,
+    };
+
+    const result = box.subtractExtents(extents);
+
+    try std.testing.expectEqual(@as(f32, 20), result.x); // 10 + 10
+    try std.testing.expectEqual(@as(f32, 15), result.y); // 10 + 5
+    try std.testing.expectEqual(@as(f32, 80), result.width); // 100 - 10 - 10
+    try std.testing.expectEqual(@as(f32, 40), result.height); // 50 - 5 - 5
+}
+
+test "Extents.addExtents" {
+    const extents1 = Extents{
+        .top = 5,
+        .bottom = 10,
+        .left = 15,
+        .right = 20,
+    };
+
+    const extents2 = Extents{
+        .top = 2,
+        .bottom = 3,
+        .left = 4,
+        .right = 5,
+    };
+
+    const result = extents1.addExtents(extents2);
+
+    try std.testing.expectEqual(@as(f32, 7), result.top); // 5 + 2
+    try std.testing.expectEqual(@as(f32, 13), result.bottom); // 10 + 3
+    try std.testing.expectEqual(@as(f32, 19), result.left); // 15 + 4
+    try std.testing.expectEqual(@as(f32, 25), result.right); // 20 + 5
+}
+
+test "Type.transform - 180 degrees" {
+    const box = Type.init(10, 20, 30, 40);
+    const transformed = box.transform(.@"180", 100, 200);
+
+    try std.testing.expectEqual(@as(f32, 60), transformed.x); // 100 - 10 - 30
+    try std.testing.expectEqual(@as(f32, 140), transformed.y); // 200 - 20 - 40
+    try std.testing.expectEqual(@as(f32, 30), transformed.width);
+    try std.testing.expectEqual(@as(f32, 40), transformed.height);
+}
+
+test "Type.transform - 270 degrees" {
+    const box = Type.init(10, 20, 30, 40);
+    const transformed = box.transform(.@"270", 100, 200);
+
+    try std.testing.expectEqual(@as(f32, 20), transformed.x);
+    try std.testing.expectEqual(@as(f32, 60), transformed.y); // 100 - 10 - 30
+    try std.testing.expectEqual(@as(f32, 40), transformed.width); // height becomes width
+    try std.testing.expectEqual(@as(f32, 30), transformed.height); // width becomes height
+}
+
+test "Type.transform - normal" {
+    const box = Type.init(10, 20, 30, 40);
+    const transformed = box.transform(.normal, 100, 200);
+
+    // Normal transform should return the box unchanged
+    try std.testing.expectEqual(@as(f32, 10), transformed.x);
+    try std.testing.expectEqual(@as(f32, 20), transformed.y);
+    try std.testing.expectEqual(@as(f32, 30), transformed.width);
+    try std.testing.expectEqual(@as(f32, 40), transformed.height);
+}
+
+test "Type.transform - flipped_90" {
+    const box = Type.init(10, 20, 30, 40);
+    const transformed = box.transform(.flipped_90, 100, 200);
+
+    try std.testing.expectEqual(@as(f32, 20), transformed.x);
+    try std.testing.expectEqual(@as(f32, 10), transformed.y);
+    try std.testing.expectEqual(@as(f32, 40), transformed.width); // height becomes width
+    try std.testing.expectEqual(@as(f32, 30), transformed.height); // width becomes height
+}
+
+test "Type.transform - flipped_180" {
+    const box = Type.init(10, 20, 30, 40);
+    const transformed = box.transform(.flipped_180, 100, 200);
+
+    try std.testing.expectEqual(@as(f32, 10), transformed.x);
+    try std.testing.expectEqual(@as(f32, 140), transformed.y); // 200 - 20 - 40
+    try std.testing.expectEqual(@as(f32, 30), transformed.width);
+    try std.testing.expectEqual(@as(f32, 40), transformed.height);
+}
+
+test "Type.transform - flipped_270" {
+    const box = Type.init(10, 20, 30, 40);
+    const transformed = box.transform(.flipped_270, 100, 200);
+
+    try std.testing.expectEqual(@as(f32, 140), transformed.x); // 200 - 20 - 40
+    try std.testing.expectEqual(@as(f32, 60), transformed.y); // 100 - 10 - 30
+    try std.testing.expectEqual(@as(f32, 40), transformed.width); // height becomes width
+    try std.testing.expectEqual(@as(f32, 30), transformed.height); // width becomes height
+}
