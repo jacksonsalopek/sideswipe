@@ -2,7 +2,8 @@
 //! Handles display outputs, modes, and state management
 
 const std = @import("std");
-const Interface = @import("core").vtable.Interface;
+const core = @import("core");
+const VTable = core.vtable.Interface;
 const math = @import("core.math");
 const Vector2D = math.vector2d.Type;
 const Region = math.region.Type;
@@ -206,7 +207,7 @@ pub const ScheduleReason = enum(u32) {
 
 /// Output interface
 pub const IOutput = struct {
-    base: Interface(VTableDef),
+    base: VTable(VTableDef),
 
     pub const VTableDef = struct {
         commit: *const fn (ptr: *anyopaque) bool,
@@ -228,7 +229,7 @@ pub const IOutput = struct {
     const Self = @This();
 
     pub fn init(ptr: anytype, vtable: *const VTableDef) Self {
-        return .{ .base = Interface(VTableDef).init(ptr, vtable) };
+        return .{ .base = VTable(VTableDef).init(ptr, vtable) };
     }
 
     pub fn commit(self: Self) bool {
@@ -288,19 +289,17 @@ pub const IOutput = struct {
     }
 };
 
+const testing = core.testing;
+
 // Tests
 test "Mode - initialization" {
-    const testing = std.testing;
-
     const mode = Mode.init(1920, 1080, 60000); // 60Hz in mHz
-    try testing.expect(mode.pixel_size.eql(Vector2D.init(1920, 1080)));
+    try testing.expectEqual(Vector2D.init(1920, 1080), mode.pixel_size);
     try testing.expectEqual(@as(u32, 60000), mode.refresh_rate);
     try testing.expectEqual(false, mode.preferred);
 }
 
 test "State - initialization and cleanup" {
-    const testing = std.testing;
-
     var state = State.init(testing.allocator);
     defer state.deinit();
 
@@ -310,12 +309,10 @@ test "State - initialization and cleanup" {
 }
 
 test "State - setEnabled marks committed" {
-    const testing = std.testing;
-
     var state = State.init(testing.allocator);
     defer state.deinit();
 
-    try testing.expect(!state.committed.enabled);
+    try testing.expectFalse(state.committed.enabled);
 
     state.setEnabled(true);
     try testing.expect(state.enabled);
@@ -323,8 +320,6 @@ test "State - setEnabled marks committed" {
 }
 
 test "State - setMode vs setCustomMode" {
-    const testing = std.testing;
-
     var state = State.init(testing.allocator);
     defer state.deinit();
 
@@ -332,18 +327,16 @@ test "State - setMode vs setCustomMode" {
     var mode2 = Mode.init(3840, 2160, 144000);
 
     state.setMode(&mode1);
-    try testing.expect(state.mode == &mode1);
-    try testing.expect(state.custom_mode == null);
+    try testing.expectEqual(&mode1, state.mode);
+    try testing.expectNull(state.custom_mode);
     try testing.expect(state.committed.mode);
 
     state.setCustomMode(&mode2);
-    try testing.expect(state.mode == null);
-    try testing.expect(state.custom_mode == &mode2);
+    try testing.expectNull(state.mode);
+    try testing.expectEqual(&mode2, state.custom_mode);
 }
 
 test "State - gamma LUT management" {
-    const testing = std.testing;
-
     var state = State.init(testing.allocator);
     defer state.deinit();
 
@@ -356,8 +349,6 @@ test "State - gamma LUT management" {
 }
 
 test "State - onCommit clears committed flags" {
-    const testing = std.testing;
-
     var state = State.init(testing.allocator);
     defer state.deinit();
 
@@ -369,21 +360,17 @@ test "State - onCommit clears committed flags" {
 
     state.onCommit();
 
-    try testing.expect(!state.committed.enabled);
-    try testing.expect(!state.committed.format);
+    try testing.expectFalse(state.committed.enabled);
+    try testing.expectFalse(state.committed.format);
 }
 
 test "SubpixelMode - enum values" {
-    const testing = std.testing;
-
     try testing.expectEqual(@as(u32, 0), @intFromEnum(SubpixelMode.unknown));
     try testing.expectEqual(@as(u32, 1), @intFromEnum(SubpixelMode.none));
     try testing.expectEqual(@as(u32, 2), @intFromEnum(SubpixelMode.horizontal_rgb));
 }
 
 test "ScheduleReason - enum values" {
-    const testing = std.testing;
-
     try testing.expectEqual(@as(u32, 0), @intFromEnum(ScheduleReason.unknown));
     try testing.expectEqual(@as(u32, 6), @intFromEnum(ScheduleReason.damage));
     try testing.expectEqual(@as(u32, 11), @intFromEnum(ScheduleReason.animation_damage));

@@ -1,6 +1,7 @@
 //! Wire object abstraction for RPC-style method calls
 
 const std = @import("std");
+const core = @import("core");
 const protocol = @import("protocol.zig");
 const message = @import("message.zig");
 const Type = protocol.Type;
@@ -55,10 +56,10 @@ pub const Call = struct {
 
     pub fn init(allocator: std.mem.Allocator, object_id: u32, method_id: u32) !Call {
         var builder = try message.Builder.init(allocator, .generic_protocol_message);
-        
+
         // Add object ID
         try builder.addObjectId(object_id);
-        
+
         // Add method ID
         try builder.addUint32(method_id);
 
@@ -127,7 +128,7 @@ pub const Call = struct {
 };
 
 /// Call parser for decoding received RPC calls
-pub const Parser = struct{
+pub const Parser = struct {
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) Parser {
@@ -137,7 +138,7 @@ pub const Parser = struct{
     /// Parse a generic protocol message
     pub fn parse(self: *Parser, data: []const u8) !ParsedCall {
         const parsed = try message.parseGenericProtocolMessage(data);
-        
+
         return ParsedCall{
             .object_id = parsed.object_id,
             .method_id = parsed.method_id,
@@ -193,10 +194,10 @@ pub const ParsedCall = struct {
     }
 };
 
+const testing = core.testing;
+
 // Tests
 test "Wire - basic creation" {
-    const testing = std.testing;
-
     var obj = Wire.init(testing.allocator, 1, "test_protocol", 1);
     defer obj.deinit();
 
@@ -206,8 +207,6 @@ test "Wire - basic creation" {
 }
 
 test "Wire - listener registration" {
-    const testing = std.testing;
-
     var obj = Wire.init(testing.allocator, 1, "test_protocol", 1);
     defer obj.deinit();
 
@@ -215,12 +214,10 @@ test "Wire - listener registration" {
     try obj.listen(0, dummy_callback);
 
     try testing.expect(obj.hasListener(0));
-    try testing.expect(!obj.hasListener(1));
+    try testing.expectFalse(obj.hasListener(1));
 }
 
 test "Call - build simple call" {
-    const testing = std.testing;
-
     var call = try Call.init(testing.allocator, 100, 5);
     defer call.deinit();
 
@@ -236,8 +233,6 @@ test "Call - build simple call" {
 }
 
 test "Call - with file descriptor" {
-    const testing = std.testing;
-
     var call = try Call.init(testing.allocator, 100, 5);
     defer call.deinit();
 
@@ -252,8 +247,6 @@ test "Call - with file descriptor" {
 }
 
 test "Parser - parse and extract params" {
-    const testing = std.testing;
-
     // Build a call
     var call = try Call.init(testing.allocator, 100, 5);
     defer call.deinit();
@@ -282,8 +275,6 @@ test "Parser - parse and extract params" {
 }
 
 test "Call - with arrays" {
-    const testing = std.testing;
-
     var call = try Call.init(testing.allocator, 200, 10);
     defer call.deinit();
 
@@ -299,4 +290,3 @@ test "Call - with arrays" {
 
     try testing.expect(result.data.len > 0);
 }
-

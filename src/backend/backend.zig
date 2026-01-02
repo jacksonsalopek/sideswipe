@@ -2,7 +2,8 @@
 //! Coordinates multiple backend implementations, session, and allocators
 
 const std = @import("std");
-const Interface = @import("core").vtable.Interface;
+const core = @import("core");
+const Interface = core.vtable.Interface;
 const allocator = @import("allocator.zig");
 const session = @import("session.zig");
 const misc = @import("misc.zig");
@@ -372,7 +373,7 @@ pub const Coordinator = struct {
 
 // Tests
 test "Backend - ImplementationOptions defaults" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     const opts: ImplementationOptions = .{};
     try testing.expectEqual(Type.wayland, opts.backend_type);
@@ -380,14 +381,14 @@ test "Backend - ImplementationOptions defaults" {
 }
 
 test "Backend - Options initialization" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     const opts: Options = .{};
-    try testing.expect(opts.log_function == null);
+    try testing.expectNull(opts.log_function);
 }
 
 test "Backend - Type enum values" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     try testing.expectEqual(@as(u32, 0), @intFromEnum(Type.wayland));
     try testing.expectEqual(@as(u32, 1), @intFromEnum(Type.drm));
@@ -396,7 +397,7 @@ test "Backend - Type enum values" {
 }
 
 test "Backend - RequestMode enum values" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     try testing.expectEqual(@as(u32, 0), @intFromEnum(RequestMode.mandatory));
     try testing.expectEqual(@as(u32, 1), @intFromEnum(RequestMode.if_available));
@@ -404,7 +405,7 @@ test "Backend - RequestMode enum values" {
 }
 
 test "Backend - LogLevel enum values" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     try testing.expectEqual(@as(u32, 0), @intFromEnum(LogLevel.trace));
     try testing.expectEqual(@as(u32, 1), @intFromEnum(LogLevel.debug));
@@ -414,7 +415,7 @@ test "Backend - LogLevel enum values" {
 }
 
 test "Coordinator - create with no backends fails" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     const backends = [_]ImplementationOptions{};
     const opts: Options = .{};
@@ -424,7 +425,7 @@ test "Coordinator - create with no backends fails" {
 }
 
 test "Coordinator - create and destroy" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     const backends = [_]ImplementationOptions{
         .{ .backend_type = .headless, .request_mode = .if_available },
@@ -434,13 +435,13 @@ test "Coordinator - create and destroy" {
     var coordinator = try Coordinator.create(testing.allocator, &backends, opts);
     defer coordinator.deinit();
 
-    try testing.expect(!coordinator.ready);
-    try testing.expect(coordinator.session == null);
+    try testing.expectFalse(coordinator.ready);
+    try testing.expectNull(coordinator.session);
     try testing.expectEqual(@as(usize, 0), coordinator.implementations.items.len);
 }
 
 test "Coordinator - drmFd returns -1 when no implementations" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     const backends = [_]ImplementationOptions{
         .{ .backend_type = .null, .request_mode = .if_available },
@@ -454,7 +455,7 @@ test "Coordinator - drmFd returns -1 when no implementations" {
 }
 
 test "Coordinator - hasSession initially false" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     const backends = [_]ImplementationOptions{
         .{ .backend_type = .drm, .request_mode = .if_available },
@@ -464,11 +465,11 @@ test "Coordinator - hasSession initially false" {
     var coordinator = try Coordinator.create(testing.allocator, &backends, opts);
     defer coordinator.deinit();
 
-    try testing.expect(!coordinator.hasSession());
+    try testing.expectFalse(coordinator.hasSession());
 }
 
 test "Coordinator - start with mandatory backend failure" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     const backends = [_]ImplementationOptions{
         .{ .backend_type = .drm, .request_mode = .mandatory },
@@ -479,12 +480,12 @@ test "Coordinator - start with mandatory backend failure" {
     defer coordinator.deinit();
 
     // Since no implementations are added, start should fail
-    const result = coordinator.start();
-    try testing.expectEqual(false, result);
+    const result = try coordinator.start();
+    try testing.expectFalse(result);
 }
 
 test "Coordinator - fallback backend activation" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     const backends = [_]ImplementationOptions{
         .{ .backend_type = .headless, .request_mode = .fallback },
@@ -495,11 +496,11 @@ test "Coordinator - fallback backend activation" {
     defer coordinator.deinit();
 
     // Fallback backends can be started
-    try testing.expect(coordinator.implementations.items.len == 0);
+    try testing.expectEqual(0, coordinator.implementations.items.len);
 }
 
 test "Coordinator - getPollFds aggregates all sources" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     const backends = [_]ImplementationOptions{
         .{ .backend_type = .null, .request_mode = .if_available },
@@ -517,7 +518,7 @@ test "Coordinator - getPollFds aggregates all sources" {
 }
 
 test "Coordinator - multiple backend types simultaneously" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     const backends = [_]ImplementationOptions{
         .{ .backend_type = .drm, .request_mode = .if_available },

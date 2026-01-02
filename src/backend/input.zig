@@ -3,359 +3,358 @@ const core = @import("core");
 const string = @import("core.string").string;
 const libinput = @import("libinput.zig");
 
-pub const Input = struct {
-    pub const DeviceType = enum {
-        keyboard,
-        pointer,
-        touch,
-        tablet_tool,
-        tablet_pad,
-        switch_device,
+pub const DeviceType = enum {
+    keyboard,
+    pointer,
+    touch,
+    tablet_tool,
+    tablet_pad,
+    switch_device,
 
-        pub fn fromLibinput(device: *libinput.Device) DeviceType {
-            if (libinput.c.libinput_device_has_capability(device, @intFromEnum(libinput.DeviceCapability.keyboard)) != 0) {
-                return .keyboard;
-            }
-            if (libinput.c.libinput_device_has_capability(device, @intFromEnum(libinput.DeviceCapability.pointer)) != 0) {
-                return .pointer;
-            }
-            if (libinput.c.libinput_device_has_capability(device, @intFromEnum(libinput.DeviceCapability.touch)) != 0) {
-                return .touch;
-            }
-            if (libinput.c.libinput_device_has_capability(device, @intFromEnum(libinput.DeviceCapability.tablet_tool)) != 0) {
-                return .tablet_tool;
-            }
-            if (libinput.c.libinput_device_has_capability(device, @intFromEnum(libinput.DeviceCapability.tablet_pad)) != 0) {
-                return .tablet_pad;
-            }
-            if (libinput.c.libinput_device_has_capability(device, @intFromEnum(libinput.DeviceCapability.switch_device)) != 0) {
-                return .switch_device;
-            }
-            return .pointer; // fallback
+    pub fn fromLibinput(device: *libinput.Device) DeviceType {
+        if (libinput.c.libinput_device_has_capability(device, @intFromEnum(libinput.DeviceCapability.keyboard)) != 0) {
+            return .keyboard;
         }
+        if (libinput.c.libinput_device_has_capability(device, @intFromEnum(libinput.DeviceCapability.pointer)) != 0) {
+            return .pointer;
+        }
+        if (libinput.c.libinput_device_has_capability(device, @intFromEnum(libinput.DeviceCapability.touch)) != 0) {
+            return .touch;
+        }
+        if (libinput.c.libinput_device_has_capability(device, @intFromEnum(libinput.DeviceCapability.tablet_tool)) != 0) {
+            return .tablet_tool;
+        }
+        if (libinput.c.libinput_device_has_capability(device, @intFromEnum(libinput.DeviceCapability.tablet_pad)) != 0) {
+            return .tablet_pad;
+        }
+        if (libinput.c.libinput_device_has_capability(device, @intFromEnum(libinput.DeviceCapability.switch_device)) != 0) {
+            return .switch_device;
+        }
+        return .pointer; // fallback
+    }
+};
+
+pub const Device = struct {
+    name: string,
+    sysname: string,
+    vendor: u32,
+    product: u32,
+    device_type: DeviceType,
+    enabled: bool = true,
+
+    libinput_device: *libinput.Device,
+    allocator: std.mem.Allocator,
+
+    pub fn fromLibinput(allocator: std.mem.Allocator, device: *libinput.Device) !*Device {
+        const dev = try allocator.create(Device);
+
+        const name = libinput.c.libinput_device_get_name(device);
+        const sysname = libinput.c.libinput_device_get_sysname(device);
+
+        dev.* = .{
+            .name = try allocator.dupe(u8, std.mem.span(name)),
+            .sysname = try allocator.dupe(u8, std.mem.span(sysname)),
+            .vendor = @intCast(libinput.c.libinput_device_get_id_vendor(device)),
+            .product = @intCast(libinput.c.libinput_device_get_id_product(device)),
+            .device_type = DeviceType.fromLibinput(device),
+            .libinput_device = device,
+            .allocator = allocator,
+        };
+
+        // Keep device alive by adding a reference
+        _ = libinput.c.libinput_device_ref(device);
+
+        return dev;
+    }
+
+    pub fn deinit(self: *Device) void {
+        _ = libinput.c.libinput_device_unref(self.libinput_device);
+        self.allocator.free(self.name);
+        self.allocator.free(self.sysname);
+        self.allocator.destroy(self);
+    }
+};
+
+pub const Event = union(enum) {
+    keyboard_key: KeyboardKeyEvent,
+    pointer_motion: PointerMotionEvent,
+    pointer_motion_absolute: PointerMotionAbsoluteEvent,
+    pointer_button: PointerButtonEvent,
+    pointer_axis: PointerAxisEvent,
+    device_added: DeviceEvent,
+    device_removed: DeviceEvent,
+
+    pub const KeyboardKeyEvent = struct {
+        device: *Device,
+        time_usec: u64,
+        key: u32,
+        state: libinput.KeyState,
     };
 
-    pub const Device = struct {
-        name: string,
-        sysname: string,
-        vendor: u32,
-        product: u32,
-        device_type: DeviceType,
-        enabled: bool = true,
-
-        libinput_device: *libinput.Device,
-        allocator: std.mem.Allocator,
-
-        pub fn fromLibinput(allocator: std.mem.Allocator, device: *libinput.Device) !*Device {
-            const dev = try allocator.create(Device);
-
-            const name = libinput.c.libinput_device_get_name(device);
-            const sysname = libinput.c.libinput_device_get_sysname(device);
-
-            dev.* = .{
-                .name = try allocator.dupe(u8, std.mem.span(name)),
-                .sysname = try allocator.dupe(u8, std.mem.span(sysname)),
-                .vendor = @intCast(libinput.c.libinput_device_get_id_vendor(device)),
-                .product = @intCast(libinput.c.libinput_device_get_id_product(device)),
-                .device_type = DeviceType.fromLibinput(device),
-                .libinput_device = device,
-                .allocator = allocator,
-            };
-
-            // Keep device alive by adding a reference
-            _ = libinput.c.libinput_device_ref(device);
-
-            return dev;
-        }
-
-        pub fn deinit(self: *Device) void {
-            _ = libinput.c.libinput_device_unref(self.libinput_device);
-            self.allocator.free(self.name);
-            self.allocator.free(self.sysname);
-            self.allocator.destroy(self);
-        }
+    pub const PointerMotionEvent = struct {
+        device: *Device,
+        time_usec: u64,
+        delta_x: f64,
+        delta_y: f64,
+        unaccel_delta_x: f64,
+        unaccel_delta_y: f64,
     };
 
-    pub const Event = union(enum) {
-        keyboard_key: KeyboardKeyEvent,
-        pointer_motion: PointerMotionEvent,
-        pointer_motion_absolute: PointerMotionAbsoluteEvent,
-        pointer_button: PointerButtonEvent,
-        pointer_axis: PointerAxisEvent,
-        device_added: DeviceEvent,
-        device_removed: DeviceEvent,
-
-        pub const KeyboardKeyEvent = struct {
-            device: *Device,
-            time_usec: u64,
-            key: u32,
-            state: libinput.KeyState,
-        };
-
-        pub const PointerMotionEvent = struct {
-            device: *Device,
-            time_usec: u64,
-            delta_x: f64,
-            delta_y: f64,
-            unaccel_delta_x: f64,
-            unaccel_delta_y: f64,
-        };
-
-        pub const PointerMotionAbsoluteEvent = struct {
-            device: *Device,
-            time_usec: u64,
-            x: f64,
-            y: f64,
-        };
-
-        pub const PointerButtonEvent = struct {
-            device: *Device,
-            time_usec: u64,
-            button: u32,
-            state: libinput.ButtonState,
-        };
-
-        pub const PointerAxisEvent = struct {
-            device: *Device,
-            time_usec: u64,
-            axis: libinput.PointerAxis,
-            value: f64,
-            value_discrete: i32,
-            source: libinput.PointerAxisSource,
-        };
-
-        pub const DeviceEvent = struct {
-            device: *Device,
-        };
+    pub const PointerMotionAbsoluteEvent = struct {
+        device: *Device,
+        time_usec: u64,
+        x: f64,
+        y: f64,
     };
 
-    pub const EventQueue = struct {
-        events: std.ArrayList(Event),
-        allocator: std.mem.Allocator,
-
-        pub fn init(allocator: std.mem.Allocator) EventQueue {
-            return .{
-                .events = .{},
-                .allocator = allocator,
-            };
-        }
-
-        pub fn deinit(self: *EventQueue) void {
-            self.events.deinit(self.allocator);
-        }
-
-        pub fn push(self: *EventQueue, event: Event) !void {
-            try self.events.append(self.allocator, event);
-        }
-
-        pub fn len(self: *const EventQueue) usize {
-            return self.events.items.len;
-        }
-
-        pub fn pop(self: *EventQueue) ?Event {
-            if (self.events.items.len == 0) return null;
-            return self.events.orderedRemove(0);
-        }
-
-        pub fn drain(self: *EventQueue) []const Event {
-            defer self.events.clearRetainingCapacity();
-            return self.events.items;
-        }
-
-        pub fn clear(self: *EventQueue) void {
-            self.events.clearRetainingCapacity();
-        }
+    pub const PointerButtonEvent = struct {
+        device: *Device,
+        time_usec: u64,
+        button: u32,
+        state: libinput.ButtonState,
     };
 
-    pub const Manager = struct {
-        allocator: std.mem.Allocator,
-        libinput_context: *libinput.Context,
-        devices: std.AutoHashMap(*libinput.Device, *Device),
-        event_queue: EventQueue,
+    pub const PointerAxisEvent = struct {
+        device: *Device,
+        time_usec: u64,
+        axis: libinput.PointerAxis,
+        value: f64,
+        value_discrete: i32,
+        source: libinput.PointerAxisSource,
+    };
 
-        pub fn init(allocator: std.mem.Allocator, udev: *anyopaque, seat_id: string) !Manager {
-            const interface = libinput.c.libinput_interface{
-                .open_restricted = openRestricted,
-                .close_restricted = closeRestricted,
-            };
-
-            const ctx = libinput.c.libinput_udev_create_context(
-                &interface,
-                null,
-                @ptrCast(udev),
-            ) orelse return error.LibinputContextFailed;
-
-            if (libinput.c.libinput_udev_assign_seat(ctx, seat_id.ptr) != 0) {
-                libinput.c.libinput_unref(ctx);
-                return error.SeatAssignFailed;
-            }
-
-            return .{
-                .allocator = allocator,
-                .libinput_context = ctx,
-                .devices = std.AutoHashMap(*libinput.Device, *Device).init(allocator),
-                .event_queue = EventQueue.init(allocator),
-            };
-        }
-
-        pub fn deinit(self: *Manager) void {
-            var it = self.devices.valueIterator();
-            while (it.next()) |device| {
-                device.*.deinit();
-            }
-            self.devices.deinit();
-            self.event_queue.deinit();
-            libinput.c.libinput_unref(self.libinput_context);
-        }
-
-        pub fn getFd(self: *Manager) c_int {
-            return libinput.c.libinput_get_fd(self.libinput_context);
-        }
-
-        pub fn processEvents(self: *Manager) !void {
-            _ = libinput.c.libinput_dispatch(self.libinput_context);
-
-            while (libinput.c.libinput_get_event(self.libinput_context)) |event| {
-                defer libinput.c.libinput_event_destroy(event);
-                try self.handleLibinputEvent(event);
-            }
-        }
-
-        fn handleLibinputEvent(self: *Manager, event: *libinput.Event) !void {
-            const event_type: libinput.EventType = @enumFromInt(libinput.c.libinput_event_get_type(event));
-
-            switch (event_type) {
-                .device_added => try self.handleDeviceAdded(event),
-                .device_removed => try self.handleDeviceRemoved(event),
-                .keyboard_key => try self.handleKeyboardKey(event),
-                .pointer_motion => try self.handlePointerMotion(event),
-                .pointer_motion_absolute => try self.handlePointerMotionAbsolute(event),
-                .pointer_button => try self.handlePointerButton(event),
-                .pointer_axis => try self.handlePointerAxis(event),
-                else => {},
-            }
-        }
-
-        fn handleDeviceAdded(self: *Manager, event: *libinput.Event) !void {
-            const device = libinput.c.libinput_event_get_device(event);
-            const input_device = try Device.fromLibinput(self.allocator, device);
-
-            try self.devices.put(device, input_device);
-            try self.event_queue.push(.{ .device_added = .{ .device = input_device } });
-        }
-
-        fn handleDeviceRemoved(self: *Manager, event: *libinput.Event) !void {
-            const device = libinput.c.libinput_event_get_device(event);
-
-            if (self.devices.fetchRemove(device)) |kv| {
-                try self.event_queue.push(.{ .device_removed = .{ .device = kv.value } });
-                kv.value.deinit();
-            }
-        }
-
-        fn handleKeyboardKey(self: *Manager, event: *libinput.Event) !void {
-            const key_event = libinput.c.libinput_event_get_keyboard_event(event);
-            const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
-
-            try self.event_queue.push(.{
-                .keyboard_key = .{
-                    .device = device,
-                    .time_usec = libinput.c.libinput_event_keyboard_get_time_usec(key_event),
-                    .key = libinput.c.libinput_event_keyboard_get_key(key_event),
-                    .state = @enumFromInt(libinput.c.libinput_event_keyboard_get_key_state(key_event)),
-                },
-            });
-        }
-
-        fn handlePointerMotion(self: *Manager, event: *libinput.Event) !void {
-            const pointer_event = libinput.c.libinput_event_get_pointer_event(event);
-            const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
-
-            try self.event_queue.push(.{
-                .pointer_motion = .{
-                    .device = device,
-                    .time_usec = libinput.c.libinput_event_pointer_get_time_usec(pointer_event),
-                    .delta_x = libinput.c.libinput_event_pointer_get_dx(pointer_event),
-                    .delta_y = libinput.c.libinput_event_pointer_get_dy(pointer_event),
-                    .unaccel_delta_x = libinput.c.libinput_event_pointer_get_dx_unaccelerated(pointer_event),
-                    .unaccel_delta_y = libinput.c.libinput_event_pointer_get_dy_unaccelerated(pointer_event),
-                },
-            });
-        }
-
-        fn handlePointerMotionAbsolute(self: *Manager, event: *libinput.Event) !void {
-            const pointer_event = libinput.c.libinput_event_get_pointer_event(event);
-            const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
-
-            try self.event_queue.push(.{
-                .pointer_motion_absolute = .{
-                    .device = device,
-                    .time_usec = libinput.c.libinput_event_pointer_get_time_usec(pointer_event),
-                    .x = libinput.c.libinput_event_pointer_get_absolute_x_transformed(pointer_event, 1),
-                    .y = libinput.c.libinput_event_pointer_get_absolute_y_transformed(pointer_event, 1),
-                },
-            });
-        }
-
-        fn handlePointerButton(self: *Manager, event: *libinput.Event) !void {
-            const pointer_event = libinput.c.libinput_event_get_pointer_event(event);
-            const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
-
-            try self.event_queue.push(.{
-                .pointer_button = .{
-                    .device = device,
-                    .time_usec = libinput.c.libinput_event_pointer_get_time_usec(pointer_event),
-                    .button = libinput.c.libinput_event_pointer_get_button(pointer_event),
-                    .state = @enumFromInt(libinput.c.libinput_event_pointer_get_button_state(pointer_event)),
-                },
-            });
-        }
-
-        fn handlePointerAxis(self: *Manager, event: *libinput.Event) !void {
-            const pointer_event = libinput.c.libinput_event_get_pointer_event(event);
-            const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
-
-            const axes = [_]libinput.PointerAxis{ .scroll_vertical, .scroll_horizontal };
-            for (axes) |axis| {
-                if (libinput.c.libinput_event_pointer_has_axis(pointer_event, @intFromEnum(axis)) == 0) continue;
-
-                try self.event_queue.push(.{
-                    .pointer_axis = .{
-                        .device = device,
-                        .time_usec = libinput.c.libinput_event_pointer_get_time_usec(pointer_event),
-                        .axis = axis,
-                        .value = libinput.c.libinput_event_pointer_get_axis_value(pointer_event, @intFromEnum(axis)),
-                        .value_discrete = @intCast(libinput.c.libinput_event_pointer_get_axis_value_discrete(pointer_event, @intFromEnum(axis))),
-                        .source = @enumFromInt(libinput.c.libinput_event_pointer_get_axis_source(pointer_event)),
-                    },
-                });
-            }
-        }
-
-        fn getDeviceForLibinputDevice(self: *Manager, device: *libinput.Device) !*Device {
-            return self.devices.get(device) orelse error.DeviceNotFound;
-        }
-
-        fn openRestricted(path: [*c]const u8, flags: c_int, user_data: ?*anyopaque) callconv(.C) c_int {
-            _ = user_data;
-            return std.posix.open(std.mem.span(path), @bitCast(@as(u32, @intCast(flags))), 0) catch return -1;
-        }
-
-        fn closeRestricted(fd: c_int, user_data: ?*anyopaque) callconv(.C) void {
-            _ = user_data;
-            std.posix.close(fd);
-        }
+    pub const DeviceEvent = struct {
+        device: *Device,
     };
 };
 
+pub const EventQueue = struct {
+    events: std.ArrayList(Event),
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) EventQueue {
+        return .{
+            .events = .{},
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *EventQueue) void {
+        self.events.deinit(self.allocator);
+    }
+
+    pub fn push(self: *EventQueue, event: Event) !void {
+        try self.events.append(self.allocator, event);
+    }
+
+    pub fn len(self: *const EventQueue) usize {
+        return self.events.items.len;
+    }
+
+    pub fn pop(self: *EventQueue) ?Event {
+        if (self.events.items.len == 0) return null;
+        return self.events.orderedRemove(0);
+    }
+
+    pub fn drain(self: *EventQueue) []const Event {
+        defer self.events.clearRetainingCapacity();
+        return self.events.items;
+    }
+
+    pub fn clear(self: *EventQueue) void {
+        self.events.clearRetainingCapacity();
+    }
+};
+
+pub const Manager = struct {
+    allocator: std.mem.Allocator,
+    libinput_context: *libinput.Context,
+    devices: std.AutoHashMap(*libinput.Device, *Device),
+    event_queue: EventQueue,
+
+    pub fn init(allocator: std.mem.Allocator, udev: *anyopaque, seat_id: string) !Manager {
+        const interface = libinput.c.libinput_interface{
+            .open_restricted = openRestricted,
+            .close_restricted = closeRestricted,
+        };
+
+        const ctx = libinput.c.libinput_udev_create_context(
+            &interface,
+            null,
+            @ptrCast(udev),
+        ) orelse return error.LibinputContextFailed;
+
+        if (libinput.c.libinput_udev_assign_seat(ctx, seat_id.ptr) != 0) {
+            libinput.c.libinput_unref(ctx);
+            return error.SeatAssignFailed;
+        }
+
+        return .{
+            .allocator = allocator,
+            .libinput_context = ctx,
+            .devices = std.AutoHashMap(*libinput.Device, *Device).init(allocator),
+            .event_queue = EventQueue.init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *Manager) void {
+        var it = self.devices.valueIterator();
+        while (it.next()) |device| {
+            device.*.deinit();
+        }
+        self.devices.deinit();
+        self.event_queue.deinit();
+        libinput.c.libinput_unref(self.libinput_context);
+    }
+
+    pub fn getFd(self: *Manager) c_int {
+        return libinput.c.libinput_get_fd(self.libinput_context);
+    }
+
+    pub fn processEvents(self: *Manager) !void {
+        _ = libinput.c.libinput_dispatch(self.libinput_context);
+
+        while (libinput.c.libinput_get_event(self.libinput_context)) |event| {
+            defer libinput.c.libinput_event_destroy(event);
+            try self.handleLibinputEvent(event);
+        }
+    }
+
+    fn handleLibinputEvent(self: *Manager, event: *libinput.Event) !void {
+        const event_type: libinput.EventType = @enumFromInt(libinput.c.libinput_event_get_type(event));
+
+        switch (event_type) {
+            .device_added => try self.handleDeviceAdded(event),
+            .device_removed => try self.handleDeviceRemoved(event),
+            .keyboard_key => try self.handleKeyboardKey(event),
+            .pointer_motion => try self.handlePointerMotion(event),
+            .pointer_motion_absolute => try self.handlePointerMotionAbsolute(event),
+            .pointer_button => try self.handlePointerButton(event),
+            .pointer_axis => try self.handlePointerAxis(event),
+            else => {},
+        }
+    }
+
+    fn handleDeviceAdded(self: *Manager, event: *libinput.Event) !void {
+        const device = libinput.c.libinput_event_get_device(event);
+        const input_device = try Device.fromLibinput(self.allocator, device);
+
+        try self.devices.put(device, input_device);
+        try self.event_queue.push(.{ .device_added = .{ .device = input_device } });
+    }
+
+    fn handleDeviceRemoved(self: *Manager, event: *libinput.Event) !void {
+        const device = libinput.c.libinput_event_get_device(event);
+
+        if (self.devices.fetchRemove(device)) |kv| {
+            try self.event_queue.push(.{ .device_removed = .{ .device = kv.value } });
+            kv.value.deinit();
+        }
+    }
+
+    fn handleKeyboardKey(self: *Manager, event: *libinput.Event) !void {
+        const key_event = libinput.c.libinput_event_get_keyboard_event(event);
+        const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
+
+        try self.event_queue.push(.{
+            .keyboard_key = .{
+                .device = device,
+                .time_usec = libinput.c.libinput_event_keyboard_get_time_usec(key_event),
+                .key = libinput.c.libinput_event_keyboard_get_key(key_event),
+                .state = @enumFromInt(libinput.c.libinput_event_keyboard_get_key_state(key_event)),
+            },
+        });
+    }
+
+    fn handlePointerMotion(self: *Manager, event: *libinput.Event) !void {
+        const pointer_event = libinput.c.libinput_event_get_pointer_event(event);
+        const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
+
+        try self.event_queue.push(.{
+            .pointer_motion = .{
+                .device = device,
+                .time_usec = libinput.c.libinput_event_pointer_get_time_usec(pointer_event),
+                .delta_x = libinput.c.libinput_event_pointer_get_dx(pointer_event),
+                .delta_y = libinput.c.libinput_event_pointer_get_dy(pointer_event),
+                .unaccel_delta_x = libinput.c.libinput_event_pointer_get_dx_unaccelerated(pointer_event),
+                .unaccel_delta_y = libinput.c.libinput_event_pointer_get_dy_unaccelerated(pointer_event),
+            },
+        });
+    }
+
+    fn handlePointerMotionAbsolute(self: *Manager, event: *libinput.Event) !void {
+        const pointer_event = libinput.c.libinput_event_get_pointer_event(event);
+        const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
+
+        try self.event_queue.push(.{
+            .pointer_motion_absolute = .{
+                .device = device,
+                .time_usec = libinput.c.libinput_event_pointer_get_time_usec(pointer_event),
+                .x = libinput.c.libinput_event_pointer_get_absolute_x_transformed(pointer_event, 1),
+                .y = libinput.c.libinput_event_pointer_get_absolute_y_transformed(pointer_event, 1),
+            },
+        });
+    }
+
+    fn handlePointerButton(self: *Manager, event: *libinput.Event) !void {
+        const pointer_event = libinput.c.libinput_event_get_pointer_event(event);
+        const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
+
+        try self.event_queue.push(.{
+            .pointer_button = .{
+                .device = device,
+                .time_usec = libinput.c.libinput_event_pointer_get_time_usec(pointer_event),
+                .button = libinput.c.libinput_event_pointer_get_button(pointer_event),
+                .state = @enumFromInt(libinput.c.libinput_event_pointer_get_button_state(pointer_event)),
+            },
+        });
+    }
+
+    fn handlePointerAxis(self: *Manager, event: *libinput.Event) !void {
+        const pointer_event = libinput.c.libinput_event_get_pointer_event(event);
+        const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
+
+        const axes = [_]libinput.PointerAxis{ .scroll_vertical, .scroll_horizontal };
+        for (axes) |axis| {
+            if (libinput.c.libinput_event_pointer_has_axis(pointer_event, @intFromEnum(axis)) == 0) continue;
+
+            try self.event_queue.push(.{
+                .pointer_axis = .{
+                    .device = device,
+                    .time_usec = libinput.c.libinput_event_pointer_get_time_usec(pointer_event),
+                    .axis = axis,
+                    .value = libinput.c.libinput_event_pointer_get_axis_value(pointer_event, @intFromEnum(axis)),
+                    .value_discrete = @intCast(libinput.c.libinput_event_pointer_get_axis_value_discrete(pointer_event, @intFromEnum(axis))),
+                    .source = @enumFromInt(libinput.c.libinput_event_pointer_get_axis_source(pointer_event)),
+                },
+            });
+        }
+    }
+
+    fn getDeviceForLibinputDevice(self: *Manager, device: *libinput.Device) !*Device {
+        return self.devices.get(device) orelse error.DeviceNotFound;
+    }
+
+    fn openRestricted(path: [*c]const u8, flags: c_int, user_data: ?*anyopaque) callconv(.C) c_int {
+        _ = user_data;
+        return std.posix.open(std.mem.span(path), @bitCast(@as(u32, @intCast(flags))), 0) catch return -1;
+    }
+
+    fn closeRestricted(fd: c_int, user_data: ?*anyopaque) callconv(.C) void {
+        _ = user_data;
+        std.posix.close(fd);
+    }
+};
+
 // ===== Edge Case Tests =====
+const testing = core.testing;
 
 test "EventQueue - large queue handling (1000+ events)" {
-    var queue = Input.EventQueue.init(std.testing.allocator);
+    var queue = EventQueue.init(testing.allocator);
     defer queue.deinit();
 
     // Mock device for testing
-    var mock_device = Input.Device{
+    var mock_device = Device{
         .name = "Mock Device",
         .sysname = "mock0",
         .vendor = 0x1234,
@@ -363,7 +362,7 @@ test "EventQueue - large queue handling (1000+ events)" {
         .device_type = .keyboard,
         .enabled = true,
         .libinput_device = undefined,
-        .allocator = std.testing.allocator,
+        .allocator = testing.allocator,
     };
 
     // Add 1000+ events
@@ -379,19 +378,19 @@ test "EventQueue - large queue handling (1000+ events)" {
         });
     }
 
-    try std.testing.expectEqual(@as(usize, 1200), queue.events.items.len);
+    try testing.expectEqual(@as(usize, 1200), queue.events.items.len);
 
     // Drain should work with large queues
     const events = queue.drain();
-    try std.testing.expectEqual(@as(usize, 1200), events.len);
-    try std.testing.expectEqual(@as(usize, 0), queue.events.items.len);
+    try testing.expectEqual(@as(usize, 1200), events.len);
+    try testing.expectEqual(@as(usize, 0), queue.events.items.len);
 }
 
 test "EventQueue - events remain valid after device pointer in queue" {
-    var queue = Input.EventQueue.init(std.testing.allocator);
+    var queue = EventQueue.init(testing.allocator);
     defer queue.deinit();
 
-    var mock_device = Input.Device{
+    var mock_device = Device{
         .name = "Mock Device",
         .sysname = "mock0",
         .vendor = 0x1234,
@@ -399,7 +398,7 @@ test "EventQueue - events remain valid after device pointer in queue" {
         .device_type = .keyboard,
         .enabled = true,
         .libinput_device = undefined,
-        .allocator = std.testing.allocator,
+        .allocator = testing.allocator,
     };
 
     // Add events with device pointer
@@ -420,15 +419,15 @@ test "EventQueue - events remain valid after device pointer in queue" {
 
     // Pop first event - device pointer should still be accessible
     const event1 = queue.pop().?;
-    try std.testing.expectEqual(@as(u32, 10), event1.keyboard_key.key);
+    try testing.expectEqual(@as(u32, 10), event1.keyboard_key.key);
 
     // Pop device_removed event
     const event2 = queue.pop().?;
-    try std.testing.expectEqual(&mock_device, event2.device_removed.device);
+    try testing.expectEqual(&mock_device, event2.device_removed.device);
 }
 
 test "Device - identical vendor/product IDs" {
-    const mock_device1 = Input.Device{
+    const mock_device1 = Device{
         .name = "Device 1",
         .sysname = "device1",
         .vendor = 0x1234,
@@ -436,10 +435,10 @@ test "Device - identical vendor/product IDs" {
         .device_type = .keyboard,
         .enabled = true,
         .libinput_device = undefined,
-        .allocator = std.testing.allocator,
+        .allocator = testing.allocator,
     };
 
-    const mock_device2 = Input.Device{
+    const mock_device2 = Device{
         .name = "Device 2",
         .sysname = "device2",
         .vendor = 0x1234, // Same vendor
@@ -447,23 +446,23 @@ test "Device - identical vendor/product IDs" {
         .device_type = .pointer,
         .enabled = true,
         .libinput_device = undefined,
-        .allocator = std.testing.allocator,
+        .allocator = testing.allocator,
     };
 
     // Devices should be distinguishable by name/sysname
-    try std.testing.expect(!std.mem.eql(u8, mock_device1.name, mock_device2.name));
-    try std.testing.expect(!std.mem.eql(u8, mock_device1.sysname, mock_device2.sysname));
+    try testing.expectNotEqual(mock_device1.name, mock_device2.name);
+    try testing.expectNotEqual(mock_device1.sysname, mock_device2.sysname);
 
     // But same vendor/product
-    try std.testing.expectEqual(mock_device1.vendor, mock_device2.vendor);
-    try std.testing.expectEqual(mock_device1.product, mock_device2.product);
+    try testing.expectEqual(mock_device1.vendor, mock_device2.vendor);
+    try testing.expectEqual(mock_device1.product, mock_device2.product);
 }
 
 test "EventQueue - rapid add/remove simulation" {
-    var queue = Input.EventQueue.init(std.testing.allocator);
+    var queue = EventQueue.init(testing.allocator);
     defer queue.deinit();
 
-    var mock_device = Input.Device{
+    var mock_device = Device{
         .name = "Rapid Device",
         .sysname = "rapid0",
         .vendor = 0xABCD,
@@ -471,7 +470,7 @@ test "EventQueue - rapid add/remove simulation" {
         .device_type = .pointer,
         .enabled = true,
         .libinput_device = undefined,
-        .allocator = std.testing.allocator,
+        .allocator = testing.allocator,
     };
 
     // Simulate rapid add/remove cycles
@@ -501,22 +500,22 @@ test "EventQueue - rapid add/remove simulation" {
     }
 
     // Should have 30 events (3 per cycle * 10 cycles)
-    try std.testing.expectEqual(@as(usize, 30), queue.events.items.len);
+    try testing.expectEqual(@as(usize, 30), queue.events.items.len);
 
     // All events should be poppable in order
     var count: usize = 0;
     while (queue.pop()) |_| {
         count += 1;
     }
-    try std.testing.expectEqual(@as(usize, 30), count);
+    try testing.expectEqual(@as(usize, 30), count);
 }
 
 test "EventQueue - device pointer validity tracking" {
-    var queue = Input.EventQueue.init(std.testing.allocator);
+    var queue = EventQueue.init(testing.allocator);
     defer queue.deinit();
 
     // Simulate scenario where device is removed but events still reference it
-    var device_still_referenced = Input.Device{
+    var device_still_referenced = Device{
         .name = "Referenced Device",
         .sysname = "ref0",
         .vendor = 0x0001,
@@ -524,7 +523,7 @@ test "EventQueue - device pointer validity tracking" {
         .device_type = .keyboard,
         .enabled = true,
         .libinput_device = undefined,
-        .allocator = std.testing.allocator,
+        .allocator = testing.allocator,
     };
 
     // Add multiple events before device removal
@@ -563,28 +562,28 @@ test "EventQueue - device pointer validity tracking" {
     });
 
     // All events should be retrievable
-    try std.testing.expectEqual(@as(usize, 4), queue.events.items.len);
+    try testing.expectEqual(@as(usize, 4), queue.events.items.len);
 
     // Process events in order - device pointer should be valid throughout
     const event1 = queue.pop().?;
-    try std.testing.expectEqual(@as(u32, 1), event1.keyboard_key.key);
-    try std.testing.expectEqualStrings("Referenced Device", event1.keyboard_key.device.name);
+    try testing.expectEqual(@as(u32, 1), event1.keyboard_key.key);
+    try testing.expectEqualStrings("Referenced Device", event1.keyboard_key.device.name);
 
     const event2 = queue.pop().?;
-    try std.testing.expectEqual(@as(u32, 2), event2.keyboard_key.key);
+    try testing.expectEqual(@as(u32, 2), event2.keyboard_key.key);
 
     const event3 = queue.pop().?;
-    try std.testing.expectEqualStrings("Referenced Device", event3.device_removed.device.name);
+    try testing.expectEqualStrings("Referenced Device", event3.device_removed.device.name);
 
     const event4 = queue.pop().?;
-    try std.testing.expectEqual(@as(u32, 3), event4.keyboard_key.key);
+    try testing.expectEqual(@as(u32, 3), event4.keyboard_key.key);
 }
 
 test "EventQueue - clear and length operations" {
-    var queue = Input.EventQueue.init(std.testing.allocator);
+    var queue = EventQueue.init(testing.allocator);
     defer queue.deinit();
 
-    var mock_device = Input.Device{
+    var mock_device = Device{
         .name = "Test",
         .sysname = "test0",
         .vendor = 0,
@@ -592,24 +591,24 @@ test "EventQueue - clear and length operations" {
         .device_type = .keyboard,
         .enabled = true,
         .libinput_device = undefined,
-        .allocator = std.testing.allocator,
+        .allocator = testing.allocator,
     };
 
-    try std.testing.expectEqual(@as(usize, 0), queue.len());
+    try testing.expectEqual(@as(usize, 0), queue.len());
 
     try queue.push(.{ .device_added = .{ .device = &mock_device } });
-    try std.testing.expectEqual(@as(usize, 1), queue.len());
+    try testing.expectEqual(@as(usize, 1), queue.len());
 
     try queue.push(.{ .device_added = .{ .device = &mock_device } });
-    try std.testing.expectEqual(@as(usize, 2), queue.len());
+    try testing.expectEqual(@as(usize, 2), queue.len());
 
     queue.clear();
-    try std.testing.expectEqual(@as(usize, 0), queue.len());
+    try testing.expectEqual(@as(usize, 0), queue.len());
 }
 
 test "Device - type detection from capabilities" {
     // Test that DeviceType enum covers all expected types
-    const types = [_]Input.DeviceType{
+    const types = [_]DeviceType{
         .keyboard,
         .pointer,
         .touch,
@@ -626,10 +625,10 @@ test "Device - type detection from capabilities" {
 }
 
 test "EventQueue - ordering preservation under stress" {
-    var queue = Input.EventQueue.init(std.testing.allocator);
+    var queue = EventQueue.init(testing.allocator);
     defer queue.deinit();
 
-    var mock_device = Input.Device{
+    var mock_device = Device{
         .name = "Ordered Device",
         .sysname = "ordered0",
         .vendor = 0xFFFF,
@@ -637,7 +636,7 @@ test "EventQueue - ordering preservation under stress" {
         .device_type = .keyboard,
         .enabled = true,
         .libinput_device = undefined,
-        .allocator = std.testing.allocator,
+        .allocator = testing.allocator,
     };
 
     // Add events with sequential keys to verify ordering
@@ -656,18 +655,18 @@ test "EventQueue - ordering preservation under stress" {
     // Pop all and verify order is preserved
     var actual_key: u32 = 0;
     while (queue.pop()) |event| {
-        try std.testing.expectEqual(actual_key, event.keyboard_key.key);
+        try testing.expectEqual(actual_key, event.keyboard_key.key);
         actual_key += 1;
     }
 
-    try std.testing.expectEqual(@as(u32, 500), actual_key);
+    try testing.expectEqual(@as(u32, 500), actual_key);
 }
 
 test "EventQueue - mixed event types" {
-    var queue = Input.EventQueue.init(std.testing.allocator);
+    var queue = EventQueue.init(testing.allocator);
     defer queue.deinit();
 
-    var mock_kb = Input.Device{
+    var mock_kb = Device{
         .name = "Keyboard",
         .sysname = "kb0",
         .vendor = 0x1,
@@ -675,10 +674,10 @@ test "EventQueue - mixed event types" {
         .device_type = .keyboard,
         .enabled = true,
         .libinput_device = undefined,
-        .allocator = std.testing.allocator,
+        .allocator = testing.allocator,
     };
 
-    var mock_ptr = Input.Device{
+    var mock_ptr = Device{
         .name = "Pointer",
         .sysname = "ptr0",
         .vendor = 0x2,
@@ -686,7 +685,7 @@ test "EventQueue - mixed event types" {
         .device_type = .pointer,
         .enabled = true,
         .libinput_device = undefined,
-        .allocator = std.testing.allocator,
+        .allocator = testing.allocator,
     };
 
     // Interleave different event types
@@ -712,27 +711,27 @@ test "EventQueue - mixed event types" {
     });
     try queue.push(.{ .device_removed = .{ .device = &mock_kb } });
 
-    try std.testing.expectEqual(@as(usize, 5), queue.len());
+    try testing.expectEqual(@as(usize, 5), queue.len());
 
     // Verify correct types in order
     const e1 = queue.pop().?;
-    try std.testing.expect(e1 == .device_added);
+    try testing.expectEqual(.device_added, std.meta.activeTag(e1));
 
     const e2 = queue.pop().?;
-    try std.testing.expect(e2 == .device_added);
+    try testing.expectEqual(.device_added, std.meta.activeTag(e2));
 
     const e3 = queue.pop().?;
-    try std.testing.expect(e3 == .keyboard_key);
+    try testing.expectEqual(.keyboard_key, std.meta.activeTag(e3));
 
     const e4 = queue.pop().?;
-    try std.testing.expect(e4 == .pointer_motion);
+    try testing.expectEqual(.pointer_motion, std.meta.activeTag(e4));
 
     const e5 = queue.pop().?;
-    try std.testing.expect(e5 == .device_removed);
+    try testing.expectEqual(.device_removed, std.meta.activeTag(e5));
 }
 
 test "Device - disabled state handling" {
-    var device = Input.Device{
+    var device = Device{
         .name = "Test Device",
         .sysname = "test0",
         .vendor = 0x1234,
@@ -740,41 +739,41 @@ test "Device - disabled state handling" {
         .device_type = .keyboard,
         .enabled = true,
         .libinput_device = undefined,
-        .allocator = std.testing.allocator,
+        .allocator = testing.allocator,
     };
 
-    try std.testing.expect(device.enabled);
+    try testing.expect(device.enabled);
 
     device.enabled = false;
-    try std.testing.expect(!device.enabled);
+    try testing.expectFalse(device.enabled);
 
     // Re-enabling should work
     device.enabled = true;
-    try std.testing.expect(device.enabled);
+    try testing.expect(device.enabled);
 }
 
 test "EventQueue - pop from empty queue" {
-    var queue = Input.EventQueue.init(std.testing.allocator);
+    var queue = EventQueue.init(testing.allocator);
     defer queue.deinit();
 
     // Pop from empty queue should return null
-    try std.testing.expect(queue.pop() == null);
-    try std.testing.expect(queue.pop() == null);
+    try testing.expectNull(queue.pop());
+    try testing.expectNull(queue.pop());
 }
 
 test "EventQueue - drain empty queue" {
-    var queue = Input.EventQueue.init(std.testing.allocator);
+    var queue = EventQueue.init(testing.allocator);
     defer queue.deinit();
 
     const events = queue.drain();
-    try std.testing.expectEqual(@as(usize, 0), events.len);
+    try testing.expectEqual(@as(usize, 0), events.len);
 }
 
 test "EventQueue - interleaved device lifecycle events" {
-    var queue = Input.EventQueue.init(std.testing.allocator);
+    var queue = EventQueue.init(testing.allocator);
     defer queue.deinit();
 
-    var device1 = Input.Device{
+    var device1 = Device{
         .name = "Device 1",
         .sysname = "dev1",
         .vendor = 0x1,
@@ -782,10 +781,10 @@ test "EventQueue - interleaved device lifecycle events" {
         .device_type = .keyboard,
         .enabled = true,
         .libinput_device = undefined,
-        .allocator = std.testing.allocator,
+        .allocator = testing.allocator,
     };
 
-    var device2 = Input.Device{
+    var device2 = Device{
         .name = "Device 2",
         .sysname = "dev2",
         .vendor = 0x2,
@@ -793,7 +792,7 @@ test "EventQueue - interleaved device lifecycle events" {
         .device_type = .pointer,
         .enabled = true,
         .libinput_device = undefined,
-        .allocator = std.testing.allocator,
+        .allocator = testing.allocator,
     };
 
     // Simulate: device1 added, device2 added, device1 removed, device2 removed
@@ -826,7 +825,7 @@ test "EventQueue - interleaved device lifecycle events" {
     });
     try queue.push(.{ .device_removed = .{ .device = &device2 } });
 
-    try std.testing.expectEqual(@as(usize, 7), queue.len());
+    try testing.expectEqual(@as(usize, 7), queue.len());
 
     // Process all events - should maintain correct device references
     var device1_added = false;
@@ -848,14 +847,14 @@ test "EventQueue - interleaved device lifecycle events" {
         }
     }
 
-    try std.testing.expect(device1_added);
-    try std.testing.expect(device1_removed);
-    try std.testing.expect(device2_added);
-    try std.testing.expect(device2_removed);
+    try testing.expect(device1_added);
+    try testing.expect(device1_removed);
+    try testing.expect(device2_added);
+    try testing.expect(device2_removed);
 }
 
 test "Device - multiple device types" {
-    const types = [_]Input.DeviceType{
+    const types = [_]DeviceType{
         .keyboard,
         .pointer,
         .touch,
@@ -865,7 +864,7 @@ test "Device - multiple device types" {
     };
 
     for (types, 0..) |device_type, i| {
-        const device = Input.Device{
+        const device = Device{
             .name = "Multi Device",
             .sysname = "multi0",
             .vendor = @intCast(i),
@@ -873,18 +872,18 @@ test "Device - multiple device types" {
             .device_type = device_type,
             .enabled = true,
             .libinput_device = undefined,
-            .allocator = std.testing.allocator,
+            .allocator = testing.allocator,
         };
 
-        try std.testing.expectEqual(device_type, device.device_type);
+        try testing.expectEqual(device_type, device.device_type);
     }
 }
 
 test "EventQueue - event timestamp ordering validation" {
-    var queue = Input.EventQueue.init(std.testing.allocator);
+    var queue = EventQueue.init(testing.allocator);
     defer queue.deinit();
 
-    var mock_device = Input.Device{
+    var mock_device = Device{
         .name = "Time Device",
         .sysname = "time0",
         .vendor = 0x9999,
@@ -892,7 +891,7 @@ test "EventQueue - event timestamp ordering validation" {
         .device_type = .keyboard,
         .enabled = true,
         .libinput_device = undefined,
-        .allocator = std.testing.allocator,
+        .allocator = testing.allocator,
     };
 
     // Add events with specific timestamps
@@ -911,13 +910,13 @@ test "EventQueue - event timestamp ordering validation" {
 
     // Events should be in insertion order, not timestamp order
     const e1 = queue.pop().?;
-    try std.testing.expectEqual(@as(u64, 1000), e1.keyboard_key.time_usec);
+    try testing.expectEqual(@as(u64, 1000), e1.keyboard_key.time_usec);
 
     const e2 = queue.pop().?;
-    try std.testing.expectEqual(@as(u64, 500), e2.keyboard_key.time_usec);
+    try testing.expectEqual(@as(u64, 500), e2.keyboard_key.time_usec);
 
     const e3 = queue.pop().?;
-    try std.testing.expectEqual(@as(u64, 2000), e3.keyboard_key.time_usec);
+    try testing.expectEqual(@as(u64, 2000), e3.keyboard_key.time_usec);
 }
 
 // Aquamarine-style input device interfaces
@@ -1041,8 +1040,6 @@ pub const ITabletPad = core.vtable.DeviceInterface("ITabletPad");
 
 // Tests for device interfaces
 test "IKeyboard - interface creation and methods" {
-    const testing = std.testing;
-
     const MockKeyboard = struct {
         name: []const u8,
         leds_state: u32 = 0,
@@ -1085,8 +1082,6 @@ test "IKeyboard - interface creation and methods" {
 }
 
 test "IPointer - interface creation" {
-    const testing = std.testing;
-
     const MockPointer = struct {
         name: []const u8,
 
@@ -1119,8 +1114,6 @@ test "IPointer - interface creation" {
 }
 
 test "ITouch - interface creation" {
-    const testing = std.testing;
-
     const MockTouch = struct {
         name: []const u8,
 
@@ -1152,8 +1145,6 @@ test "ITouch - interface creation" {
 }
 
 test "ISwitch - interface with SwitchType enum" {
-    const testing = std.testing;
-
     const MockSwitch = struct {
         name: []const u8,
 
@@ -1190,8 +1181,6 @@ test "ISwitch - interface with SwitchType enum" {
 }
 
 test "ITablet - interface creation" {
-    const testing = std.testing;
-
     const MockTablet = struct {
         name: []const u8,
 
@@ -1223,8 +1212,6 @@ test "ITablet - interface creation" {
 }
 
 test "ITabletTool - interface with ToolType enum" {
-    const testing = std.testing;
-
     const MockTabletTool = struct {
         name: []const u8,
         type: ITabletTool.Type,
@@ -1263,8 +1250,6 @@ test "ITabletTool - interface with ToolType enum" {
 }
 
 test "ITabletPad - interface creation" {
-    const testing = std.testing;
-
     const MockTabletPad = struct {
         name: []const u8,
 
@@ -1296,8 +1281,6 @@ test "ITabletPad - interface creation" {
 }
 
 test "Multiple device interfaces - different types" {
-    const testing = std.testing;
-
     const MockKeyboard = struct {
         name: []const u8,
 
@@ -1363,12 +1346,10 @@ test "Multiple device interfaces - different types" {
 }
 
 test "Manager - device hotplug during event processing" {
-    const testing = std.testing;
-
-    var queue = Input.EventQueue.init(testing.allocator);
+    var queue = EventQueue.init(testing.allocator);
     defer queue.deinit();
 
-    var device1 = Input.Device{
+    var device1 = Device{
         .name = "Initial Device",
         .sysname = "initial0",
         .vendor = 0x1234,
@@ -1379,7 +1360,7 @@ test "Manager - device hotplug during event processing" {
         .allocator = testing.allocator,
     };
 
-    var device2 = Input.Device{
+    var device2 = Device{
         .name = "Hotplugged Device",
         .sysname = "hotplug0",
         .vendor = 0xABCD,
@@ -1444,12 +1425,10 @@ test "Manager - recover from libinput context failure" {
 }
 
 test "EventQueue - event ordering with multiple device types" {
-    const testing = std.testing;
-
-    var queue = Input.EventQueue.init(testing.allocator);
+    var queue = EventQueue.init(testing.allocator);
     defer queue.deinit();
 
-    var keyboard = Input.Device{
+    var keyboard = Device{
         .name = "Keyboard",
         .sysname = "kbd0",
         .vendor = 0x1,
@@ -1460,7 +1439,7 @@ test "EventQueue - event ordering with multiple device types" {
         .allocator = testing.allocator,
     };
 
-    var pointer = Input.Device{
+    var pointer = Device{
         .name = "Mouse",
         .sysname = "mouse0",
         .vendor = 0x2,
@@ -1511,29 +1490,27 @@ test "EventQueue - event ordering with multiple device types" {
 
     // Verify order is preserved
     const e1 = queue.pop().?;
-    try testing.expect(e1 == .keyboard_key);
+    try testing.expectEqual(.keyboard_key, std.meta.activeTag(e1));
     try testing.expectEqual(@as(u64, 1000), e1.keyboard_key.time_usec);
 
     const e2 = queue.pop().?;
-    try testing.expect(e2 == .pointer_motion);
+    try testing.expectEqual(.pointer_motion, std.meta.activeTag(e2));
     try testing.expectEqual(@as(u64, 1100), e2.pointer_motion.time_usec);
 
     const e3 = queue.pop().?;
-    try testing.expect(e3 == .pointer_button);
+    try testing.expectEqual(.pointer_button, std.meta.activeTag(e3));
     try testing.expectEqual(@as(u64, 1200), e3.pointer_button.time_usec);
 
     const e4 = queue.pop().?;
-    try testing.expect(e4 == .keyboard_key);
+    try testing.expectEqual(.keyboard_key, std.meta.activeTag(e4));
     try testing.expectEqual(@as(u64, 1300), e4.keyboard_key.time_usec);
 }
 
 test "Device - multiple capabilities on single device" {
-    const testing = std.testing;
-
     // Some devices (like laptop touchpads) have both pointer and touch capabilities
     // This test ensures our device model can handle this
 
-    var combo_device = Input.Device{
+    var combo_device = Device{
         .name = "Touchpad with Pointer",
         .sysname = "combo0",
         .vendor = 0x1234,
@@ -1545,10 +1522,10 @@ test "Device - multiple capabilities on single device" {
     };
 
     try testing.expectEqualStrings("Touchpad with Pointer", combo_device.name);
-    try testing.expectEqual(Input.DeviceType.pointer, combo_device.device_type);
+    try testing.expectEqual(DeviceType.pointer, combo_device.device_type);
 
     // Device should handle events from its primary capability
-    var queue = Input.EventQueue.init(testing.allocator);
+    var queue = EventQueue.init(testing.allocator);
     defer queue.deinit();
 
     try queue.push(.{
@@ -1564,16 +1541,14 @@ test "Device - multiple capabilities on single device" {
 
     try testing.expectEqual(@as(usize, 1), queue.len());
     const event = queue.pop().?;
-    try testing.expect(event == .pointer_motion);
+    try testing.expectEqual(.pointer_motion, std.meta.activeTag(event));
 }
 
 test "Manager - seat switching" {
-    const testing = std.testing;
-
     // This test documents the expected behavior when switching seats
     // In practice, this would require deinit and re-init of the Manager
 
-    var device1 = Input.Device{
+    var device1 = Device{
         .name = "Seat0 Device",
         .sysname = "seat0dev",
         .vendor = 0x1111,
@@ -1584,7 +1559,7 @@ test "Manager - seat switching" {
         .allocator = testing.allocator,
     };
 
-    var device2 = Input.Device{
+    var device2 = Device{
         .name = "Seat1 Device",
         .sysname = "seat1dev",
         .vendor = 0x3333,
@@ -1596,7 +1571,7 @@ test "Manager - seat switching" {
     };
 
     // Simulate seat switch by clearing old devices and adding new ones
-    var queue = Input.EventQueue.init(testing.allocator);
+    var queue = EventQueue.init(testing.allocator);
     defer queue.deinit();
 
     // Old seat devices removed
@@ -1608,10 +1583,10 @@ test "Manager - seat switching" {
     try testing.expectEqual(@as(usize, 2), queue.len());
 
     const e1 = queue.pop().?;
-    try testing.expect(e1 == .device_removed);
+    try testing.expectEqual(.device_removed, std.meta.activeTag(e1));
     try testing.expectEqualStrings("Seat0 Device", e1.device_removed.device.name);
 
     const e2 = queue.pop().?;
-    try testing.expect(e2 == .device_added);
+    try testing.expectEqual(.device_added, std.meta.activeTag(e2));
     try testing.expectEqualStrings("Seat1 Device", e2.device_added.device.name);
 }

@@ -104,7 +104,7 @@ pub const Manager = struct {
 
 // Tests
 test "Manager - initialization and cleanup" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     var manager = Manager.init(testing.allocator);
     defer manager.deinit();
@@ -113,7 +113,7 @@ test "Manager - initialization and cleanup" {
 }
 
 test "Manager - add and get attachment" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     const TestAttachment = struct {
         value: i32,
@@ -139,12 +139,12 @@ test "Manager - add and get attachment" {
     try testing.expect(manager.has(TestAttachment));
 
     const retrieved = manager.get(TestAttachment);
-    try testing.expect(retrieved != null);
+    try testing.expectNotNull(retrieved);
     try testing.expectEqual(@as(i32, 42), retrieved.?.value);
 }
 
 test "Manager - has returns false for non-existent type" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     const TestAttachment = struct {
         value: i32,
@@ -153,11 +153,11 @@ test "Manager - has returns false for non-existent type" {
     var manager = Manager.init(testing.allocator);
     defer manager.deinit();
 
-    try testing.expect(!manager.has(TestAttachment));
+    try testing.expectFalse(manager.has(TestAttachment));
 }
 
 test "Manager - get returns null for non-existent type" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     const TestAttachment = struct {
         value: i32,
@@ -167,11 +167,11 @@ test "Manager - get returns null for non-existent type" {
     defer manager.deinit();
 
     const result = manager.get(TestAttachment);
-    try testing.expect(result == null);
+    try testing.expectNull(result);
 }
 
 test "Manager - add replaces previous attachment of same type" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     const TestAttachment = struct {
         value: i32,
@@ -211,7 +211,7 @@ test "Manager - add replaces previous attachment of same type" {
 }
 
 test "Manager - removeByType" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     const TestAttachment = struct {
         value: i32,
@@ -235,11 +235,11 @@ test "Manager - removeByType" {
     try testing.expect(manager.has(TestAttachment));
 
     manager.removeByType(TestAttachment);
-    try testing.expect(!manager.has(TestAttachment));
+    try testing.expectFalse(manager.has(TestAttachment));
 }
 
 test "Manager - clear removes all attachments" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     const Attachment1 = struct {
         value: i32,
@@ -281,7 +281,7 @@ test "Manager - clear removes all attachments" {
 }
 
 test "Manager - multiple different attachment types" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     const IntAttachment = struct {
         value: i32,

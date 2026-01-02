@@ -3,6 +3,7 @@
 const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
+const core = @import("core");
 const os = @import("core.os");
 const FileDescriptor = os.file.Descriptor;
 const protocol = @import("protocol.zig");
@@ -400,10 +401,10 @@ pub const Client = struct {
     }
 };
 
+const testing = core.testing;
+
 // Tests
 test "Connection - basic send/receive" {
-    const testing = std.testing;
-
     // Create a socketpair for testing using syscall
     var fds: [2]i32 = undefined;
     const result = linux.socketpair(
@@ -432,8 +433,6 @@ test "Connection - basic send/receive" {
 }
 
 test "Server - init and deinit" {
-    const testing = std.testing;
-
     const socket_path = "/tmp/sideswipe_test.sock";
 
     var server = try Server.init(testing.allocator, socket_path);
@@ -443,19 +442,15 @@ test "Server - init and deinit" {
 }
 
 test "RawParsedMessage - init and deinit" {
-    const testing = std.testing;
-
     var msg = RawParsedMessage.init(testing.allocator);
     defer msg.deinit();
 
-    try testing.expect(msg.data.items.len == 0);
-    try testing.expect(msg.fds.items.len == 0);
-    try testing.expect(!msg.bad);
+    try testing.expectEqual(0, msg.data.items.len);
+    try testing.expectEqual(0, msg.fds.items.len);
+    try testing.expectFalse(msg.bad);
 }
 
 test "RawParsedMessage - append data" {
-    const testing = std.testing;
-
     var msg = RawParsedMessage.init(testing.allocator);
     defer msg.deinit();
 
@@ -467,8 +462,6 @@ test "RawParsedMessage - append data" {
 }
 
 test "parseFromFd - basic data" {
-    const testing = std.testing;
-
     // Create a socketpair for testing
     var fds: [2]i32 = undefined;
     const result = linux.socketpair(
@@ -493,15 +486,13 @@ test "parseFromFd - basic data" {
     var parsed = try parseFromFd(FileDescriptor.init(fds[1]), testing.allocator);
     defer parsed.deinit();
 
-    try testing.expect(!parsed.bad);
+    try testing.expectFalse(parsed.bad);
     try testing.expectEqual(test_msg.len, parsed.data.items.len);
     try testing.expectEqualStrings(test_msg, parsed.data.items);
     try testing.expectEqual(@as(usize, 0), parsed.fds.items.len);
 }
 
 test "parseFromFd - large data in chunks" {
-    const testing = std.testing;
-
     var fds: [2]i32 = undefined;
     const result = linux.socketpair(
         posix.AF.UNIX,
@@ -533,14 +524,12 @@ test "parseFromFd - large data in chunks" {
     var parsed = try parseFromFd(FileDescriptor.init(fds[1]), testing.allocator);
     defer parsed.deinit();
 
-    try testing.expect(!parsed.bad);
+    try testing.expectFalse(parsed.bad);
     try testing.expectEqual(large_size, parsed.data.items.len);
     try testing.expectEqualSlices(u8, large_data, parsed.data.items);
 }
 
 test "Connection - parseMessage integration" {
-    const testing = std.testing;
-
     var fds: [2]i32 = undefined;
     const result = linux.socketpair(
         posix.AF.UNIX,
@@ -563,13 +552,11 @@ test "Connection - parseMessage integration" {
     var parsed = try sock.parseMessage();
     defer parsed.deinit();
 
-    try testing.expect(!parsed.bad);
+    try testing.expectFalse(parsed.bad);
     try testing.expectEqualStrings(test_msg, parsed.data.items);
 }
 
 test "FileDescriptor - integration with parseFromFd" {
-    const testing = std.testing;
-
     var fds: [2]i32 = undefined;
     const result = linux.socketpair(
         posix.AF.UNIX,
@@ -597,13 +584,11 @@ test "FileDescriptor - integration with parseFromFd" {
     var parsed = try parseFromFd(fd_wrapper, testing.allocator);
     defer parsed.deinit();
 
-    try testing.expect(!parsed.bad);
+    try testing.expectFalse(parsed.bad);
     try testing.expectEqualStrings(test_msg, parsed.data.items);
 }
 
 test "RawParsedMessage - closeFds" {
-    const testing = std.testing;
-
     var msg = RawParsedMessage.init(testing.allocator);
     defer msg.deinit();
 

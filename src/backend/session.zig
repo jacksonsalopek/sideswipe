@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const posix = std.posix;
+const core = @import("core");
 const input = @import("input.zig");
 
 const c = @cImport({
@@ -551,22 +552,20 @@ pub const PollFd = struct {
     revents: i16 = 0,
 };
 
+const testing = core.testing;
+
 // Tests
 test "Session - initialization" {
-    const testing = std.testing;
-
     var sess = try Type.init(testing.allocator, null);
     defer sess.deinit();
 
-    try testing.expect(sess.active == true);
+    try testing.expect(sess.active);
     try testing.expectEqual(@as(u32, 0), sess.vt);
     try testing.expectEqual(@as(usize, 0), sess.session_devices.items.len);
     try testing.expectEqual(@as(usize, 0), sess.libinput_devices.items.len);
 }
 
 test "Device - basic initialization" {
-    const testing = std.testing;
-
     var sess = try Type.init(testing.allocator, null);
     defer sess.deinit();
 
@@ -579,11 +578,9 @@ test "Device - basic initialization" {
 }
 
 test "Session - switch VT returns false when not implemented" {
-    const testing = std.testing;
-
     var sess = try Type.init(testing.allocator, null);
     defer sess.deinit();
 
     const result = sess.switchVt(2);
-    try testing.expectEqual(false, result);
+    try testing.expectFalse(result);
 }

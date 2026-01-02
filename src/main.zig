@@ -1,6 +1,7 @@
 const std = @import("std");
 const backend = @import("backend");
 const core = @import("core");
+const cli = @import("core.cli");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -11,7 +12,7 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    var parser = core.cli.args.Parser.init(allocator, args);
+    var parser = cli.args.Parser.init(allocator, args);
     defer parser.deinit();
 
     // Register options
@@ -37,7 +38,7 @@ pub fn main() !void {
     }
 
     // Initialize logger
-    var logger = core.cli.Logger.init(allocator);
+    var logger = cli.Logger.init(allocator);
     defer logger.deinit();
 
     // Configure logger based on arguments
@@ -84,7 +85,7 @@ pub fn main() !void {
     logger.err("This is an error (don't worry, it's just a demo)", .{});
 
     // Demonstrate logger connection
-    var conn = core.cli.LoggerConnection.init(allocator, &logger);
+    var conn = cli.LoggerConnection.init(allocator, &logger);
     defer conn.deinit();
     try conn.setName("MainModule");
     conn.debug("Message from logger connection", .{});

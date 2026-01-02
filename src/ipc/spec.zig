@@ -1,7 +1,8 @@
 //! Protocol specification system
 
 const std = @import("std");
-const Interface = @import("core").vtable.Interface;
+const core = @import("core");
+const VTable = core.vtable.Interface;
 const message = @import("message.zig");
 const Magic = message.Magic;
 
@@ -15,7 +16,7 @@ pub const Method = struct {
 
 /// Object specification interface
 pub const Object = struct {
-    base: Interface(VTableDef),
+    base: VTable(VTableDef),
 
     pub const VTableDef = struct {
         object_name: *const fn (ptr: *anyopaque) []const u8,
@@ -29,7 +30,7 @@ pub const Object = struct {
     const Self = @This();
 
     pub fn init(ptr: anytype, vtable: *const VTableDef) Self {
-        return .{ .base = Interface(VTableDef).init(ptr, vtable) };
+        return .{ .base = VTable(VTableDef).init(ptr, vtable) };
     }
 
     pub fn objectName(self: Self) []const u8 {
@@ -51,7 +52,7 @@ pub const Object = struct {
 
 /// Protocol specification interface
 pub const Protocol = struct {
-    base: Interface(VTableDef),
+    base: VTable(VTableDef),
 
     pub const VTableDef = struct {
         spec_name: *const fn (ptr: *anyopaque) []const u8,
@@ -63,7 +64,7 @@ pub const Protocol = struct {
     const Self = @This();
 
     pub fn init(ptr: anytype, vtable: *const VTableDef) Self {
-        return .{ .base = Interface(VTableDef).init(ptr, vtable) };
+        return .{ .base = VTable(VTableDef).init(ptr, vtable) };
     }
 
     pub fn specName(self: Self) []const u8 {
@@ -132,10 +133,10 @@ pub const Instance = struct {
     }
 };
 
+const testing = core.testing;
+
 // Tests
 test "Method - structure" {
-    const testing = std.testing;
-
     const method = Method{
         .idx = 0,
         .params = &[_]Magic{ .type_uint, .type_varchar },
@@ -149,8 +150,6 @@ test "Method - structure" {
 }
 
 test "Instance - user data management" {
-    const testing = std.testing;
-
     var obj = Instance.init(testing.allocator, 1, "test_protocol", 1);
     defer obj.deinit();
 
@@ -163,8 +162,6 @@ test "Instance - user data management" {
 }
 
 test "Instance - destroy callback" {
-    const testing = std.testing;
-
     const State = struct {
         var destroyed: bool = false;
 
@@ -187,8 +184,6 @@ test "Instance - destroy callback" {
 }
 
 test "ObjectSpec - interface" {
-    const testing = std.testing;
-
     const MockObjectSpec = struct {
         name: []const u8,
         c2s_methods: []const Method,
@@ -242,8 +237,6 @@ test "ObjectSpec - interface" {
 }
 
 test "Protocol - interface" {
-    const testing = std.testing;
-
     const MockProtocolSpec = struct {
         name: []const u8,
         version: u32,

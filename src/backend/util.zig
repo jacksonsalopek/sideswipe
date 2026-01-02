@@ -1,4 +1,5 @@
 const std = @import("std");
+const core = @import("core");
 const string_utils = @import("core.string");
 const string = string_utils.string;
 const c_string = string_utils.c_string;
@@ -29,94 +30,6 @@ pub const Env = struct {
     }
 };
 
-test "Env.enabled - not set" {
-    try std.testing.expect(!Env.enabled("SIDESWIPE_TEST_NOT_SET"));
-}
-
-test "Env.enabled - set to 1" {
-    if (setenv("SIDESWIPE_TEST_ENABLED", "1", 1) != 0) return error.SetEnvFailed;
-    try std.testing.expect(Env.enabled("SIDESWIPE_TEST_ENABLED"));
-}
-
-test "Env.enabled - set to 0" {
-    if (setenv("SIDESWIPE_TEST_ZERO", "0", 1) != 0) return error.SetEnvFailed;
-    try std.testing.expect(!Env.enabled("SIDESWIPE_TEST_ZERO"));
-}
-
-test "Env.enabled - set to true" {
-    if (setenv("SIDESWIPE_TEST_TRUE", "true", 1) != 0) return error.SetEnvFailed;
-    try std.testing.expect(!Env.enabled("SIDESWIPE_TEST_TRUE"));
-}
-
-test "Env.enabled - set to empty string" {
-    if (setenv("SIDESWIPE_TEST_EMPTY", "", 1) != 0) return error.SetEnvFailed;
-    try std.testing.expect(!Env.enabled("SIDESWIPE_TEST_EMPTY"));
-}
-
-test "Env.enabled - set to arbitrary value" {
-    if (setenv("SIDESWIPE_TEST_ARBITRARY", "yes", 1) != 0) return error.SetEnvFailed;
-    try std.testing.expect(!Env.enabled("SIDESWIPE_TEST_ARBITRARY"));
-}
-
-test "Env.explicitlyDisabled - not set" {
-    try std.testing.expect(!Env.explicitlyDisabled("SIDESWIPE_TEST_DISABLED_NOT_SET"));
-}
-
-test "Env.explicitlyDisabled - set to 0" {
-    if (setenv("SIDESWIPE_TEST_DISABLED", "0", 1) != 0) return error.SetEnvFailed;
-    try std.testing.expect(Env.explicitlyDisabled("SIDESWIPE_TEST_DISABLED"));
-}
-
-test "Env.explicitlyDisabled - set to 1" {
-    if (setenv("SIDESWIPE_TEST_DISABLED_ONE", "1", 1) != 0) return error.SetEnvFailed;
-    try std.testing.expect(!Env.explicitlyDisabled("SIDESWIPE_TEST_DISABLED_ONE"));
-}
-
-test "Env.explicitlyDisabled - set to false" {
-    if (setenv("SIDESWIPE_TEST_DISABLED_FALSE", "false", 1) != 0) return error.SetEnvFailed;
-    try std.testing.expect(!Env.explicitlyDisabled("SIDESWIPE_TEST_DISABLED_FALSE"));
-}
-
-test "Env.explicitlyDisabled - set to empty string" {
-    if (setenv("SIDESWIPE_TEST_DISABLED_EMPTY", "", 1) != 0) return error.SetEnvFailed;
-    try std.testing.expect(!Env.explicitlyDisabled("SIDESWIPE_TEST_DISABLED_EMPTY"));
-}
-
-test "Env.explicitlyDisabled - set to arbitrary value" {
-    if (setenv("SIDESWIPE_TEST_DISABLED_ARBITRARY", "no", 1) != 0) return error.SetEnvFailed;
-    try std.testing.expect(!Env.explicitlyDisabled("SIDESWIPE_TEST_DISABLED_ARBITRARY"));
-}
-
-test "Env.isTrace - not set" {
-    // Test when SIDESWIPE_TRACE is not set (default case)
-    // Note: Since trace_value is cached, this test should run first
-    // or we need to ensure SIDESWIPE_TRACE is unset
-    const was_set = std.posix.getenv("SIDESWIPE_TRACE") != null;
-    if (was_set) {
-        // Skip this test if SIDESWIPE_TRACE is already set in the environment
-        return error.SkipZigTest;
-    }
-
-    // Reset trace_value for testing
-    Env.trace_value = null;
-    try std.testing.expect(!Env.isTrace());
-
-    // Verify it's cached
-    try std.testing.expect(!Env.isTrace());
-}
-
-test "Env.isTrace - enabled" {
-    if (setenv("SIDESWIPE_TRACE", "1", 1) != 0) return error.SetEnvFailed;
-
-    // Reset trace_value to force re-read
-    Env.trace_value = null;
-    try std.testing.expect(Env.isTrace());
-
-    // Verify it's cached - even if we change the env var
-    if (setenv("SIDESWIPE_TRACE", "0", 1) != 0) return error.SetEnvFailed;
-    try std.testing.expect(Env.isTrace()); // Still true because cached
-}
-
 pub const Fmt = struct {
     /// Convert DRM fourcc format to a human-readable name.
     /// Caller owns the returned memory and must free it with the provided allocator.
@@ -132,19 +45,109 @@ pub const Fmt = struct {
     }
 };
 
+const testing = core.testing;
+
+test "Env.enabled - not set" {
+    try testing.expectFalse(Env.enabled("SIDESWIPE_TEST_NOT_SET"));
+}
+
+test "Env.enabled - set to 1" {
+    if (setenv("SIDESWIPE_TEST_ENABLED", "1", 1) != 0) return error.SetEnvFailed;
+    try testing.expect(Env.enabled("SIDESWIPE_TEST_ENABLED"));
+}
+
+test "Env.enabled - set to 0" {
+    if (setenv("SIDESWIPE_TEST_ZERO", "0", 1) != 0) return error.SetEnvFailed;
+    try testing.expectFalse(Env.enabled("SIDESWIPE_TEST_ZERO"));
+}
+
+test "Env.enabled - set to true" {
+    if (setenv("SIDESWIPE_TEST_TRUE", "true", 1) != 0) return error.SetEnvFailed;
+    try testing.expectFalse(Env.enabled("SIDESWIPE_TEST_TRUE"));
+}
+
+test "Env.enabled - set to empty string" {
+    if (setenv("SIDESWIPE_TEST_EMPTY", "", 1) != 0) return error.SetEnvFailed;
+    try testing.expectFalse(Env.enabled("SIDESWIPE_TEST_EMPTY"));
+}
+
+test "Env.enabled - set to arbitrary value" {
+    if (setenv("SIDESWIPE_TEST_ARBITRARY", "yes", 1) != 0) return error.SetEnvFailed;
+    try testing.expectFalse(Env.enabled("SIDESWIPE_TEST_ARBITRARY"));
+}
+
+test "Env.explicitlyDisabled - not set" {
+    try testing.expectFalse(Env.explicitlyDisabled("SIDESWIPE_TEST_DISABLED_NOT_SET"));
+}
+
+test "Env.explicitlyDisabled - set to 0" {
+    if (setenv("SIDESWIPE_TEST_DISABLED", "0", 1) != 0) return error.SetEnvFailed;
+    try testing.expect(Env.explicitlyDisabled("SIDESWIPE_TEST_DISABLED"));
+}
+
+test "Env.explicitlyDisabled - set to 1" {
+    if (setenv("SIDESWIPE_TEST_DISABLED_ONE", "1", 1) != 0) return error.SetEnvFailed;
+    try testing.expectFalse(Env.explicitlyDisabled("SIDESWIPE_TEST_DISABLED_ONE"));
+}
+
+test "Env.explicitlyDisabled - set to false" {
+    if (setenv("SIDESWIPE_TEST_DISABLED_FALSE", "false", 1) != 0) return error.SetEnvFailed;
+    try testing.expectFalse(Env.explicitlyDisabled("SIDESWIPE_TEST_DISABLED_FALSE"));
+}
+
+test "Env.explicitlyDisabled - set to empty string" {
+    if (setenv("SIDESWIPE_TEST_DISABLED_EMPTY", "", 1) != 0) return error.SetEnvFailed;
+    try testing.expectFalse(Env.explicitlyDisabled("SIDESWIPE_TEST_DISABLED_EMPTY"));
+}
+
+test "Env.explicitlyDisabled - set to arbitrary value" {
+    if (setenv("SIDESWIPE_TEST_DISABLED_ARBITRARY", "no", 1) != 0) return error.SetEnvFailed;
+    try testing.expectFalse(Env.explicitlyDisabled("SIDESWIPE_TEST_DISABLED_ARBITRARY"));
+}
+
+test "Env.isTrace - not set" {
+    // Test when SIDESWIPE_TRACE is not set (default case)
+    // Note: Since trace_value is cached, this test should run first
+    // or we need to ensure SIDESWIPE_TRACE is unset
+    const was_set = std.posix.getenv("SIDESWIPE_TRACE") != null;
+    if (was_set) {
+        // Skip this test if SIDESWIPE_TRACE is already set in the environment
+        return error.SkipZigTest;
+    }
+
+    // Reset trace_value for testing
+    Env.trace_value = null;
+    try testing.expectFalse(Env.isTrace());
+
+    // Verify it's cached
+    try testing.expectFalse(Env.isTrace());
+}
+
+test "Env.isTrace - enabled" {
+    if (setenv("SIDESWIPE_TRACE", "1", 1) != 0) return error.SetEnvFailed;
+
+    // Reset trace_value to force re-read
+    Env.trace_value = null;
+    try testing.expect(Env.isTrace());
+
+    // Verify it's cached - even if we change the env var
+    if (setenv("SIDESWIPE_TRACE", "0", 1) != 0) return error.SetEnvFailed;
+    try testing.expect(Env.isTrace()); // Still true because cached
+}
+
 test "Fmt.fourccToName - unknown format" {
-    const allocator = std.testing.allocator;
+    const allocator = testing.allocator;
 
     // Use an invalid/unknown format (0)
     const name = try Fmt.fourccToName(0, allocator);
     defer allocator.free(name);
 
     // Should return a valid string for invalid formats
-    try std.testing.expect(name.len > 0);
+    try testing.expect(name.len > 0);
 }
 
 test "Fmt.fourccToName - known format XRGB8888" {
-    const allocator = std.testing.allocator;
+    const allocator = testing.allocator;
 
     // DRM_FORMAT_XRGB8888 = fourcc_code('X', 'R', '2', '4')
     // This is a common 32-bit RGB format
@@ -154,13 +157,13 @@ test "Fmt.fourccToName - known format XRGB8888" {
     defer allocator.free(name);
 
     // Should return a valid format name
-    try std.testing.expect(name.len > 0);
+    try testing.expect(name.len > 0);
     // The name should contain the format identifier
-    try std.testing.expect(!std.mem.eql(u8, name, "unknown"));
+    try testing.expectNotEqual(name, "unknown");
 }
 
 test "Fmt.fourccToName - known format ARGB8888" {
-    const allocator = std.testing.allocator;
+    const allocator = testing.allocator;
 
     // DRM_FORMAT_ARGB8888 = fourcc_code('A', 'R', '2', '4')
     const DRM_FORMAT_ARGB8888: u32 = ('A') | (@as(u32, 'R') << 8) | (@as(u32, '2') << 16) | (@as(u32, '4') << 24);
@@ -168,6 +171,6 @@ test "Fmt.fourccToName - known format ARGB8888" {
     const name = try Fmt.fourccToName(DRM_FORMAT_ARGB8888, allocator);
     defer allocator.free(name);
 
-    try std.testing.expect(name.len > 0);
-    try std.testing.expect(!std.mem.eql(u8, name, "unknown"));
+    try testing.expect(name.len > 0);
+    try testing.expectNotEqual(name, "unknown");
 }

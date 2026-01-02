@@ -2,6 +2,7 @@
 //! Provides hardware-accelerated buffer allocation for DRM/KMS
 
 const std = @import("std");
+const core = @import("core");
 const math = @import("core.math");
 const Vector2D = math.vector2d.Type;
 const allocator = @import("allocator.zig");
@@ -129,17 +130,15 @@ pub const GBMAllocator = struct {
     }
 };
 
+const testing = core.testing;
+
 // Tests
 test "GBMAllocator - invalid fd fails" {
-    const testing = std.testing;
-
     const result = GBMAllocator.create(testing.allocator, -1);
     try testing.expectError(error.InvalidDrmFd, result);
 }
 
 test "GBMAllocator - interface type is GBM" {
-    const testing = std.testing;
-
     // Use a fake fd for testing (won't actually initialize GBM)
     var alloc_impl = GBMAllocator{
         .base = allocator.Implementation.init(testing.allocator),

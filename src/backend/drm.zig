@@ -2,6 +2,7 @@
 //! Avoids circular dependencies by using opaque pointers
 
 const std = @import("std");
+const core = @import("core");
 const math = @import("core.math");
 const Vector2D = math.vector2d.Type;
 const backend = @import("backend.zig");
@@ -872,7 +873,7 @@ pub fn getMaxBpc(drm_format: u32) u8 {
 
 // Tests
 test "DRMBackend - fromGpu creates be" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     var be = try Backend.fromGpu(testing.allocator, "/dev/dri/card0", null, null);
     defer be.deinit();
@@ -883,7 +884,7 @@ test "DRMBackend - fromGpu creates be" {
 }
 
 test "DRMBackend - asInterface returns correct type" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     var be = try Backend.fromGpu(testing.allocator, "/dev/dri/card0", null, null);
     defer be.deinit();
@@ -893,16 +894,16 @@ test "DRMBackend - asInterface returns correct type" {
 }
 
 test "AtomicRequest - initialization" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     var request = AtomicRequest.init(testing.allocator, null);
     defer request.deinit();
 
-    try testing.expect(!request.failed);
+    try testing.expectFalse(request.failed);
 }
 
 test "AtomicRequest - add does nothing when failed" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     var request = AtomicRequest.init(testing.allocator, null);
     defer request.deinit();
@@ -914,7 +915,7 @@ test "AtomicRequest - add does nothing when failed" {
 }
 
 test "getMaxBpc - 8-bit formats" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     const DRM_FORMAT_XRGB8888: u32 = 0x34325258;
     const DRM_FORMAT_ARGB8888: u32 = 0x34325241;
@@ -924,7 +925,7 @@ test "getMaxBpc - 8-bit formats" {
 }
 
 test "getMaxBpc - 10-bit formats" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     const DRM_FORMAT_XRGB2101010: u32 = 0x30335258;
     const DRM_FORMAT_ARGB2101010: u32 = 0x30335241;
@@ -934,7 +935,7 @@ test "getMaxBpc - 10-bit formats" {
 }
 
 test "getMaxBpc - 16-bit formats" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     const DRM_FORMAT_XRGB16161616: u32 = 0x38345258;
     const DRM_FORMAT_ARGB16161616: u32 = 0x38345241;
@@ -944,7 +945,7 @@ test "getMaxBpc - 16-bit formats" {
 }
 
 test "getMaxBpc - unknown format defaults to 8" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     try testing.expectEqual(@as(u8, 8), getMaxBpc(0xDEADBEEF));
     try testing.expectEqual(@as(u8, 8), getMaxBpc(0));

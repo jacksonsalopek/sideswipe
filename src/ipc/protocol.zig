@@ -1,6 +1,7 @@
 //! Protocol implementation
 
 const std = @import("std");
+const core = @import("core");
 
 /// Current protocol version
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -120,10 +121,10 @@ pub const ProtocolSpec = struct {
     }
 };
 
+const testing = core.testing;
+
 // Tests
 test "VarInt - encode and decode" {
-    const testing = std.testing;
-
     // Test small number
     const encoded = try VarInt.encode(testing.allocator, 42);
     defer testing.allocator.free(encoded);
@@ -134,8 +135,6 @@ test "VarInt - encode and decode" {
 }
 
 test "VarInt - encode large number" {
-    const testing = std.testing;
-
     const encoded = try VarInt.encode(testing.allocator, 16384);
     defer testing.allocator.free(encoded);
 
@@ -144,32 +143,24 @@ test "VarInt - encode large number" {
 }
 
 test "VarInt - decode incomplete" {
-    const testing = std.testing;
-
     const incomplete = [_]u8{0x80}; // Has continuation bit but no more bytes
     const result = VarInt.decode(&incomplete);
     try testing.expectError(error.IncompleteVarInt, result);
 }
 
 test "VarInt - decode empty buffer" {
-    const testing = std.testing;
-
     const empty: []const u8 = &[_]u8{};
     const result = VarInt.decode(empty);
     try testing.expectError(error.BufferTooSmall, result);
 }
 
 test "Type - toString" {
-    const testing = std.testing;
-
     try testing.expectEqualStrings("SUP", Type.sup.toString());
     try testing.expectEqualStrings("HANDSHAKE_BEGIN", Type.handshake_begin.toString());
     try testing.expectEqualStrings("GENERIC_PROTOCOL_MESSAGE", Type.generic_protocol_message.toString());
 }
 
 test "ProtocolSpec - format and parse" {
-    const testing = std.testing;
-
     const spec = ProtocolSpec{
         .name = "hyprland_compositor",
         .version = 1,
@@ -186,16 +177,12 @@ test "ProtocolSpec - format and parse" {
 }
 
 test "ProtocolSpec - parse invalid" {
-    const testing = std.testing;
-
     const invalid = "no_version_separator";
     const result = ProtocolSpec.parse(invalid);
     try testing.expectError(error.InvalidProtocolSpec, result);
 }
 
 test "VarInt - roundtrip various values" {
-    const testing = std.testing;
-
     const values = [_]usize{ 0, 1, 127, 128, 255, 256, 16383, 16384, 65535 };
 
     for (values) |val| {

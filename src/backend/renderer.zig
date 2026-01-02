@@ -2,6 +2,7 @@
 //! Handles GPU rendering, buffer blitting, and texture management
 
 const std = @import("std");
+const core = @import("core");
 const math = @import("core.math");
 const Vector2D = math.vector2d.Type;
 const buffer = @import("buffer.zig");
@@ -278,20 +279,18 @@ pub const ContextGuard = struct {
     }
 };
 
+const testing = core.testing;
+
 // Tests
 test "Renderer - EGLState initialization" {
-    const testing = std.testing;
-
     var egl = EGLState.init();
     defer egl.deinit();
 
-    try testing.expect(egl.display == null);
-    try testing.expect(egl.context == null);
+    try testing.expectNull(egl.display);
+    try testing.expectNull(egl.context);
 }
 
 test "Renderer - Shader initialization" {
-    const testing = std.testing;
-
     var shader: Shader = .{};
     defer shader.deinit();
 
@@ -300,24 +299,18 @@ test "Renderer - Shader initialization" {
 }
 
 test "Renderer - GLTexture initialization" {
-    const testing = std.testing;
-
     const tex = GLTexture.init(42, 0x0DE1); // Some texture ID and target
     try testing.expectEqual(@as(GLuint, 42), tex.texid);
     try testing.expectEqual(@as(c_uint, 0x0DE1), tex.target);
 }
 
 test "Renderer - BlitResult defaults" {
-    const testing = std.testing;
-
     const result: BlitResult = .{};
-    try testing.expect(!result.success);
-    try testing.expect(result.sync_fd == null);
+    try testing.expectFalse(result.success);
+    try testing.expectNull(result.sync_fd);
 }
 
 test "ContextGuard - initialization" {
-    const testing = std.testing;
-
     var renderer = Renderer{
         .allocator = testing.allocator,
         .backend = null,
@@ -331,5 +324,5 @@ test "ContextGuard - initialization" {
     var guard = ContextGuard.init(&renderer);
     defer guard.deinit();
 
-    try testing.expect(guard.renderer == &renderer);
+    try testing.expectEqual(&renderer, guard.renderer);
 }

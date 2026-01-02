@@ -1,6 +1,7 @@
 //! Protocol message builder and parser
 
 const std = @import("std");
+const core = @import("core");
 const protocol = @import("protocol.zig");
 const Type = protocol.Type;
 const VarInt = protocol.VarInt;
@@ -416,10 +417,10 @@ pub fn parseGenericProtocolMessage(data: []const u8) !struct { object_id: u32, m
     };
 }
 
+const testing = core.testing;
+
 // Tests
 test "Builder - basic uint32 with magic" {
-    const testing = std.testing;
-
     var builder = try Builder.init(testing.allocator, .handshake_ack);
     defer builder.deinit();
 
@@ -435,8 +436,6 @@ test "Builder - basic uint32 with magic" {
 }
 
 test "Builder - string with magic" {
-    const testing = std.testing;
-
     var builder = try Builder.init(testing.allocator, .sup);
     defer builder.deinit();
 
@@ -451,8 +450,6 @@ test "Builder - string with magic" {
 }
 
 test "Parser - parseUint32 with magic" {
-    const testing = std.testing;
-
     var builder = try Builder.init(testing.allocator, .handshake_ack);
     defer builder.deinit();
     try builder.addUint32(42);
@@ -466,8 +463,6 @@ test "Parser - parseUint32 with magic" {
 }
 
 test "buildSupMessage" {
-    const testing = std.testing;
-
     const msg = try buildSupMessage(testing.allocator);
     defer testing.allocator.free(msg);
 
@@ -476,8 +471,6 @@ test "buildSupMessage" {
 }
 
 test "buildHandshakeBegin" {
-    const testing = std.testing;
-
     const versions = [_]u32{ 1, 2, 3 };
     const msg = try buildHandshakeBegin(testing.allocator, &versions);
     defer testing.allocator.free(msg);
@@ -487,8 +480,6 @@ test "buildHandshakeBegin" {
 }
 
 test "Parser - parseString with magic" {
-    const testing = std.testing;
-
     var builder = try Builder.init(testing.allocator, .sup);
     defer builder.deinit();
     try builder.addString("test");
@@ -502,8 +493,6 @@ test "Parser - parseString with magic" {
 }
 
 test "GenericProtocolMessage - build and parse" {
-    const testing = std.testing;
-
     const payload = "test payload data";
     const msg = try buildGenericProtocolMessage(testing.allocator, 123, 456, payload);
     defer testing.allocator.free(msg);
@@ -517,8 +506,6 @@ test "GenericProtocolMessage - build and parse" {
 }
 
 test "Builder - int32 with magic" {
-    const testing = std.testing;
-
     var builder = try Builder.init(testing.allocator, .generic_protocol_message);
     defer builder.deinit();
 
@@ -532,8 +519,6 @@ test "Builder - int32 with magic" {
 }
 
 test "Builder - f32 with magic" {
-    const testing = std.testing;
-
     var builder = try Builder.init(testing.allocator, .generic_protocol_message);
     defer builder.deinit();
 
@@ -547,8 +532,6 @@ test "Builder - f32 with magic" {
 }
 
 test "Builder - sequence and object_id with magic" {
-    const testing = std.testing;
-
     var builder = try Builder.init(testing.allocator, .generic_protocol_message);
     defer builder.deinit();
 
@@ -566,8 +549,6 @@ test "Builder - sequence and object_id with magic" {
 }
 
 test "Magic - toString" {
-    const testing = std.testing;
-
     try testing.expectEqualStrings("UINT", Magic.type_uint.toString());
     try testing.expectEqualStrings("VARCHAR", Magic.type_varchar.toString());
     try testing.expectEqualStrings("SEQUENCE", Magic.type_seq.toString());

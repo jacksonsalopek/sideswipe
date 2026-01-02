@@ -1,6 +1,7 @@
 //! Miscellaneous backend structures from aquamarine
 
 const std = @import("std");
+const core = @import("core");
 
 /// OpenGL format structure
 pub const GLFormat = struct {
@@ -30,10 +31,10 @@ pub const DRMFormat = struct {
     }
 };
 
+const testing = core.testing;
+
 // Tests
 test "GLFormat - initialization" {
-    const testing = std.testing;
-    
     const format: GLFormat = .{};
     try testing.expectEqual(@as(u32, 0), format.drm_format);
     try testing.expectEqual(@as(u64, 0), format.modifier);
@@ -41,8 +42,6 @@ test "GLFormat - initialization" {
 }
 
 test "DRMFormat - initialization and modifiers" {
-    const testing = std.testing;
-    
     var format = DRMFormat.init(testing.allocator);
     defer format.deinit(testing.allocator);
 

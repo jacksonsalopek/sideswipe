@@ -1,5 +1,6 @@
 const std = @import("std");
-const VTable = @import("core").vtable.Interface;
+const core = @import("core");
+const VTable = core.vtable.Interface;
 const math = @import("core.math");
 const vector2d = math.vector2d;
 const attachment = @import("attachment.zig");
@@ -281,48 +282,48 @@ pub const ExampleBuffer = struct {
     };
 };
 
+const testing = core.testing;
+
 test "Capability - flags" {
     const cap1 = Capability.none;
-    try std.testing.expect(!cap1.dataptr);
+    try testing.expectFalse(cap1.dataptr);
 
     const cap2 = Capability{ .dataptr = true };
-    try std.testing.expect(cap2.dataptr);
+    try testing.expect(cap2.dataptr);
 }
 
 test "Type - enumeration" {
-    try std.testing.expectEqual(Type.dmabuf, .dmabuf);
-    try std.testing.expectEqual(Type.shm, .shm);
-    try std.testing.expectEqual(Type.misc, .misc);
+    try testing.expectEqual(Type.dmabuf, .dmabuf);
+    try testing.expectEqual(Type.shm, .shm);
+    try testing.expectEqual(Type.misc, .misc);
 }
 
 test "DMABUFAttrs - default values" {
     const attrs = DMABUFAttrs{};
-    try std.testing.expect(!attrs.success);
-    try std.testing.expectEqual(@as(u32, 0), attrs.format);
-    try std.testing.expectEqual(@as(i32, 1), attrs.planes);
-    try std.testing.expectEqual(@as(i32, -1), attrs.fds[0]);
+    try testing.expectFalse(attrs.success);
+    try testing.expectEqual(@as(u32, 0), attrs.format);
+    try testing.expectEqual(@as(i32, 1), attrs.planes);
+    try testing.expectEqual(@as(i32, -1), attrs.fds[0]);
 }
 
 test "ExampleBuffer - interface and locking" {
-    var buffer = ExampleBuffer.init(std.testing.allocator);
+    var buffer = ExampleBuffer.init(testing.allocator);
     defer buffer.deinit();
 
     const ibuf = buffer.interface();
-    try std.testing.expect(ibuf.good());
-    try std.testing.expect(ibuf.isSynchronous());
-    try std.testing.expectEqual(Type.misc, ibuf.bufferType());
+    try testing.expect(ibuf.good());
+    try testing.expect(ibuf.isSynchronous());
+    try testing.expectEqual(Type.misc, ibuf.bufferType());
 
     // Test locking mechanism
-    try std.testing.expect(!ibuf.locked());
+    try testing.expect(!ibuf.locked());
     ibuf.lock();
-    try std.testing.expect(ibuf.locked());
+    try testing.expect(ibuf.locked());
     ibuf.unlock();
-    try std.testing.expect(!ibuf.locked());
+    try testing.expect(!ibuf.locked());
 }
 
 test "Buffer - attachments management" {
-    const testing = std.testing;
-
     var buffer = Buffer.init(testing.allocator);
     defer buffer.deinit();
 
@@ -350,8 +351,6 @@ test "Buffer - attachments management" {
 }
 
 test "Buffer - lock/unlock ref counting edge cases" {
-    const testing = std.testing;
-
     var buffer = Buffer.init(testing.allocator);
     defer buffer.deinit();
 
@@ -380,8 +379,6 @@ test "Buffer - lock/unlock ref counting edge cases" {
 }
 
 test "Buffer - attachment lifecycle with buffer destruction" {
-    const testing = std.testing;
-
     var deinit_called = false;
 
     const TestAttachment = struct {
@@ -404,7 +401,7 @@ test "Buffer - attachment lifecycle with buffer destruction" {
         const att = attachment.IAttachment.init(&test_data, &TestAttachment.vtable_instance);
         try buf.attachments.add(TestAttachment, att);
 
-        try testing.expect(!deinit_called);
+        try testing.expectFalse(deinit_called);
         // Buffer goes out of scope, should clean up attachments
         buf.deinit();
     }
@@ -413,8 +410,6 @@ test "Buffer - attachment lifecycle with buffer destruction" {
 }
 
 test "Buffer - DMABUFAttrs validation (planes, strides, offsets)" {
-    const testing = std.testing;
-
     const attrs = DMABUFAttrs{
         .success = true,
         .size = vector2d.Type.init(1920, 1080),
@@ -434,8 +429,6 @@ test "Buffer - DMABUFAttrs validation (planes, strides, offsets)" {
 }
 
 test "Buffer - simultaneous lock by multiple consumers" {
-    const testing = std.testing;
-
     var buffer = Buffer.init(testing.allocator);
     defer buffer.deinit();
 
@@ -461,12 +454,10 @@ test "Buffer - simultaneous lock by multiple consumers" {
     Buffer.defaultUnlock(&buffer);
 
     try testing.expectEqual(@as(i32, 0), buffer.locks);
-    try testing.expect(!Buffer.defaultLocked(&buffer));
+    try testing.expectFalse(Buffer.defaultLocked(&buffer));
 }
 
 test "Buffer - sendRelease called only when fully unlocked" {
-    const testing = std.testing;
-
     var release_count: u32 = 0;
 
     const TestBuffer = struct {

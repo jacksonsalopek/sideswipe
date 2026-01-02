@@ -1,6 +1,7 @@
 //! Swapchain for buffer rotation inspired by aquamarine
 
 const std = @import("std");
+const core = @import("core");
 const math = @import("core.math");
 const Vector2D = math.vector2d.Type;
 const buffer = @import("buffer.zig");
@@ -265,20 +266,18 @@ const TestMockAlloc = struct {
     }
 };
 
-test "Swapchain - Options defaults" {
-    const testing = std.testing;
+const testing = core.testing;
 
+test "Swapchain - Options defaults" {
     const opts: Options = .{};
     try testing.expectEqual(@as(usize, 0), opts.length);
     try testing.expectEqual(@as(u32, 0), opts.format);
-    try testing.expectEqual(false, opts.scanout);
-    try testing.expectEqual(false, opts.cursor);
-    try testing.expectEqual(false, opts.multigpu);
+    try testing.expectFalse(opts.scanout);
+    try testing.expectFalse(opts.cursor);
+    try testing.expectFalse(opts.multigpu);
 }
 
 test "Swapchain - rollback wraps around" {
-    const testing = std.testing;
-
     var swapchain = try Swapchain.create(testing.allocator, TestMockAlloc.get(), null);
     defer swapchain.deinit();
 
@@ -293,8 +292,6 @@ test "Swapchain - rollback wraps around" {
 }
 
 test "Swapchain - currentOptions returns options" {
-    const testing = std.testing;
-
     var swapchain = try Swapchain.create(testing.allocator, TestMockAlloc.get(), null);
     defer swapchain.deinit();
 
@@ -308,12 +305,10 @@ test "Swapchain - currentOptions returns options" {
     const current = swapchain.currentOptions();
 
     try testing.expectEqual(@as(usize, 3), current.length);
-    try testing.expect(current.size.eql(Vector2D.init(1920, 1080)));
+    try testing.expectEqual(Vector2D.init(1920, 1080), current.size);
 }
 
 test "Swapchain - reconfigure with zero size" {
-    const testing = std.testing;
-
     var swapchain = try Swapchain.create(testing.allocator, TestMockAlloc.get(), null);
     defer swapchain.deinit();
 
@@ -329,8 +324,6 @@ test "Swapchain - reconfigure with zero size" {
 }
 
 test "Swapchain - rollback multiple times" {
-    const testing = std.testing;
-
     var swapchain = try Swapchain.create(testing.allocator, TestMockAlloc.get(), null);
     defer swapchain.deinit();
 
@@ -352,8 +345,6 @@ test "Swapchain - rollback multiple times" {
 }
 
 test "Swapchain - resize from 3 to 5 buffers" {
-    const testing = std.testing;
-
     var swapchain = try Swapchain.create(testing.allocator, TestMockAlloc.get(), null);
     defer swapchain.deinit();
 
@@ -368,8 +359,6 @@ test "Swapchain - resize from 3 to 5 buffers" {
 }
 
 test "Swapchain - format auto-selection from allocator" {
-    const testing = std.testing;
-
     const MockAlloc = struct {
         fn acquire(ptr: *anyopaque, params: *const allocator.BufferParams, swapchain_ptr: ?*anyopaque) anyerror!buffer.Interface {
             _ = ptr;
@@ -430,8 +419,6 @@ test "Swapchain - format auto-selection from allocator" {
 }
 
 test "Swapchain - next() cycling with age tracking" {
-    const testing = std.testing;
-
     var swapchain = try Swapchain.create(testing.allocator, TestMockAlloc.get(), null);
     defer swapchain.deinit();
 
@@ -462,8 +449,6 @@ test "Swapchain - next() cycling with age tracking" {
 }
 
 test "Swapchain - contains() with non-swapchain buffer" {
-    const testing = std.testing;
-
     var swapchain = try Swapchain.create(testing.allocator, TestMockAlloc.get(), null);
     defer swapchain.deinit();
 
@@ -544,5 +529,5 @@ test "Swapchain - contains() with non-swapchain buffer" {
     const external_buf = buffer.Interface.init(@as(*anyopaque, @ptrCast(&external_buf_storage)), &MockBuffer.vtable_instance);
 
     // External buffer should not be in swapchain
-    try testing.expect(!swapchain.contains(external_buf));
+    try testing.expectFalse(swapchain.contains(external_buf));
 }

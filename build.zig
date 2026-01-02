@@ -111,6 +111,12 @@ pub fn build(b: *std.Build) void {
     });
     core_i18n_mod.addImport("core.string", core_string_mod);
 
+    const core_cli_mod = b.addModule("core.cli", .{
+        .root_source_file = b.path("src/core/cli/root.zig"),
+        .target = target,
+        .link_libc = true,
+    });
+
     core_mod.linkSystemLibrary("pixman-1", .{});
     core_math_mod.linkSystemLibrary("pixman-1", .{});
 
@@ -197,6 +203,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "core", .module = core_mod },
+                .{ .name = "core.cli", .module = core_cli_mod },
                 .{ .name = "backend", .module = backend_mod },
                 .{ .name = "ipc", .module = ipc_mod },
             },
@@ -326,6 +333,19 @@ pub fn build(b: *std.Build) void {
     const run_core_string_tests = b.addRunArtifact(core_string_tests);
     test_step.dependOn(&run_core_string_tests.step);
 
+    // Test core.cli module
+    const core_cli_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core/cli/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    core_cli_tests.linkLibC();
+    const run_core_cli_tests = b.addRunArtifact(core_cli_tests);
+    test_step.dependOn(&run_core_cli_tests.step);
+
     // Test backend module
     const backend_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -390,10 +410,11 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
                 .imports = &.{
                     .{ .name = "core", .module = core_mod },
-                    .{ .name = "core.math", .module = core_math_mod },
                     .{ .name = "core.anim", .module = core_anim_mod },
-                    .{ .name = "core.os", .module = core_os_mod },
+                    .{ .name = "core.cli", .module = core_cli_mod },
                     .{ .name = "core.i18n", .module = core_i18n_mod },
+                    .{ .name = "core.math", .module = core_math_mod },
+                    .{ .name = "core.os", .module = core_os_mod },
                     .{ .name = "core.string", .module = core_string_mod },
                     .{ .name = "backend", .module = backend_mod },
                     .{ .name = "ipc", .module = ipc_mod },

@@ -2,7 +2,8 @@
 //! Provides abstraction for different buffer allocation methods (GBM, DRM dumb buffers)
 
 const std = @import("std");
-const VTable = @import("core").vtable.Interface;
+const core = @import("core");
+const VTable = core.vtable.Interface;
 const math = @import("core.math");
 const Vector2D = math.vector2d.Type;
 const buffer = @import("buffer.zig");
@@ -141,7 +142,7 @@ pub const Implementation = struct {
 
 // Tests
 test "Allocator - init and deinit" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     var alloc = Implementation.init(testing.allocator);
     defer alloc.deinit();
@@ -151,7 +152,7 @@ test "Allocator - init and deinit" {
 }
 
 test "BufferParams - default values" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     const params: BufferParams = .{};
 
@@ -162,7 +163,7 @@ test "BufferParams - default values" {
 }
 
 test "Type - enum values" {
-    const testing = std.testing;
+    const testing = core.testing;
 
     try testing.expectEqual(@as(u32, 0), @intFromEnum(Type.gbm));
     try testing.expectEqual(@as(u32, 1), @intFromEnum(Type.drm_dumb));

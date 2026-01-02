@@ -207,22 +207,20 @@ pub const Manager = struct {
     }
 };
 
+const testing = core.testing;
+
 // Tests
 test "Manager - initialization and cleanup" {
-    const testing = std.testing;
-
     var manager = Manager.init(testing.allocator);
     defer manager.deinit();
 
     // Verify all signals are initialized
-    try testing.expect(manager.keyboard_key.listeners.items.len == 0);
-    try testing.expect(manager.pointer_motion.listeners.items.len == 0);
-    try testing.expect(manager.frame.listeners.items.len == 0);
+    try testing.expectEqual(0, manager.keyboard_key.listeners.items.len);
+    try testing.expectEqual(0, manager.pointer_motion.listeners.items.len);
+    try testing.expectEqual(0, manager.frame.listeners.items.len);
 }
 
 test "KeyboardKeyEvent - signal emission" {
-    const testing = std.testing;
-
     var manager = Manager.init(testing.allocator);
     defer manager.deinit();
 
@@ -253,8 +251,6 @@ test "KeyboardKeyEvent - signal emission" {
 }
 
 test "PointerMotionEvent - signal emission" {
-    const testing = std.testing;
-
     var manager = Manager.init(testing.allocator);
     defer manager.deinit();
 
@@ -285,8 +281,6 @@ test "PointerMotionEvent - signal emission" {
 }
 
 test "FrameEvent - signal emission" {
-    const testing = std.testing;
-
     var manager = Manager.init(testing.allocator);
     defer manager.deinit();
 
@@ -316,8 +310,6 @@ test "FrameEvent - signal emission" {
 }
 
 test "Manager - multiple listeners on same signal" {
-    const testing = std.testing;
-
     var manager = Manager.init(testing.allocator);
     defer manager.deinit();
 
@@ -357,8 +349,6 @@ test "Manager - multiple listeners on same signal" {
 }
 
 test "Manager - clearAll removes listeners" {
-    const testing = std.testing;
-
     var manager = Manager.init(testing.allocator);
     defer manager.deinit();
 
@@ -396,8 +386,6 @@ test "Manager - clearAll removes listeners" {
 }
 
 test "OutputConfigureEvent - signal emission" {
-    const testing = std.testing;
-
     var manager = Manager.init(testing.allocator);
     defer manager.deinit();
 
@@ -429,8 +417,6 @@ test "OutputConfigureEvent - signal emission" {
 }
 
 test "PointerAxisEvent - all sources and orientations" {
-    const testing = std.testing;
-
     var manager = Manager.init(testing.allocator);
     defer manager.deinit();
 
@@ -462,8 +448,6 @@ test "PointerAxisEvent - all sources and orientations" {
 }
 
 test "BackendReadyEvent - signal emission" {
-    const testing = std.testing;
-
     var manager = Manager.init(testing.allocator);
     defer manager.deinit();
 
