@@ -3,3 +3,4 @@ zig-cache/
 zig-out/
 build/
 protocols/
+src/core/display/edid/pnp_ids.zig

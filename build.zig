@@ -1,5 +1,23 @@
 const std = @import("std");
 
+fn generatePnpIds(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Step {
+    // Build the PNP ID generator executable  
+    const gen_exe = b.addExecutable(.{
+        .name = "gen_pnp_ids",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core/display/edid/gen_pnp_ids.zig"),
+            .target = target,
+        }),
+    });
+    
+    // Run it with arguments
+    const gen_pnp = b.addRunArtifact(gen_exe);
+    gen_pnp.addArg("/usr/share/hwdata/pnp.ids");
+    gen_pnp.addArg("src/core/display/edid/pnp_ids.zig");
+    
+    return &gen_pnp.step;
+}
+
 fn setupWaylandProtocols(b: *std.Build) *std.Build.Step {
     // Create protocols directory
     const mkdir_protocols = b.addSystemCommand(&.{
@@ -57,13 +75,18 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // Clean step
-    const clean_step = b.step("clean", "Clear Zig build caches");
+    const clean_step = b.step("clean", "Clear Zig build caches and generated files");
     const clean_cmd = b.addSystemCommand(&.{
         "sh",
         "-c",
-        "rm -rf .zig-cache protocols zig-out && echo 'Zig caches cleared'",
+        "rm -rf .zig-cache protocols zig-out src/core/display/edid/pnp_ids.zig && echo 'Zig caches and generated files cleared'",
     });
     clean_step.dependOn(&clean_cmd.step);
+
+    // Generate PNP ID database
+    const generate_pnp_step = b.step("generate-pnp-ids", "Generate PNP ID database from hwdata");
+    const generate_pnp = generatePnpIds(b, target);
+    generate_pnp_step.dependOn(generate_pnp);
 
     // Generate Wayland protocol headers
     const generate_protocols_step = b.step("generate-protocols", "Generate Wayland protocol headers");
@@ -113,6 +136,12 @@ pub fn build(b: *std.Build) void {
 
     const core_cli_mod = b.addModule("core.cli", .{
         .root_source_file = b.path("src/core/cli/root.zig"),
+        .target = target,
+        .link_libc = true,
+    });
+
+    _ = b.addModule("core.display", .{
+        .root_source_file = b.path("src/core/display/root.zig"),
         .target = target,
         .link_libc = true,
     });
@@ -247,6 +276,33 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
+    // Comparison benchmark against C libdisplay-info
+    const display_compare_mod = b.addModule("display_compare", .{
+        .root_source_file = b.path("src/core/display/root.zig"),
+        .target = target,
+        .link_libc = true,
+    });
+    
+    const compare_c_exe = b.addExecutable(.{
+        .name = "compare_c",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core/display/compare_c.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "display", .module = display_compare_mod },
+            },
+        }),
+    });
+    compare_c_exe.linkLibC();
+    compare_c_exe.linkSystemLibrary("libdisplay-info");
+    compare_c_exe.step.dependOn(generate_pnp);
+    b.installArtifact(compare_c_exe);
+
+    const run_compare = b.step("compare-c", "Benchmark Zig vs C libdisplay-info");
+    const compare_cmd = b.addRunArtifact(compare_c_exe);
+    run_compare.dependOn(&compare_cmd.step);
+
     // Test suite
     const test_step = b.step("test", "Run tests");
 
@@ -355,6 +411,21 @@ pub fn build(b: *std.Build) void {
     core_cli_tests.linkLibC();
     const run_core_cli_tests = b.addRunArtifact(core_cli_tests);
     test_step.dependOn(&run_core_cli_tests.step);
+
+    // Test core.display module
+    const core_display_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core/display/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    core_display_tests.linkLibC();
+    // Display tests depend on generated PNP IDs
+    core_display_tests.step.dependOn(generate_pnp);
+    const run_core_display_tests = b.addRunArtifact(core_display_tests);
+    test_step.dependOn(&run_core_display_tests.step);
 
     // Test backend module
     const backend_tests = b.addTest(.{
