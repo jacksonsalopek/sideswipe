@@ -36,7 +36,7 @@ fn generateVicTable(b: *std.Build, target: std.Build.ResolvedTarget, core_cli_mo
     
     // Run it with arguments
     const gen_vic = b.addRunArtifact(gen_exe);
-    gen_vic.addArg("/tmp/libdisplay-info/cta-vic-table.c");
+    gen_vic.addArg("vendor/libdisplay-info/cta-vic-table.c");
     gen_vic.addArg("src/core/display/cta/vic_table.zig");
     
     return &gen_vic.step;
@@ -305,7 +305,8 @@ pub fn build(b: *std.Build) void {
 
     // Ensure generated files are created before build
     exe.step.dependOn(generate_pnp);
-    exe.step.dependOn(generate_vic);
+    // VIC table is now committed, no need to generate
+    // exe.step.dependOn(generate_vic);
 
     b.installArtifact(exe);
 
@@ -483,9 +484,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
     core_display_tests.linkLibC();
-    // Display tests depend on generated PNP IDs and VIC table
+    // Display tests depend on generated PNP IDs (VIC table now committed)
     core_display_tests.step.dependOn(generate_pnp);
-    core_display_tests.step.dependOn(generate_vic);
+    // VIC table is now committed, no need to generate
+    // core_display_tests.step.dependOn(generate_vic);
     const run_core_display_tests = b.addRunArtifact(core_display_tests);
     test_step.dependOn(&run_core_display_tests.step);
 

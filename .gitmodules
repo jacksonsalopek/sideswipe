@@ -1,0 +1,3 @@
+[submodule "vendor/libdisplay-info"]
+	path = vendor/libdisplay-info
+	url = https://gitlab.freedesktop.org/emersion/libdisplay-info.git
