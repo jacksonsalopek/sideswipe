@@ -7,6 +7,7 @@ const Interface = core.vtable.Interface;
 const allocator = @import("allocator.zig");
 const session = @import("session.zig");
 const misc = @import("misc.zig");
+const renderer = @import("renderer.zig");
 
 /// Backend type enumeration
 pub const Type = enum(u32) {
@@ -113,6 +114,7 @@ pub const Coordinator = struct {
     implementation_options: []const ImplementationOptions,
     implementations: std.ArrayList(Implementation),
     primary_allocator: ?allocator.Interface = null,
+    primary_renderer: ?*renderer.Type = null,
     session: ?*session.Type = null,
     ready: bool = false,
     idle_fd: i32 = -1,
@@ -205,6 +207,10 @@ pub const Coordinator = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        if (self.primary_renderer) |rend| {
+            rend.deinit();
+        }
+
         for (self.implementations.items) |impl| {
             impl.deinit();
         }
@@ -251,15 +257,25 @@ pub const Coordinator = struct {
             return false;
         }
 
-        // Create primary allocator from DRM FD
+        // Create primary allocator and renderer from DRM FD
         for (self.implementations.items) |impl| {
             const fd = impl.drmFd();
             if (fd >= 0) {
                 const reopened_fd = self.reopenDrmNode(fd, true);
                 if (reopened_fd >= 0) {
+                    // Initialize renderer with DRM FD
+                    self.primary_renderer = renderer.Type.create(
+                        self.allocator,
+                        null, // Backend pointer (opaque)
+                        reopened_fd,
+                    ) catch |err| {
+                        self.log(.err, "Failed to initialize renderer");
+                        std.log.err("Renderer initialization failed: {}", .{err});
+                        std.posix.close(reopened_fd);
+                        continue;
+                    };
+
                     // TODO: Create GBM allocator with reopened_fd
-                    // For now, just close it
-                    std.posix.close(reopened_fd);
                     break;
                 }
             }

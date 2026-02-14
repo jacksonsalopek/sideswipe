@@ -5,8 +5,10 @@ const std = @import("std");
 const wayland = @import("wayland");
 const backend = @import("backend");
 const core = @import("core");
+const cli = @import("core.cli");
 
 const Surface = @import("surface.zig").Surface;
+const Output = @import("output.zig").Type;
 
 /// Main compositor state
 pub const Compositor = struct {
@@ -14,17 +16,20 @@ pub const Compositor = struct {
     server: *wayland.Server,
     coordinator: ?*backend.Coordinator,
     surfaces: std.ArrayList(*Surface),
+    outputs: std.ArrayList(*Output),
     next_surface_id: u32,
+    logger: *cli.Logger,
 
     const Self = @This();
 
     pub const Error = error{
         InitFailed,
         OutOfMemory,
+        BackendError,
     };
 
     /// Creates a new compositor instance
-    pub fn init(allocator: std.mem.Allocator, server: *wayland.Server) Error!*Self {
+    pub fn init(allocator: std.mem.Allocator, server: *wayland.Server, logger: *cli.Logger) Error!*Self {
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
 
@@ -33,7 +38,9 @@ pub const Compositor = struct {
             .server = server,
             .coordinator = null,
             .surfaces = std.ArrayList(*Surface){},
+            .outputs = std.ArrayList(*Output){},
             .next_surface_id = 1,
+            .logger = logger,
         };
 
         return self;
@@ -41,6 +48,12 @@ pub const Compositor = struct {
 
     /// Destroys the compositor and frees all resources
     pub fn deinit(self: *Self) void {
+        // Clean up all outputs
+        for (self.outputs.items) |output| {
+            output.deinit();
+        }
+        self.outputs.deinit(self.allocator);
+
         // Clean up all surfaces
         for (self.surfaces.items) |surface| {
             surface.deinit();
@@ -51,8 +64,37 @@ pub const Compositor = struct {
     }
 
     /// Attaches a backend coordinator to the compositor
-    pub fn attachBackend(self: *Self, coord: *backend.Coordinator) void {
+    pub fn attachBackend(self: *Self, coord: *backend.Coordinator) Error!void {
         self.coordinator = coord;
+        
+        // Create compositor outputs from backend implementations
+        for (coord.implementations.items) |impl| {
+            // For Wayland backend, we need to create outputs
+            if (impl.backendType() == .wayland) {
+                self.logger.debug("Discovering outputs from Wayland backend", .{});
+                // The Wayland backend creates outputs internally
+                // We need to access them through the backend pointer
+                
+                // Get the backend pointer (this is a bit of a hack)
+                const backend_ptr: ?*anyopaque = impl.base.ptr;
+                if (backend_ptr) |ptr| {
+                    // Cast to Wayland Backend
+                    const wayland_backend = @import("backend").wayland.Backend;
+                    const wl_backend: *wayland_backend = @ptrCast(@alignCast(ptr));
+                    
+                    // For each output in the backend, create a compositor output
+                    for (wl_backend.outputs.items) |wl_output| {
+                        var backend_output = wl_output.iface();
+                        const comp_output = try self.createOutput(&backend_output, wl_output.name);
+                        
+                        // Register frame callback
+                        wl_output.setFrameCallback(outputFrameCallback, comp_output);
+                        
+                        self.logger.info("Connected compositor output to backend output: {s}", .{wl_output.name});
+                    }
+                }
+            }
+        }
     }
 
     /// Creates a new surface and registers it with the compositor
@@ -85,7 +127,33 @@ pub const Compositor = struct {
         const c = @import("wayland").c;
         return c.wl_display_next_serial(self.server.getDisplay());
     }
+
+    /// Creates a compositor output from a backend output
+    pub fn createOutput(self: *Self, backend_output: *backend.output.IOutput, name: []const u8) Error!*Output {
+        const output = try Output.init(self.allocator, self, backend_output, name);
+        errdefer output.deinit();
+
+        try self.outputs.append(self.allocator, output);
+        return output;
+    }
+
+    /// Schedules a frame on all outputs
+    pub fn scheduleFrame(self: *Self) void {
+        for (self.outputs.items) |output| {
+            output.scheduleFrame();
+        }
+    }
 };
+
+/// Frame callback from backend output
+fn outputFrameCallback(userdata: ?*anyopaque) void {
+    const output: *Output = @ptrCast(@alignCast(userdata orelse return));
+    
+    // Trigger rendering on this output
+    output.render() catch |err| {
+        output.compositor.logger.err("Failed to render frame: {}", .{err});
+    };
+}
 
 // Tests
 const testing = core.testing;
@@ -96,7 +164,10 @@ test "Compositor - init and deinit" {
     var server = try wayland.Server.init(allocator, null);
     defer server.deinit();
 
-    var compositor = try Compositor.init(allocator, &server);
+    var logger = cli.Logger.init(allocator);
+    defer logger.deinit();
+
+    var compositor = try Compositor.init(allocator, &server, &logger);
     defer compositor.deinit();
 
     try testing.expectEqual(@as(u32, 1), compositor.next_surface_id);
@@ -110,7 +181,10 @@ test "Compositor - create and destroy surface" {
     var server = try wayland.Server.init(allocator, null);
     defer server.deinit();
 
-    var compositor = try Compositor.init(allocator, &server);
+    var logger = cli.Logger.init(allocator);
+    defer logger.deinit();
+
+    var compositor = try Compositor.init(allocator, &server, &logger);
     defer compositor.deinit();
 
     const surface = try compositor.createSurface();
@@ -127,7 +201,10 @@ test "Compositor - multiple surfaces" {
     var server = try wayland.Server.init(allocator, null);
     defer server.deinit();
 
-    var compositor = try Compositor.init(allocator, &server);
+    var logger = cli.Logger.init(allocator);
+    defer logger.deinit();
+
+    var compositor = try Compositor.init(allocator, &server, &logger);
     defer compositor.deinit();
 
     const s1 = try compositor.createSurface();

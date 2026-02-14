@@ -114,6 +114,10 @@ pub const Output = struct {
     cursor_serial: u32 = 0,
     cursor_hotspot: Vector2D = .{},
 
+    // Frame event callback
+    frame_event_callback: ?*const fn (userdata: ?*anyopaque) void = null,
+    frame_event_userdata: ?*anyopaque = null,
+
     const Self = @This();
 
     pub fn create(allocator: std.mem.Allocator, name: []const u8, be: *Backend) !*Self {
@@ -428,7 +432,16 @@ pub const Output = struct {
             self.scheduleFrame(.unknown);
         }
 
-        // TODO: Emit frame event to coordinator
+        // Emit frame event to compositor
+        if (self.frame_event_callback) |callback_fn| {
+            callback_fn(self.frame_event_userdata);
+        }
+    }
+
+    /// Sets the frame event callback
+    pub fn setFrameCallback(self: *Self, callback: *const fn (userdata: ?*anyopaque) void, userdata: ?*anyopaque) void {
+        self.frame_event_callback = callback;
+        self.frame_event_userdata = userdata;
     }
 
     pub fn onEnter(self: *Self, serial: u32) void {

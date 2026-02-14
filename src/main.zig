@@ -5,6 +5,40 @@ const cli = @import("core.cli");
 const wayland = @import("wayland");
 const compositor = @import("compositor");
 
+/// Global server reference for signal handlers.
+/// Signal handlers cannot capture context, so we need a global reference.
+var global_server: ?*wayland.Server = null;
+var global_logger: ?*cli.Logger = null;
+
+/// Signal handler for SIGINT and SIGTERM.
+/// Terminates the server event loop, allowing cleanup to proceed.
+fn handleSignal(sig: i32) callconv(.c) void {
+    if (global_logger) |logger| {
+        const sig_name: []const u8 = switch (sig) {
+            std.posix.SIG.INT => "SIGINT",
+            std.posix.SIG.TERM => "SIGTERM",
+            else => "UNKNOWN",
+        };
+        logger.info("Received {s}, shutting down...", .{sig_name});
+    }
+    
+    if (global_server) |srv| {
+        srv.terminate();
+    }
+}
+
+/// Sets up signal handlers for graceful shutdown.
+fn setupSignalHandlers() !void {
+    const sa = std.posix.Sigaction{
+        .handler = .{ .handler = handleSignal },
+        .mask = std.mem.zeroes(std.posix.sigset_t),
+        .flags = 0,
+    };
+    
+    std.posix.sigaction(std.posix.SIG.INT, &sa, null);
+    std.posix.sigaction(std.posix.SIG.TERM, &sa, null);
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -43,6 +77,8 @@ pub fn main() !void {
     // Initialize logger
     var logger = cli.Logger.init(allocator);
     defer logger.deinit();
+    global_logger = &logger;
+    defer global_logger = null;
 
     // Configure logger based on arguments
     const verbose = parser.getBool("verbose") orelse false;
@@ -62,21 +98,30 @@ pub fn main() !void {
     logger.info("Initializing Wayland server...", .{});
     var server = try wayland.Server.init(allocator, null);
     defer server.deinit();
+    global_server = &server;
+    defer global_server = null;
 
     const socket_name = server.getSocketName();
     logger.info("Wayland server listening on: {s}", .{socket_name});
     logger.info("Set WAYLAND_DISPLAY={s} to connect clients", .{socket_name});
 
+    // Set up signal handlers for graceful shutdown
+    try setupSignalHandlers();
+    logger.info("Signal handlers registered (SIGINT, SIGTERM)", .{});
+
     // Initialize compositor
     logger.info("Initializing compositor...", .{});
-    var comp = try compositor.Compositor.init(allocator, &server);
+    var comp = try compositor.Compositor.init(allocator, &server, &logger);
     defer comp.deinit();
 
     // Register protocol globals
     logger.info("Registering protocol globals...", .{});
     try compositor.protocols.wl_compositor.register(comp);
     try compositor.protocols.xdg_shell.register(comp);
-    logger.info("Registered: wl_compositor, xdg_wm_base", .{});
+    try compositor.protocols.output.register(comp);
+    try compositor.protocols.seat.register(comp);
+    try compositor.protocols.data_device.register(comp);
+    logger.info("Registered: wl_compositor, xdg_wm_base, wl_output, wl_seat, wl_data_device_manager", .{});
 
     // Initialize backend if requested
     const enable_backend = parser.getBool("backend") orelse false;
@@ -111,7 +156,13 @@ pub fn main() !void {
             // Try to start the backend
             if (c.start()) |started| {
                 if (started) {
-                    comp.attachBackend(c);
+                    comp.attachBackend(c) catch |err| {
+                        logger.warn("Failed to attach backend: {}", .{err});
+                        logger.info("Continuing in display-server-only mode", .{});
+                        c.deinit();
+                        coord = null;
+                        return;
+                    };
                     coord = c;
                     logger.info("Backend initialized successfully", .{});
                 } else {
@@ -133,14 +184,12 @@ pub fn main() !void {
         logger.info("Use --backend flag to enable nested Wayland mode", .{});
     }
 
-    // TODO: Set up signal handlers for graceful shutdown (SIGINT, SIGTERM)
-    // TODO: Initialize input management (wl_seat, libinput)
-    // TODO: Initialize output management (wl_output)
-
     logger.info("Compositor ready!", .{});
     logger.info("Starting event loop...", .{});
     logger.info("Press Ctrl+C to exit", .{});
 
     // Run the main event loop
     server.run();
+
+    logger.info("Event loop terminated, cleaning up...", .{});
 }

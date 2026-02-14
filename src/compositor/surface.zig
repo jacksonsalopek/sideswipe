@@ -102,6 +102,7 @@ pub const Surface = struct {
         damage: DamageState,
         width: i32 = 0,
         height: i32 = 0,
+        frame_callbacks: std.ArrayList(*FrameCallback),
     },
 
     /// Parent surface for subsurfaces
@@ -135,6 +136,7 @@ pub const Surface = struct {
             },
             .current = .{
                 .damage = DamageState.init(),
+                .frame_callbacks = std.ArrayList(*FrameCallback){},
             },
             .children = std.ArrayList(*Surface){},
         };
@@ -144,12 +146,21 @@ pub const Surface = struct {
 
     /// Destroys the surface
     pub fn deinit(self: *Self) void {
+        // Clean up pending frame callbacks
+        for (self.pending.frame_callbacks.items) |callback| {
+            self.allocator.destroy(callback);
+        }
         self.pending.damage.deinit(self.allocator);
         self.pending.opaque_region.deinit(self.allocator);
         self.pending.input_region.deinit(self.allocator);
         self.pending.frame_callbacks.deinit(self.allocator);
 
+        // Clean up current frame callbacks
+        for (self.current.frame_callbacks.items) |callback| {
+            self.allocator.destroy(callback);
+        }
         self.current.damage.deinit(self.allocator);
+        self.current.frame_callbacks.deinit(self.allocator);
 
         self.children.deinit(self.allocator);
 
@@ -220,8 +231,18 @@ pub const Surface = struct {
         self.pending.opaque_region.clearRetainingCapacity();
         self.pending.input_region.clearRetainingCapacity();
 
-        // Process frame callbacks (would be sent on next frame)
-        // In a real implementation, these would be queued for the next output frame
+        // Move frame callbacks from pending to current
+        // They will be sent when the frame is actually rendered
+        for (self.current.frame_callbacks.items) |callback| {
+            self.allocator.destroy(callback);
+        }
+        self.current.frame_callbacks.clearRetainingCapacity();
+        for (self.pending.frame_callbacks.items) |callback| {
+            self.current.frame_callbacks.append(self.allocator, callback) catch {
+                // If append fails, destroy the callback to avoid leak
+                self.allocator.destroy(callback);
+            };
+        }
         self.pending.frame_callbacks.clearRetainingCapacity();
 
         // Update mapped state based on buffer attachment
@@ -229,6 +250,11 @@ pub const Surface = struct {
             self.mapped = true;
         } else if (self.current.buffer.buffer == null and self.mapped) {
             self.mapped = false;
+        }
+
+        // Schedule frame on compositor if we have a buffer and callbacks
+        if (self.current.buffer.buffer != null and self.current.frame_callbacks.items.len > 0) {
+            self.compositor.scheduleFrame();
         }
 
         // Commit subsurfaces if in synchronized mode
@@ -280,7 +306,11 @@ test "Surface - init and deinit" {
     var server = @import("wayland").Server.init(allocator, null) catch return;
     defer server.deinit();
 
-    var compositor = try Compositor.init(allocator, &server);
+    const cli = @import("core.cli");
+    var logger = cli.Logger.init(allocator);
+    defer logger.deinit();
+
+    var compositor = try Compositor.init(allocator, &server, &logger);
     defer compositor.deinit();
 
     var surface = try Surface.init(allocator, compositor, 1);
@@ -297,7 +327,11 @@ test "Surface - attach and commit" {
     var server = @import("wayland").Server.init(allocator, null) catch return;
     defer server.deinit();
 
-    var compositor = try Compositor.init(allocator, &server);
+    const cli = @import("core.cli");
+    var logger = cli.Logger.init(allocator);
+    defer logger.deinit();
+
+    var compositor = try Compositor.init(allocator, &server, &logger);
     defer compositor.deinit();
 
     var surface = try Surface.init(allocator, compositor, 1);
@@ -322,7 +356,11 @@ test "Surface - damage tracking" {
     var server = @import("wayland").Server.init(allocator, null) catch return;
     defer server.deinit();
 
-    var compositor = try Compositor.init(allocator, &server);
+    const cli = @import("core.cli");
+    var logger = cli.Logger.init(allocator);
+    defer logger.deinit();
+
+    var compositor = try Compositor.init(allocator, &server, &logger);
     defer compositor.deinit();
 
     var surface = try Surface.init(allocator, compositor, 1);
@@ -344,7 +382,11 @@ test "Surface - role management" {
     var server = @import("wayland").Server.init(allocator, null) catch return;
     defer server.deinit();
 
-    var compositor = try Compositor.init(allocator, &server);
+    const cli = @import("core.cli");
+    var logger = cli.Logger.init(allocator);
+    defer logger.deinit();
+
+    var compositor = try Compositor.init(allocator, &server, &logger);
     defer compositor.deinit();
 
     var surface = try Surface.init(allocator, compositor, 1);
@@ -368,7 +410,11 @@ test "Surface - parent/child relationships" {
     var server = @import("wayland").Server.init(allocator, null) catch return;
     defer server.deinit();
 
-    var compositor = try Compositor.init(allocator, &server);
+    const cli = @import("core.cli");
+    var logger = cli.Logger.init(allocator);
+    defer logger.deinit();
+
+    var compositor = try Compositor.init(allocator, &server, &logger);
     defer compositor.deinit();
 
     var parent = try Surface.init(allocator, compositor, 1);

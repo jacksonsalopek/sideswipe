@@ -55,6 +55,27 @@ XDG shell protocol (version 5):
   - Fullscreen/maximize states (prepared)
 - **xdg_popup** - Popup windows (stub)
 
+#### `protocols/seat.zig`
+wl_seat protocol (version 7):
+- Seat capabilities (pointer, keyboard, touch)
+- Input device creation
+- Keyboard keymap support
+- Repeat rate configuration
+
+#### `protocols/output.zig`
+wl_output protocol (version 4):
+- Display geometry and physical size
+- Resolution and refresh rate
+- Scale factor support
+- Output naming
+
+#### `protocols/data_device.zig`
+wl_data_device_manager protocol (version 3):
+- **wl_data_device_manager** - Main clipboard/DnD interface
+- **wl_data_source** - Data source creation and MIME types
+- **wl_data_device** - Drag-and-drop and clipboard operations
+- Version 3 drag-and-drop actions support
+
 ## Integration
 
 ### Main Entry Point
@@ -69,6 +90,9 @@ var comp = try compositor.Compositor.init(allocator, &server);
 // Register protocol globals
 try compositor.protocols.wl_compositor.register(comp);
 try compositor.protocols.xdg_shell.register(comp);
+try compositor.protocols.seat.register(comp);
+try compositor.protocols.output.register(comp);
+try compositor.protocols.data_device.register(comp);
 
 // Run event loop
 server.run();
@@ -86,6 +110,40 @@ The Wayland backend (`src/backend/wayland.zig`) enables nested mode:
 - Shares DMA-BUF buffers for zero-copy rendering
 - Forwards input events from host
 
+### Renderer
+The compositor uses an OpenGL ES renderer (`src/backend/renderer.zig`) for GPU-accelerated rendering:
+
+#### Features
+- **EGL initialization** with DRM/GBM backend (EGL_PLATFORM_GBM_MESA)
+- **OpenGL ES 3.0** for broad GPU compatibility
+- **DMA-BUF import** via EGL_EXT_image_dma_buf_import
+- **Zero-copy rendering** of client buffers
+- **Multi-GPU support** with buffer blitting
+- **Texture targets**: GL_TEXTURE_2D and GL_TEXTURE_EXTERNAL_OES
+
+#### Architecture
+The renderer initializes during backend startup:
+```zig
+// Backend creates renderer with DRM FD
+self.primary_renderer = try renderer.Type.create(
+    allocator,
+    backend_ptr,
+    drm_fd,
+);
+```
+
+Key operations:
+- `blit()` - Copy between GPU buffers (multi-GPU or format conversion)
+- `readBuffer()` - Read buffer contents to CPU memory
+- `verifyDestinationDmabuf()` - Check if format can be rendered to
+
+#### Shader Pipeline
+The renderer compiles two shader programs:
+1. **Standard shader** - For regular GL_TEXTURE_2D textures
+2. **External shader** - For GL_TEXTURE_EXTERNAL_OES (hardware video decode)
+
+Both use the same vertex shader with a projection matrix for coordinate transformation.
+
 ## Current Status
 
 ### ✅ Implemented
@@ -97,18 +155,23 @@ The Wayland backend (`src/backend/wayland.zig`) enables nested mode:
 - [x] Damage tracking
 - [x] Buffer management
 - [x] Transform and scale support
+- [x] wl_seat protocol (stub)
+- [x] wl_output protocol (stub)
+- [x] wl_data_device_manager (clipboard/DnD stubs)
+- [x] OpenGL ES renderer with EGL initialization
+- [x] DMA-BUF to GL texture import
+- [x] Buffer blitting for multi-GPU support
 
 ### 🚧 In Progress
 - [ ] Frame callback dispatching
 - [ ] Region implementation (opaque/input)
 - [ ] XDG popup windows
 - [ ] Subsurface protocol
+- [ ] Input event handling
+- [ ] Clipboard data transfer
+- [ ] Rendering pipeline integration with compositor
 
 ### 📋 TODO
-- [ ] wl_seat protocol (input)
-- [ ] wl_output protocol (displays)
-- [ ] wl_data_device (clipboard/DnD)
-- [ ] Rendering integration
 - [ ] Window management logic
 - [ ] Focus management
 - [ ] Layer shell protocol

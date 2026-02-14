@@ -7,9 +7,13 @@ const c = wayland.c;
 
 const Compositor = @import("../compositor.zig").Compositor;
 const Surface = @import("../surface.zig").Surface;
+const FrameCallback = @import("../surface.zig").FrameCallback;
 
 // wl_compositor interface version we support
 const WL_COMPOSITOR_VERSION = 6;
+
+// User data structures
+// Note: All user data structs are allocated/freed with compositor.allocator
 
 /// User data attached to wl_compositor resources
 const CompositorData = struct {
@@ -23,8 +27,8 @@ pub const SurfaceData = struct {
 
 /// User data attached to wl_region resources
 const RegionData = struct {
+    compositor: *Compositor,
     // Region implementation would go here
-    dummy: u32 = 0,
 };
 
 // wl_compositor request handlers
@@ -45,6 +49,8 @@ fn compositorCreateSurface(
         c.wl_resource_post_no_memory(resource);
         return;
     };
+
+    comp.logger.debug("Created surface {d}", .{surface.id});
 
     // Create wl_surface resource
     const surface_resource = c.wl_resource_create(
@@ -106,7 +112,7 @@ fn compositorCreateRegion(
         c.wl_resource_post_no_memory(resource);
         return;
     };
-    region_data.* = .{};
+    region_data.* = .{ .compositor = comp };
 
     c.wl_resource_set_implementation(
         region_resource,
@@ -131,6 +137,8 @@ fn surfaceDestroy(resource: ?*c.wl_resource) callconv(.c) void {
     const surface = data.surface;
     const comp = surface.compositor;
     const allocator = comp.allocator;
+
+    comp.logger.debug("Destroyed surface {d}", .{surface.id});
 
     comp.destroySurface(surface);
     allocator.destroy(data);
@@ -157,7 +165,12 @@ fn surfaceAttach(
         c.wl_resource_get_user_data(resource),
     ));
 
-    data.surface.attach(buffer_resource, x, y);
+    const surface = data.surface;
+    if (buffer_resource != null) {
+        surface.compositor.logger.debug("Surface {d} attached buffer", .{surface.id});
+    }
+
+    surface.attach(buffer_resource, x, y);
 }
 
 fn surfaceDamage(
@@ -184,12 +197,41 @@ fn surfaceFrame(
     resource: ?*c.wl_resource,
     callback_id: u32,
 ) callconv(.c) void {
-    _ = client;
-    _ = resource;
-    _ = callback_id;
+    const data: *SurfaceData = @ptrCast(@alignCast(
+        c.wl_resource_get_user_data(resource),
+    ));
 
-    // Frame callback implementation would go here
-    // For now, just stub it out
+    const surface = data.surface;
+    const comp = surface.compositor;
+
+    // Create wl_callback resource
+    const callback_resource = c.wl_resource_create(
+        client,
+        &c.wl_callback_interface,
+        1,
+        callback_id,
+    ) orelse {
+        c.wl_resource_post_no_memory(resource);
+        return;
+    };
+
+    // Create callback data
+    const callback = comp.allocator.create(FrameCallback) catch {
+        c.wl_resource_destroy(callback_resource);
+        c.wl_resource_post_no_memory(resource);
+        return;
+    };
+    callback.* = .{ .resource = callback_resource };
+
+    // Add to surface's pending frame callbacks
+    surface.frame(callback) catch {
+        comp.allocator.destroy(callback);
+        c.wl_resource_destroy(callback_resource);
+        c.wl_resource_post_no_memory(resource);
+        return;
+    };
+
+    comp.logger.trace("Surface {d} registered frame callback", .{surface.id});
 }
 
 fn surfaceSetOpaqueRegion(
@@ -224,7 +266,12 @@ fn surfaceCommit(
         c.wl_resource_get_user_data(resource),
     ));
 
-    data.surface.commit();
+    const surface = data.surface;
+    if (surface.pending.buffer.buffer != null) {
+        surface.compositor.logger.debug("Surface {d} committed", .{surface.id});
+    }
+
+    surface.commit();
 }
 
 fn surfaceSetBufferTransform(
@@ -308,8 +355,7 @@ fn regionDestroy(resource: ?*c.wl_resource) callconv(.c) void {
         c.wl_resource_get_user_data(resource),
     ));
 
-    // Get allocator from somewhere (for now, use c allocator)
-    std.heap.c_allocator.destroy(data);
+    data.compositor.allocator.destroy(data);
 }
 
 fn regionDestroyRequest(
@@ -369,6 +415,8 @@ fn compositorBind(
     id: u32,
 ) callconv(.c) void {
     const compositor: *Compositor = @ptrCast(@alignCast(data));
+
+    compositor.logger.debug("Client bound to wl_compositor (version {d})", .{version});
 
     const resource = c.wl_resource_create(
         client,

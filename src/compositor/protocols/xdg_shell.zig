@@ -13,10 +13,11 @@ const wl_compositor_protocol = @import("compositor.zig");
 const XDG_WM_BASE_VERSION = 5;
 
 /// XDG surface state
+/// Owns the XdgToplevel if one is created
 pub const XdgSurface = struct {
     surface: *Surface,
     resource: ?*c.wl_resource = null,
-    toplevel: ?*XdgToplevel = null,
+    toplevel: ?*XdgToplevel = null, // Owned by this XdgSurface
     configured: bool = false,
     allocator: std.mem.Allocator,
 
@@ -93,6 +94,7 @@ pub const XdgToplevel = struct {
 };
 
 // User data structures
+// Note: All user data structs are allocated/freed with compositor.allocator
 
 const XdgWmBaseData = struct {
     compositor: *Compositor,
@@ -146,6 +148,8 @@ fn xdgWmBaseGetXdgSurface(
     const surface = surface_data.surface;
 
     const comp = data.compositor;
+
+    comp.logger.debug("Created XDG surface for surface {d}", .{surface.id});
 
     // Create xdg_surface
     const xdg_surface = XdgSurface.init(comp.allocator, surface) catch {
@@ -248,6 +252,8 @@ fn xdgSurfaceGetToplevel(
     const xdg_surface = data.xdg_surface;
     const allocator = xdg_surface.allocator;
 
+    xdg_surface.surface.compositor.logger.info("Created XDG toplevel window for surface {d}", .{xdg_surface.surface.id});
+
     // Create toplevel
     const toplevel = XdgToplevel.init(allocator, xdg_surface) catch {
         c.wl_resource_post_no_memory(resource);
@@ -291,6 +297,7 @@ fn xdgSurfaceGetToplevel(
     toplevel.sendConfigure(0, 0);
     const serial = xdg_surface.surface.compositor.nextSerial();
     xdg_surface.sendConfigure(serial);
+    xdg_surface.surface.compositor.logger.debug("Configured toplevel window {d}x{d}", .{ 0, 0 });
 }
 
 fn xdgSurfaceGetPopup(
@@ -357,7 +364,8 @@ fn xdgToplevelResourceDestroy(resource: ?*c.wl_resource) callconv(.c) void {
 
     const allocator = data.toplevel.allocator;
     allocator.destroy(data);
-    // Note: XdgToplevel is owned by XdgSurface, don't destroy it here
+    // Note: XdgToplevel is owned by XdgSurface and will be freed when
+    // XdgSurface is destroyed. Only free the wrapper data here.
 }
 
 fn xdgToplevelDestroy(
@@ -400,6 +408,10 @@ fn xdgToplevelSetTitle(
     // Copy new title
     const title_slice = std.mem.span(title);
     toplevel.title = toplevel.allocator.dupe(u8, title_slice) catch null;
+
+    if (toplevel.title) |t| {
+        toplevel.xdg_surface.surface.compositor.logger.info("Toplevel window title: {s}", .{t});
+    }
 }
 
 fn xdgToplevelSetAppId(
@@ -423,6 +435,10 @@ fn xdgToplevelSetAppId(
     // Copy new app_id
     const app_id_slice = std.mem.span(app_id);
     toplevel.app_id = toplevel.allocator.dupe(u8, app_id_slice) catch null;
+
+    if (toplevel.app_id) |a| {
+        toplevel.xdg_surface.surface.compositor.logger.info("Toplevel window app_id: {s}", .{a});
+    }
 }
 
 fn xdgToplevelShowWindowMenu(
@@ -569,6 +585,8 @@ fn xdgWmBaseBind(
     id: u32,
 ) callconv(.c) void {
     const compositor: *Compositor = @ptrCast(@alignCast(data));
+
+    compositor.logger.debug("Client bound to xdg_wm_base (version {d})", .{version});
 
     const resource = c.wl_resource_create(
         client,

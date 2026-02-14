@@ -256,6 +256,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "core", .module = core_mod },
+            .{ .name = "core.cli", .module = core_cli_mod },
             .{ .name = "core.math", .module = core_math_mod },
             .{ .name = "wayland", .module = wayland_mod },
             .{ .name = "backend", .module = backend_mod },
@@ -600,6 +601,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "core", .module = core_mod },
+                .{ .name = "core.cli", .module = core_cli_mod },
                 .{ .name = "core.math", .module = core_math_mod },
                 .{ .name = "wayland", .module = wayland_mod },
                 .{ .name = "backend", .module = backend_mod },
@@ -608,6 +610,7 @@ pub fn build(b: *std.Build) void {
     });
     compositor_tests.addIncludePath(b.path("protocols"));
     compositor_tests.addObject(xdg_shell_c);
+    compositor_tests.addObject(dmabuf_c);
     compositor_tests.step.dependOn(generate_protocols);
     compositor_tests.linkSystemLibrary("wayland-server");
     compositor_tests.linkSystemLibrary("libdrm");
