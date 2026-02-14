@@ -6,4 +6,5 @@ build/
 # Generated files
 protocols/
 src/core/display/edid/pnp_ids.zig
-src/core/display/cta/vic_table.zig
+# VIC table is now committed (stable CTA-861 data)
+# src/core/display/cta/vic_table.zig
