@@ -3,6 +3,7 @@ const backend = @import("backend");
 const core = @import("core");
 const cli = @import("core.cli");
 const wayland = @import("wayland");
+const compositor = @import("compositor");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -65,34 +66,38 @@ pub fn main() !void {
     logger.info("Wayland server listening on: {s}", .{socket_name});
     logger.info("Set WAYLAND_DISPLAY={s} to connect clients", .{socket_name});
 
+    // Initialize compositor
+    logger.info("Initializing compositor...", .{});
+    var comp = try compositor.Compositor.init(allocator, &server);
+    defer comp.deinit();
+
+    // Register protocol globals
+    logger.info("Registering protocol globals...", .{});
+    try compositor.protocols.wl_compositor.register(comp);
+    try compositor.protocols.xdg_shell.register(comp);
+    logger.info("Registered: wl_compositor, xdg_wm_base", .{});
+
+    // Initialize backend (optional for now)
+    if (verbose) {
+        logger.debug("Backend initialization deferred - running in display-server-only mode", .{});
+    }
+
+    // TODO: Initialize backend for rendering
+    // const backends = [_]backend.backend.ImplementationOptions{
+    //     .{ .backend_type = .wayland, .request_mode = .if_available },
+    // };
+    // var coord = try backend.backend.Coordinator.create(allocator, &backends, .{});
+    // defer coord.deinit();
+    // comp.attachBackend(coord);
+
     // TODO: Set up signal handlers for graceful shutdown (SIGINT, SIGTERM)
+    // TODO: Initialize input management (wl_seat, libinput)
+    // TODO: Initialize output management (wl_output)
 
-    // TODO: Register protocol globals
-    // - wl_compositor for surface creation
-    // - wl_subcompositor for subsurfaces
-    // - xdg_wm_base for XDG shell protocol
-    // - wl_seat for input devices
-    // - wl_output for display information
-    // - wl_data_device_manager for clipboard/drag-and-drop
-
-    // TODO: Initialize backend
-    // - Detect and initialize DRM/KMS for native rendering
-    // - Or use Wayland backend for nested compositor testing
-    // - Set up output configuration
-    // - Initialize renderer (EGL/OpenGL ES)
-
-    // TODO: Initialize input management
-    // - Set up libinput for keyboard/mouse/touch
-    // - Create seat and input device handlers
-
-    logger.info("Starting compositor event loop...", .{});
+    logger.info("Compositor ready!", .{});
+    logger.info("Starting event loop...", .{});
     logger.info("Press Ctrl+C to exit", .{});
 
     // Run the main event loop
-    // In production, we'd integrate with:
-    // - Backend rendering loop
-    // - Input event processing
-    // - Client protocol handlers
-    // - Animation frame callbacks
     server.run();
 }

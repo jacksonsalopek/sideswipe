@@ -13,6 +13,8 @@ Immediately scan the codebase or specified files for redundancy patterns.
 
 ### 1. Import Naming
 
+Follow [Zig naming conventions](https://ziglang.org/documentation/master/#Avoid-Redundant-Names-in-Fully-Qualified-Namespaces)
+
 **❌ Bad - `_mod` suffix is redundant:**
 ```zig
 const timing_mod = @import("timing.zig");

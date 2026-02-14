@@ -50,12 +50,12 @@ fn setupWaylandProtocols(b: *std.Build) *std.Build.Step {
         "protocols",
     });
 
-    // Generate xdg-shell protocol
+    // Generate xdg-shell protocol (server-side)
     const xdg_shell_header = b.addSystemCommand(&.{
         "wayland-scanner",
-        "client-header",
+        "server-header",
         "/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml",
-        "protocols/xdg-shell-client-protocol.h",
+        "protocols/xdg-shell-protocol.h",
     });
     xdg_shell_header.step.dependOn(&mkdir_protocols.step);
 
@@ -236,7 +236,23 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .link_libc = true,
     });
+    wayland_mod.addIncludePath(b.path("protocols"));
     wayland_mod.linkSystemLibrary("wayland-server", .{});
+
+    // Compositor module
+    const compositor_mod = b.addModule("compositor", .{
+        .root_source_file = b.path("src/compositor/root.zig"),
+        .target = target,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "core", .module = core_mod },
+            .{ .name = "core.math", .module = core_math_mod },
+            .{ .name = "wayland", .module = wayland_mod },
+            .{ .name = "backend", .module = backend_mod },
+        },
+    });
+    compositor_mod.addIncludePath(b.path("protocols"));
+    compositor_mod.linkSystemLibrary("wayland-server", .{});
 
     // Wayland protocol sources
     const xdg_shell_c = b.addObject(.{
@@ -282,6 +298,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "backend", .module = backend_mod },
                 .{ .name = "ipc", .module = ipc_mod },
                 .{ .name = "wayland", .module = wayland_mod },
+                .{ .name = "compositor", .module = compositor_mod },
             },
         }),
     });
@@ -560,6 +577,38 @@ pub fn build(b: *std.Build) void {
     const run_wayland_tests = b.addRunArtifact(wayland_tests);
     test_step.dependOn(&run_wayland_tests.step);
 
+    // Test Compositor module
+    const compositor_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/compositor/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "core", .module = core_mod },
+                .{ .name = "core.math", .module = core_math_mod },
+                .{ .name = "wayland", .module = wayland_mod },
+                .{ .name = "backend", .module = backend_mod },
+            },
+        }),
+    });
+    compositor_tests.addIncludePath(b.path("protocols"));
+    compositor_tests.addObject(xdg_shell_c);
+    compositor_tests.linkSystemLibrary("wayland-server");
+    compositor_tests.linkSystemLibrary("libdrm");
+    compositor_tests.linkSystemLibrary("libinput");
+    compositor_tests.linkSystemLibrary("pixman-1");
+    compositor_tests.linkSystemLibrary("gbm");
+    compositor_tests.linkSystemLibrary("EGL");
+    compositor_tests.linkSystemLibrary("GLESv2");
+    compositor_tests.linkSystemLibrary("libudev");
+    compositor_tests.linkSystemLibrary("libseat");
+    compositor_tests.linkSystemLibrary("wayland-client");
+    compositor_tests.linkSystemLibrary("wayland-cursor");
+    compositor_tests.linkLibC();
+    const run_compositor_tests = b.addRunArtifact(compositor_tests);
+    test_step.dependOn(&run_compositor_tests.step);
+
     // Test a specific file with module access
     const test_file_step = b.step("test-file", "Run tests for a specific file with module access");
     if (b.option([]const u8, "file", "Path to file to test")) |file_path| {
@@ -580,6 +629,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "backend", .module = backend_mod },
                     .{ .name = "ipc", .module = ipc_mod },
                     .{ .name = "wayland", .module = wayland_mod },
+                    .{ .name = "compositor", .module = compositor_mod },
                 },
             }),
         });

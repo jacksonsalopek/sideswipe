@@ -3,7 +3,7 @@ zig-cache/
 zig-out/
 build/
 
-# Generated files
-protocols/
+# Generated protocol files (not compositor source)
+/protocols/
 src/core/display/edid/pnp_ids.zig
 src/core/display/cta/vic_table.zig

@@ -9,7 +9,7 @@ pub const Global = struct {
     };
 
     /// Callback type for when a client binds to a global.
-    pub const BindCallback = *const fn (?*c.wl_client, ?*anyopaque, u32, u32) callconv(.C) void;
+    pub const BindCallback = *const fn (?*c.wl_client, ?*anyopaque, u32, u32) callconv(.c) void;
 
     /// Creates a new global object.
     /// The global will be advertised to all clients.
