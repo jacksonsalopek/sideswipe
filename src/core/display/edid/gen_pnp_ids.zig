@@ -4,17 +4,22 @@
 //! a Zig source file with manufacturer name mappings.
 
 const std = @import("std");
+const logger_mod = @import("logger");
+const Logger = logger_mod.Logger;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    var log = Logger.init(allocator);
+    defer log.deinit();
+
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
     if (args.len != 3) {
-        std.debug.print("Usage: {s} <pnp.ids> <output.zig>\n", .{args[0]});
+        log.err("Usage: {s} <pnp.ids> <output.zig>", .{args[0]});
         return error.InvalidArgs;
     }
 
@@ -111,5 +116,5 @@ pub fn main() !void {
     // Write to file
     try std.fs.cwd().writeFile(.{ .sub_path = output_path, .data = output_buf.items });
 
-    std.debug.print("Generated {d} PNP ID entries to {s}\n", .{ entries.items.len, output_path });
+    log.info("Generated {d} PNP ID entries to {s}", .{ entries.items.len, output_path });
 }

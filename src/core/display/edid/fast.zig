@@ -115,11 +115,11 @@ pub const Edid = struct {
     ///
     /// Returns an array of parsed timing descriptors. Slots with display
     /// descriptors (pixel_clock = 0) return null.
-    pub fn getDetailedTimings(self: Edid) [4]?timing.DetailedTiming {
-        var timings: [4]?timing.DetailedTiming = [_]?timing.DetailedTiming{null} ** 4;
+    pub fn getDetailedTimings(self: Edid) [4]?timing.Detailed {
+        var timings: [4]?timing.Detailed = [_]?timing.Detailed{null} ** 4;
         
-        for (self.base.detailed_timing_descriptors, 0..) |*desc_bytes, i| {
-            const desc: *align(1) const timing.DetailedTimingRaw = @ptrCast(desc_bytes);
+        for (&self.base.detailed_timing_descriptors, 0..) |*desc_bytes, i| {
+            const desc: *align(1) const timing.DetailedRaw = @ptrCast(desc_bytes);
             timings[i] = timing.parseDetailedTiming(desc);
         }
         
@@ -127,7 +127,7 @@ pub const Edid = struct {
     }
 
     /// Get the first (preferred) detailed timing, if available
-    pub fn getPreferredTiming(self: Edid) ?timing.DetailedTiming {
+    pub fn getPreferredTiming(self: Edid) ?timing.Detailed {
         const timings = self.getDetailedTimings();
         return timings[0];
     }
@@ -135,10 +135,10 @@ pub const Edid = struct {
     /// Get standard timing information (up to 8)
     ///
     /// Returns an array of standard timings. Unused slots return null.
-    pub fn getStandardTimings(self: Edid) [8]?timing.StandardTiming {
-        var std_timings: [8]?timing.StandardTiming = [_]?timing.StandardTiming{null} ** 8;
+    pub fn getStandardTimings(self: Edid) [8]?timing.Standard {
+        var std_timings: [8]?timing.Standard = [_]?timing.Standard{null} ** 8;
         
-        for (self.base.standard_timings, 0..) |*std_bytes, i| {
+        for (&self.base.standard_timings, 0..) |*std_bytes, i| {
             const bytes: *align(1) const [2]u8 = @ptrCast(std_bytes);
             std_timings[i] = timing.parseStandardTiming(bytes);
         }
@@ -147,7 +147,7 @@ pub const Edid = struct {
     }
 
     /// Get established timings (legacy VGA/SVGA/XGA modes)
-    pub fn getEstablishedTimings(self: Edid) timing.EstablishedTimings {
+    pub fn getEstablished(self: Edid) timing.Established {
         return timing.parseEstablishedTimings(&self.base.established_timings);
     }
 
@@ -157,7 +157,7 @@ pub const Edid = struct {
     pub fn getDisplayDescriptors(self: Edid) [4]?timing.DisplayDescriptor {
         var descriptors: [4]?timing.DisplayDescriptor = [_]?timing.DisplayDescriptor{null} ** 4;
         
-        for (self.base.detailed_timing_descriptors, 0..) |*desc_bytes, i| {
+        for (&self.base.detailed_timing_descriptors, 0..) |*desc_bytes, i| {
             descriptors[i] = timing.parseDisplayDescriptor(desc_bytes);
         }
         

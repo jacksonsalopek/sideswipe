@@ -1,12 +1,15 @@
 const std = @import("std");
 
-fn generatePnpIds(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Step {
-    // Build the PNP ID generator executable  
+fn generatePnpIds(b: *std.Build, target: std.Build.ResolvedTarget, core_cli_mod: *std.Build.Module) *std.Build.Step {
+    // Build the PNP ID generator executable with logger support
     const gen_exe = b.addExecutable(.{
         .name = "gen_pnp_ids",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/core/display/edid/gen_pnp_ids.zig"),
             .target = target,
+            .imports = &.{
+                .{ .name = "logger", .module = core_cli_mod },
+            },
         }),
     });
     
@@ -16,6 +19,27 @@ fn generatePnpIds(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.St
     gen_pnp.addArg("src/core/display/edid/pnp_ids.zig");
     
     return &gen_pnp.step;
+}
+
+fn generateVicTable(b: *std.Build, target: std.Build.ResolvedTarget, core_cli_mod: *std.Build.Module) *std.Build.Step {
+    // Build the VIC table generator executable with logger support
+    const gen_exe = b.addExecutable(.{
+        .name = "gen_vic_table",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core/display/cta/gen_vic_table.zig"),
+            .target = target,
+            .imports = &.{
+                .{ .name = "logger", .module = core_cli_mod },
+            },
+        }),
+    });
+    
+    // Run it with arguments
+    const gen_vic = b.addRunArtifact(gen_exe);
+    gen_vic.addArg("/tmp/libdisplay-info/cta-vic-table.c");
+    gen_vic.addArg("src/core/display/cta/vic_table.zig");
+    
+    return &gen_vic.step;
 }
 
 fn setupWaylandProtocols(b: *std.Build) *std.Build.Step {
@@ -79,14 +103,26 @@ pub fn build(b: *std.Build) void {
     const clean_cmd = b.addSystemCommand(&.{
         "sh",
         "-c",
-        "rm -rf .zig-cache protocols zig-out src/core/display/edid/pnp_ids.zig && echo 'Zig caches and generated files cleared'",
+        "rm -rf .zig-cache protocols zig-out src/core/display/edid/pnp_ids.zig src/core/display/cta/vic_table.zig && echo 'Zig caches and generated files cleared'",
     });
     clean_step.dependOn(&clean_cmd.step);
 
+    // CLI module for generators
+    const core_cli_mod = b.addModule("core.cli", .{
+        .root_source_file = b.path("src/core/cli/root.zig"),
+        .target = target,
+        .link_libc = true,
+    });
+
     // Generate PNP ID database
     const generate_pnp_step = b.step("generate-pnp-ids", "Generate PNP ID database from hwdata");
-    const generate_pnp = generatePnpIds(b, target);
+    const generate_pnp = generatePnpIds(b, target, core_cli_mod);
     generate_pnp_step.dependOn(generate_pnp);
+
+    // Generate VIC timing table
+    const generate_vic_step = b.step("generate-vic-table", "Generate VIC timing table from libdisplay-info");
+    const generate_vic = generateVicTable(b, target, core_cli_mod);
+    generate_vic_step.dependOn(generate_vic);
 
     // Generate Wayland protocol headers
     const generate_protocols_step = b.step("generate-protocols", "Generate Wayland protocol headers");
@@ -133,12 +169,6 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     core_i18n_mod.addImport("core.string", core_string_mod);
-
-    const core_cli_mod = b.addModule("core.cli", .{
-        .root_source_file = b.path("src/core/cli/root.zig"),
-        .target = target,
-        .link_libc = true,
-    });
 
     _ = b.addModule("core.display", .{
         .root_source_file = b.path("src/core/display/root.zig"),
@@ -422,8 +452,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
     core_display_tests.linkLibC();
-    // Display tests depend on generated PNP IDs
+    // Display tests depend on generated PNP IDs and VIC table
     core_display_tests.step.dependOn(generate_pnp);
+    core_display_tests.step.dependOn(generate_vic);
     const run_core_display_tests = b.addRunArtifact(core_display_tests);
     test_step.dependOn(&run_core_display_tests.step);
 

@@ -56,7 +56,7 @@ pub const SyncInfo = union(SignalType) {
 /// Raw detailed timing descriptor (18 bytes)
 ///
 /// This uses a mix of packed and regular structs due to split fields
-pub const DetailedTimingRaw = extern struct {
+pub const DetailedRaw = extern struct {
     /// Pixel clock in 10 kHz units (little-endian)
     pixel_clock_10khz: u16,
     
@@ -110,76 +110,76 @@ pub const DetailedTimingRaw = extern struct {
 
     comptime {
         if (@sizeOf(@This()) != 18) {
-            @compileError("DetailedTimingRaw must be 18 bytes");
+            @compileError("DetailedRaw must be 18 bytes");
         }
     }
 
     /// Get horizontal active pixels
-    pub fn getHActive(self: *align(1) const DetailedTimingRaw) u16 {
+    pub fn getHActive(self: *align(1) const DetailedRaw) u16 {
         return (@as(u16, (self.h_hi >> 4) & 0x0F) << 8) | self.h_active_lo;
     }
 
     /// Get horizontal blanking pixels
-    pub fn getHBlank(self: *align(1) const DetailedTimingRaw) u16 {
+    pub fn getHBlank(self: *align(1) const DetailedRaw) u16 {
         return (@as(u16, self.h_hi & 0x0F) << 8) | self.h_blank_lo;
     }
 
     /// Get vertical active lines
-    pub fn getVActive(self: *align(1) const DetailedTimingRaw) u16 {
+    pub fn getVActive(self: *align(1) const DetailedRaw) u16 {
         return (@as(u16, (self.v_hi >> 4) & 0x0F) << 8) | self.v_active_lo;
     }
 
     /// Get vertical blanking lines
-    pub fn getVBlank(self: *align(1) const DetailedTimingRaw) u16 {
+    pub fn getVBlank(self: *align(1) const DetailedRaw) u16 {
         return (@as(u16, self.v_hi & 0x0F) << 8) | self.v_blank_lo;
     }
 
     /// Get horizontal front porch pixels
-    pub fn getHFrontPorch(self: *align(1) const DetailedTimingRaw) u16 {
+    pub fn getHFrontPorch(self: *align(1) const DetailedRaw) u16 {
         return (@as(u16, (self.front_sync_hi >> 6) & 0x03) << 8) | self.h_front_porch_lo;
     }
 
     /// Get horizontal sync pulse width pixels
-    pub fn getHSyncPulse(self: *align(1) const DetailedTimingRaw) u16 {
+    pub fn getHSyncPulse(self: *align(1) const DetailedRaw) u16 {
         return (@as(u16, (self.front_sync_hi >> 4) & 0x03) << 8) | self.h_sync_pulse_lo;
     }
 
     /// Get vertical front porch lines
-    pub fn getVFrontPorch(self: *align(1) const DetailedTimingRaw) u16 {
+    pub fn getVFrontPorch(self: *align(1) const DetailedRaw) u16 {
         const hi = (self.front_sync_hi >> 2) & 0x03;
         const lo = (self.v_front_sync_lo >> 4) & 0x0F;
         return (@as(u16, hi) << 4) | lo;
     }
 
     /// Get vertical sync pulse width lines
-    pub fn getVSyncPulse(self: *align(1) const DetailedTimingRaw) u16 {
+    pub fn getVSyncPulse(self: *align(1) const DetailedRaw) u16 {
         const hi = self.front_sync_hi & 0x03;
         const lo = self.v_front_sync_lo & 0x0F;
         return (@as(u16, hi) << 4) | lo;
     }
 
     /// Get horizontal image size in mm
-    pub fn getHImageMm(self: *align(1) const DetailedTimingRaw) u16 {
+    pub fn getHImageMm(self: *align(1) const DetailedRaw) u16 {
         return (@as(u16, (self.image_size_hi >> 4) & 0x0F) << 8) | self.h_image_mm_lo;
     }
 
     /// Get vertical image size in mm
-    pub fn getVImageMm(self: *align(1) const DetailedTimingRaw) u16 {
+    pub fn getVImageMm(self: *align(1) const DetailedRaw) u16 {
         return (@as(u16, self.image_size_hi & 0x0F) << 8) | self.v_image_mm_lo;
     }
 
     /// Get pixel clock in Hz
-    pub fn getPixelClockHz(self: *align(1) const DetailedTimingRaw) u64 {
+    pub fn getPixelClockHz(self: *align(1) const DetailedRaw) u64 {
         return @as(u64, self.pixel_clock_10khz) * 10_000;
     }
 
     /// Check if interlaced
-    pub fn isInterlaced(self: *align(1) const DetailedTimingRaw) bool {
+    pub fn isInterlaced(self: *align(1) const DetailedRaw) bool {
         return (self.flags & 0x80) != 0;
     }
 
     /// Get stereo mode
-    pub fn getStereoMode(self: *align(1) const DetailedTimingRaw) StereoMode {
+    pub fn getStereoMode(self: *align(1) const DetailedRaw) StereoMode {
         const stereo_hi = (self.flags >> 5) & 0x03;
         const stereo_lo = self.flags & 0x01;
         
@@ -192,13 +192,13 @@ pub const DetailedTimingRaw = extern struct {
     }
 
     /// Get signal type
-    pub fn getSignalType(self: *align(1) const DetailedTimingRaw) SignalType {
+    pub fn getSignalType(self: *align(1) const DetailedRaw) SignalType {
         const bits = (self.flags >> 3) & 0x03;
         return @enumFromInt(bits);
     }
 
     /// Get digital separate sync info (only valid if signal type is digital_separate)
-    pub fn getDigitalSeparateSync(self: *align(1) const DetailedTimingRaw) ?DigitalSeparateSync {
+    pub fn getDigitalSeparateSync(self: *align(1) const DetailedRaw) ?DigitalSeparateSync {
         if (self.getSignalType() != .digital_separate) {
             return null;
         }
@@ -212,7 +212,7 @@ pub const DetailedTimingRaw = extern struct {
 
 /// Established timings I & II (3 bytes of bitmaps)
 /// These are legacy VGA/SVGA/XGA timings from EDID 1.0
-pub const EstablishedTimings = struct {
+pub const Established = struct {
     // Established timings I (byte 0x23)
     has_720x400_70hz: bool,
     has_720x400_88hz: bool,
@@ -238,8 +238,8 @@ pub const EstablishedTimings = struct {
 };
 
 /// Parse established timings from 3 bytes
-pub fn parseEstablishedTimings(bytes: *align(1) const [3]u8) EstablishedTimings {
-    return EstablishedTimings{
+pub fn parseEstablishedTimings(bytes: *align(1) const [3]u8) Established {
+    return Established{
         // Byte 0 (0x23)
         .has_720x400_70hz = (bytes[0] & 0x80) != 0,
         .has_720x400_88hz = (bytes[0] & 0x40) != 0,
@@ -266,7 +266,7 @@ pub fn parseEstablishedTimings(bytes: *align(1) const [3]u8) EstablishedTimings 
 }
 
 /// Standard timing aspect ratio
-pub const StandardTimingAspectRatio = enum(u2) {
+pub const StandardAspectRatio = enum(u2) {
     ratio_16_10 = 0,
     ratio_4_3 = 1,
     ratio_5_4 = 2,
@@ -275,7 +275,7 @@ pub const StandardTimingAspectRatio = enum(u2) {
 
 /// Standard timing information (2 bytes)
 /// Defined in EDID section 3.9
-pub const StandardTiming = struct {
+pub const Standard = struct {
     /// Horizontal resolution
     h_active: u16,
     /// Vertical resolution  
@@ -283,11 +283,11 @@ pub const StandardTiming = struct {
     /// Refresh rate in Hz
     refresh_rate_hz: u8,
     /// Aspect ratio
-    aspect_ratio: StandardTimingAspectRatio,
+    aspect_ratio: StandardAspectRatio,
 };
 
 /// Parse standard timing from raw bytes
-pub fn parseStandardTiming(bytes: *align(1) const [2]u8) ?StandardTiming {
+pub fn parseStandardTiming(bytes: *align(1) const [2]u8) ?Standard {
     const byte0 = bytes[0];
     const byte1 = bytes[1];
     
@@ -301,7 +301,7 @@ pub fn parseStandardTiming(bytes: *align(1) const [2]u8) ?StandardTiming {
     
     // Aspect ratio is bits 7-6
     const aspect_bits = (byte1 >> 6) & 0x03;
-    const aspect_ratio: StandardTimingAspectRatio = @enumFromInt(aspect_bits);
+    const aspect_ratio: StandardAspectRatio = @enumFromInt(aspect_bits);
     
     // Vertical resolution depends on aspect ratio
     const v_active: u16 = switch (aspect_ratio) {
@@ -314,7 +314,7 @@ pub fn parseStandardTiming(bytes: *align(1) const [2]u8) ?StandardTiming {
     // Refresh rate = (byte1 & 0x3F) + 60
     const refresh_rate_hz = (byte1 & 0x3F) + 60;
     
-    return StandardTiming{
+    return Standard{
         .h_active = h_active,
         .v_active = v_active,
         .refresh_rate_hz = refresh_rate_hz,
@@ -323,7 +323,7 @@ pub fn parseStandardTiming(bytes: *align(1) const [2]u8) ?StandardTiming {
 }
 
 /// High-level detailed timing descriptor
-pub const DetailedTiming = struct {
+pub const Detailed = struct {
     /// Pixel clock in Hz
     pixel_clock_hz: u64,
     
@@ -353,17 +353,17 @@ pub const DetailedTiming = struct {
     sync_info: SyncInfo,
     
     /// Calculate horizontal total pixels
-    pub fn getHTotal(self: DetailedTiming) u16 {
+    pub fn getHTotal(self: Detailed) u16 {
         return self.h_active + self.h_blank;
     }
     
     /// Calculate vertical total lines
-    pub fn getVTotal(self: DetailedTiming) u16 {
+    pub fn getVTotal(self: Detailed) u16 {
         return self.v_active + self.v_blank;
     }
     
     /// Calculate refresh rate in Hz
-    pub fn getRefreshRate(self: DetailedTiming) f32 {
+    pub fn getRefreshRate(self: Detailed) f32 {
         const h_total = self.getHTotal();
         const v_total = self.getVTotal();
         const total_pixels = @as(f32, @floatFromInt(@as(u32, h_total) * v_total));
@@ -444,13 +444,13 @@ pub fn extractDescriptorString(data: []const u8) []const u8 {
 }
 
 /// Parse detailed timing descriptor from raw bytes
-pub fn parseDetailedTiming(raw: *align(1) const DetailedTimingRaw) ?DetailedTiming {
+pub fn parseDetailedTiming(raw: *align(1) const DetailedRaw) ?Detailed {
     // Check if this is actually a detailed timing (pixel clock != 0)
     if (raw.pixel_clock_10khz == 0) {
         return null; // This is a display descriptor, not a timing
     }
     
-    var timing: DetailedTiming = undefined;
+    var timing: Detailed = undefined;
     
     timing.pixel_clock_hz = raw.getPixelClockHz();
     timing.h_active = raw.getHActive();
@@ -488,13 +488,13 @@ pub fn parseDetailedTiming(raw: *align(1) const DetailedTimingRaw) ?DetailedTimi
 
 // Tests
 
-test "DetailedTimingRaw size" {
-    try testing.expectEqual(@as(usize, 18), @sizeOf(DetailedTimingRaw));
+test "DetailedRaw size" {
+    try testing.expectEqual(@as(usize, 18), @sizeOf(DetailedRaw));
 }
 
 test "parse 1920x1080 @ 60Hz timing" {
     // Example: 1920x1080 @ 60Hz (148.5 MHz pixel clock)
-    var raw: DetailedTimingRaw = undefined;
+    var raw: DetailedRaw = undefined;
     
     // Pixel clock: 148.5 MHz = 14850 in 10kHz units
     raw.pixel_clock_10khz = 14850;
@@ -550,7 +550,7 @@ test "parse 1920x1080 @ 60Hz timing" {
 }
 
 test "parse returns null for display descriptor" {
-    var raw: DetailedTimingRaw = undefined;
+    var raw: DetailedRaw = undefined;
     @memset(std.mem.asBytes(&raw), 0);
     
     // Pixel clock = 0 means this is a display descriptor, not timing
@@ -561,7 +561,7 @@ test "parse returns null for display descriptor" {
 }
 
 test "detailed timing field extraction" {
-    var raw: DetailedTimingRaw = undefined;
+    var raw: DetailedRaw = undefined;
     
     // Test split field encoding
     // Want h_active = 0xACD, h_blank = 0xBCD
@@ -590,7 +590,7 @@ test "standard timing 1920x1080 @ 60Hz" {
     try testing.expectEqual(@as(u16, 1920), std_timing.h_active);
     try testing.expectEqual(@as(u16, 1080), std_timing.v_active);
     try testing.expectEqual(@as(u8, 60), std_timing.refresh_rate_hz);
-    try testing.expectEqual(StandardTimingAspectRatio.ratio_16_9, std_timing.aspect_ratio);
+    try testing.expectEqual(StandardAspectRatio.ratio_16_9, std_timing.aspect_ratio);
 }
 
 test "standard timing unused slot" {
@@ -611,7 +611,7 @@ test "standard timing different aspect ratios" {
     try testing.expectEqual(@as(u16, 1280), std_timing.h_active);
     try testing.expectEqual(@as(u16, 1024), std_timing.v_active);
     try testing.expectEqual(@as(u8, 75), std_timing.refresh_rate_hz);
-    try testing.expectEqual(StandardTimingAspectRatio.ratio_5_4, std_timing.aspect_ratio);
+    try testing.expectEqual(StandardAspectRatio.ratio_5_4, std_timing.aspect_ratio);
 }
 
 test "established timings parsing" {
