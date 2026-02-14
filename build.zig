@@ -187,7 +187,7 @@ pub fn build(b: *std.Build) void {
     });
     core_i18n_mod.addImport("core.string", core_string_mod);
 
-    _ = b.addModule("core.display", .{
+    const core_display_mod = b.addModule("core.display", .{
         .root_source_file = b.path("src/core/display/root.zig"),
         .target = target,
         .link_libc = true,
@@ -528,6 +528,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "core", .module = core_mod },
                 .{ .name = "core.string", .module = core_string_mod },
                 .{ .name = "core.math", .module = core_math_mod },
+                .{ .name = "core.display", .module = core_display_mod },
             },
         }),
     });

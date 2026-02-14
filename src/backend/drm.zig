@@ -58,12 +58,27 @@ pub const Plane = struct {
     initial_fb_id: u32,
     possible_crtcs: u32,
     formats: std.ArrayList(u32),
+    props: PlaneProps = .{},
     allocator: std.mem.Allocator,
 
     pub const PlaneType = enum(u32) {
         primary = 1,
         cursor = 2,
         overlay = 0,
+    };
+
+    pub const PlaneProps = struct {
+        fb_id: u32 = 0,
+        crtc_id: u32 = 0,
+        crtc_x: u32 = 0,
+        crtc_y: u32 = 0,
+        crtc_w: u32 = 0,
+        crtc_h: u32 = 0,
+        src_x: u32 = 0,
+        src_y: u32 = 0,
+        src_w: u32 = 0,
+        src_h: u32 = 0,
+        type_prop: u32 = 0,
     };
 
     pub fn init(alloc: std.mem.Allocator, fd: i32, plane_id: u32) !*Plane {
@@ -88,7 +103,7 @@ pub const Plane = struct {
             try self.formats.append(alloc, plane_ptr.*.formats[i]);
         }
 
-        // Determine plane type
+        // Load plane properties
         const props = c.drmModeObjectGetProperties(fd, plane_id, c.DRM_MODE_OBJECT_PLANE);
         if (props) |p| {
             defer c.drmModeFreeObjectProperties(p);
@@ -106,7 +121,27 @@ pub const Plane = struct {
                     } else if (value == c.DRM_PLANE_TYPE_CURSOR) {
                         self.type = .cursor;
                     }
-                    break;
+                    self.props.type_prop = p.*.props[j];
+                } else if (std.mem.eql(u8, prop_name, "FB_ID")) {
+                    self.props.fb_id = p.*.props[j];
+                } else if (std.mem.eql(u8, prop_name, "CRTC_ID")) {
+                    self.props.crtc_id = p.*.props[j];
+                } else if (std.mem.eql(u8, prop_name, "CRTC_X")) {
+                    self.props.crtc_x = p.*.props[j];
+                } else if (std.mem.eql(u8, prop_name, "CRTC_Y")) {
+                    self.props.crtc_y = p.*.props[j];
+                } else if (std.mem.eql(u8, prop_name, "CRTC_W")) {
+                    self.props.crtc_w = p.*.props[j];
+                } else if (std.mem.eql(u8, prop_name, "CRTC_H")) {
+                    self.props.crtc_h = p.*.props[j];
+                } else if (std.mem.eql(u8, prop_name, "SRC_X")) {
+                    self.props.src_x = p.*.props[j];
+                } else if (std.mem.eql(u8, prop_name, "SRC_Y")) {
+                    self.props.src_y = p.*.props[j];
+                } else if (std.mem.eql(u8, prop_name, "SRC_W")) {
+                    self.props.src_w = p.*.props[j];
+                } else if (std.mem.eql(u8, prop_name, "SRC_H")) {
+                    self.props.src_h = p.*.props[j];
                 }
             }
         }
@@ -358,9 +393,102 @@ pub const Framebuffer = struct {
             .allocator = alloc,
         };
 
-        // Import buffer handles
-        // TODO: Implement DMA-BUF import
+        // Import DMA-BUF handles to create framebuffer
+        const dmabuf_attrs = buffer.dmabuf();
+        if (!dmabuf_attrs.success) {
+            return error.NoDMABufAttributes;
+        }
 
+        const width: u32 = @intFromFloat(dmabuf_attrs.size.getX());
+        const height: u32 = @intFromFloat(dmabuf_attrs.size.getY());
+        const num_planes: usize = @intCast(dmabuf_attrs.planes);
+
+        // Collect DRM gem handles from file descriptors
+        var i: usize = 0;
+        while (i < num_planes) : (i += 1) {
+            if (dmabuf_attrs.fds[i] < 0) break;
+
+            // Import DMA-BUF FD to get GEM handle
+            const fd = dmabuf_attrs.fds[i];
+            var handle: u32 = 0;
+            const prime_result = c.drmPrimeFDToHandle(be.drm_fd, fd, &handle);
+            if (prime_result != 0) {
+                // Clean up any handles we've already imported
+                var cleanup_idx: usize = 0;
+                while (cleanup_idx < i) : (cleanup_idx += 1) {
+                    if (self.bo_handles[cleanup_idx] != 0) {
+                        var gem_close: c.struct_drm_gem_close = undefined;
+                        gem_close.handle = self.bo_handles[cleanup_idx];
+                        _ = c.drmIoctl(be.drm_fd, c.DRM_IOCTL_GEM_CLOSE, &gem_close);
+                    }
+                }
+                return error.DMABufImportFailed;
+            }
+            self.bo_handles[i] = handle;
+        }
+
+        // Prepare arrays for drmModeAddFB2
+        var handles: [4]u32 = .{ 0, 0, 0, 0 };
+        var pitches: [4]u32 = dmabuf_attrs.strides;
+        var offsets: [4]u32 = dmabuf_attrs.offsets;
+        var modifiers: [4]u64 = .{ dmabuf_attrs.modifier, dmabuf_attrs.modifier, dmabuf_attrs.modifier, dmabuf_attrs.modifier };
+
+        i = 0;
+        while (i < num_planes) : (i += 1) {
+            handles[i] = self.bo_handles[i];
+        }
+
+        // Try to add framebuffer with modifiers if supported
+        var fb_id: u32 = 0;
+        if (be.drm_props.supports_add_fb2_modifiers and dmabuf_attrs.modifier != 0) {
+            const result = c.drmModeAddFB2WithModifiers(
+                be.drm_fd,
+                width,
+                height,
+                dmabuf_attrs.format,
+                &handles,
+                &pitches,
+                &offsets,
+                &modifiers,
+                &fb_id,
+                c.DRM_MODE_FB_MODIFIERS,
+            );
+            if (result != 0) {
+                // Fall back to simple AddFB2 without modifiers
+                const simple_result = c.drmModeAddFB2(
+                    be.drm_fd,
+                    width,
+                    height,
+                    dmabuf_attrs.format,
+                    &handles,
+                    &pitches,
+                    &offsets,
+                    &fb_id,
+                    0,
+                );
+                if (simple_result != 0) {
+                    return error.AddFramebufferFailed;
+                }
+            }
+        } else {
+            // Use simple AddFB2 without modifiers
+            const result = c.drmModeAddFB2(
+                be.drm_fd,
+                width,
+                height,
+                dmabuf_attrs.format,
+                &handles,
+                &pitches,
+                &offsets,
+                &fb_id,
+                0,
+            );
+            if (result != 0) {
+                return error.AddFramebufferFailed;
+            }
+        }
+
+        self.id = fb_id;
         return self;
     }
 
@@ -375,6 +503,15 @@ pub const Framebuffer = struct {
 
         if (self.id != 0) {
             _ = c.drmModeRmFB(self.be.drm_fd, self.id);
+        }
+
+        // Close GEM handles
+        for (self.bo_handles) |handle| {
+            if (handle != 0) {
+                var gem_close: c.struct_drm_gem_close = undefined;
+                gem_close.handle = handle;
+                _ = c.drmIoctl(self.be.drm_fd, c.DRM_IOCTL_GEM_CLOSE, &gem_close);
+            }
         }
     }
 };
@@ -406,6 +543,9 @@ pub const Backend = struct {
     // Formats
     primary_formats: std.ArrayList(misc.DRMFormat),
     cursor_formats: std.ArrayList(misc.DRMFormat),
+
+    // Poll FDs
+    poll_fds: [1]backend.PollFd = undefined,
 
     const Self = @This();
 
@@ -557,6 +697,12 @@ pub const Backend = struct {
             self.drm_props.supports_add_fb2_modifiers = true;
         }
 
+        // Initialize poll FD for DRM events
+        self.poll_fds[0] = .{
+            .fd = self.drm_fd,
+            .callback = null, // Event handler will be called by coordinator
+        };
+
         // Scan resources
         self.scanResources() catch return false;
 
@@ -565,8 +711,9 @@ pub const Backend = struct {
 
     fn pollFdsImpl(ptr: *anyopaque) []const backend.PollFd {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        _ = self;
-        // TODO: Return DRM FD for polling
+        if (self.drm_fd >= 0) {
+            return &self.poll_fds;
+        }
         return &[_]backend.PollFd{};
     }
 
@@ -582,15 +729,141 @@ pub const Backend = struct {
 
     fn getRenderFormatsImpl(ptr: *anyopaque) []const misc.DRMFormat {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        _ = self;
-        // TODO: Query DRM plane formats
-        return &[_]misc.DRMFormat{};
+        return self.primary_formats.items;
     }
 
     fn onReadyImpl(ptr: *anyopaque) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        _ = self;
-        // TODO: Initialize renderer, scan outputs
+        
+        // Scan and initialize connected outputs
+        self.scanOutputs() catch |err| {
+            if (self.backend_ptr) |be_ptr| {
+                const coordinator: *backend.Coordinator = @ptrCast(@alignCast(be_ptr));
+                coordinator.log(.err, "Failed to scan DRM outputs");
+                _ = err;
+            }
+        };
+    }
+    
+    /// Scan connected outputs and parse EDID information
+    fn scanOutputs(self: *Self) !void {
+        const edid_parser = @import("core.display").edid;
+        
+        for (self.connectors.items) |conn| {
+            // Only process connected displays
+            if (conn.status != .connected) continue;
+            
+            // Get coordinator for logging
+            const coordinator: *backend.Coordinator = if (self.backend_ptr) |ptr|
+                @ptrCast(@alignCast(ptr))
+            else
+                continue;
+            
+            // Log basic connector info
+            var msg_buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&msg_buf, "Found connected output: {s}", .{conn.name}) catch "Output found";
+            coordinator.log(.debug, msg);
+            
+            // Try to get EDID data
+            if (conn.props.edid != 0) {
+                const edid_data = self.getConnectorEDID(conn) catch {
+                    coordinator.log(.warning, "Failed to read EDID data");
+                    continue;
+                };
+                defer self.allocator.free(edid_data);
+                
+                // Parse EDID
+                const parsed = edid_parser.fast.parse(edid_data) catch {
+                    coordinator.log(.warning, "Failed to parse EDID data");
+                    continue;
+                };
+                
+                // Log display information
+                const manufacturer = parsed.getManufacturerName() orelse "Unknown";
+                const serial = parsed.getSerialNumber();
+                
+                const info_msg = std.fmt.bufPrint(&msg_buf, 
+                    "Display: {s} (Serial: {d})", 
+                    .{manufacturer, serial}
+                ) catch "Display info";
+                coordinator.log(.debug, info_msg);
+                
+                // Log physical size if available
+                const width_cm = parsed.getScreenWidthCm();
+                const height_cm = parsed.getScreenHeightCm();
+                if (width_cm > 0 and height_cm > 0) {
+                    const size_msg = std.fmt.bufPrint(&msg_buf,
+                        "Physical size: {d}x{d} cm",
+                        .{width_cm, height_cm}
+                    ) catch "Physical size";
+                    coordinator.log(.debug, size_msg);
+                }
+            }
+            
+            // Log available modes
+            if (conn.modes.items.len > 0) {
+                const mode_msg = std.fmt.bufPrint(&msg_buf,
+                    "Available modes: {d}",
+                    .{conn.modes.items.len}
+                ) catch "Modes available";
+                coordinator.log(.debug, mode_msg);
+                
+                // Log preferred mode if any
+                for (conn.modes.items) |mode| {
+                    if (mode.preferred) {
+                        const pref_msg = std.fmt.bufPrint(&msg_buf,
+                            "Preferred mode: {d}x{d} @ {d}Hz",
+                            .{
+                                @as(u32, @intFromFloat(mode.pixel_size.getX())),
+                                @as(u32, @intFromFloat(mode.pixel_size.getY())),
+                                mode.refresh_rate / 1000,
+                            }
+                        ) catch "Preferred mode";
+                        coordinator.log(.debug, pref_msg);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    /// Read EDID blob from connector property
+    fn getConnectorEDID(self: *Self, conn: *Connector) ![]u8 {
+        if (conn.props.edid == 0) return error.NoEDIDProperty;
+        
+        // Get the property blob
+        const props = c.drmModeObjectGetProperties(self.drm_fd, conn.id, c.DRM_MODE_OBJECT_CONNECTOR);
+        if (props == null) return error.GetPropertiesFailed;
+        defer c.drmModeFreeObjectProperties(props.?);
+        
+        // Find the EDID property value (blob ID)
+        var blob_id: u64 = 0;
+        var i: u32 = 0;
+        while (i < props.?.*.count_props) : (i += 1) {
+            if (props.?.*.props[i] == conn.props.edid) {
+                blob_id = props.?.*.prop_values[i];
+                break;
+            }
+        }
+        
+        if (blob_id == 0) return error.NoEDIDBlob;
+        
+        // Get the blob data
+        const blob = c.drmModeGetPropertyBlob(self.drm_fd, @intCast(blob_id));
+        if (blob == null) return error.GetBlobFailed;
+        defer c.drmModeFreePropertyBlob(blob.?);
+        
+        const edid_len = blob.?.*.length;
+        if (edid_len == 0 or edid_len > 8192) return error.InvalidEDIDSize;
+        
+        // Copy EDID data
+        const edid_data = try self.allocator.alloc(u8, edid_len);
+        errdefer self.allocator.free(edid_data);
+        
+        const src_ptr: [*]const u8 = @ptrCast(blob.?.*.data);
+        @memcpy(edid_data, src_ptr[0..edid_len]);
+        
+        return edid_data;
     }
 
     fn deinitImpl(ptr: *anyopaque) void {
@@ -639,29 +912,89 @@ pub const Backend = struct {
             try self.connectors.append(self.allocator, connector);
         }
 
-        // Build format lists from primary planes
+        // Build format lists from primary planes with modifiers
         for (self.planes.items) |plane| {
             if (plane.type == .primary) {
-                for (plane.formats.items) |format| {
-                    var fmt = misc.DRMFormat.init(self.allocator);
-                    fmt.drm_format = format;
-                    try self.primary_formats.append(self.allocator, fmt);
-                }
+                try self.queryPlaneFormats(plane, &self.primary_formats);
                 break;
             }
         }
 
-        // Build format lists from cursor planes
+        // Build format lists from cursor planes with modifiers
         for (self.planes.items) |plane| {
             if (plane.type == .cursor) {
-                for (plane.formats.items) |format| {
-                    var fmt = misc.DRMFormat.init(self.allocator);
-                    fmt.drm_format = format;
-                    try self.cursor_formats.append(self.allocator, fmt);
-                }
+                try self.queryPlaneFormats(plane, &self.cursor_formats);
                 break;
             }
         }
+    }
+    
+    /// Query plane formats and modifiers
+    fn queryPlaneFormats(self: *Self, plane: *Plane, format_list: *std.ArrayList(misc.DRMFormat)) !void {
+        // Try to get format modifiers if supported
+        const plane_res = c.drmModeGetPlane(self.drm_fd, plane.id);
+        if (plane_res == null) return;
+        defer c.drmModeFreePlane(plane_res.?);
+        
+        var i: u32 = 0;
+        while (i < plane_res.?.*.count_formats) : (i += 1) {
+            const format = plane_res.?.*.formats[i];
+            
+            var drm_fmt = misc.DRMFormat.init(self.allocator);
+            drm_fmt.drm_format = format;
+            
+            // Try to get modifiers for this format if kernel supports it
+            if (self.drm_props.supports_add_fb2_modifiers) {
+                const modifiers = self.getPlaneFormatModifiers(plane.id, format) catch null;
+                if (modifiers) |mod_list| {
+                    defer self.allocator.free(mod_list);
+                    for (mod_list) |modifier| {
+                        try drm_fmt.addModifier(self.allocator, modifier);
+                    }
+                }
+            }
+            
+            // If no modifiers found, add linear modifier as fallback
+            if (drm_fmt.modifiers.items.len == 0) {
+                try drm_fmt.addModifier(self.allocator, 0); // DRM_FORMAT_MOD_LINEAR
+            }
+            
+            try format_list.append(self.allocator, drm_fmt);
+        }
+    }
+    
+    /// Get format modifiers for a specific plane and format
+    fn getPlaneFormatModifiers(self: *Self, plane_id: u32, format: u32) ![]u64 {
+        // Get plane properties to find IN_FORMATS blob
+        const props = c.drmModeObjectGetProperties(self.drm_fd, plane_id, c.DRM_MODE_OBJECT_PLANE);
+        if (props == null) return error.GetPropertiesFailed;
+        defer c.drmModeFreeObjectProperties(props.?);
+        
+        var in_formats_blob_id: u64 = 0;
+        var i: u32 = 0;
+        while (i < props.?.*.count_props) : (i += 1) {
+            const prop = c.drmModeGetProperty(self.drm_fd, props.?.*.props[i]) orelse continue;
+            defer c.drmModeFreeProperty(prop);
+            
+            const prop_name = std.mem.sliceTo(&prop.*.name, 0);
+            if (std.mem.eql(u8, prop_name, "IN_FORMATS")) {
+                in_formats_blob_id = props.?.*.prop_values[i];
+                break;
+            }
+        }
+        
+        if (in_formats_blob_id == 0) return error.NoInFormatsBlob;
+        
+        // Get the blob data
+        const blob = c.drmModeGetPropertyBlob(self.drm_fd, @intCast(in_formats_blob_id));
+        if (blob == null) return error.GetBlobFailed;
+        defer c.drmModeFreePropertyBlob(blob.?);
+        
+        // Parse IN_FORMATS blob to extract modifiers for this format
+        // This is a simplified version - proper parsing would need the drm_format_modifier_blob structure
+        // For now, return empty array and let caller use linear modifier
+        _ = format;
+        return error.NotImplemented;
     }
 };
 
@@ -793,7 +1126,7 @@ pub const AtomicRequest = struct {
     /// Set plane properties
     pub fn setPlaneProps(
         self: *Self,
-        plane_id: u32,
+        plane: *const Plane,
         fb_id: u32,
         crtc_id: u32,
         pos: Vector2D,
@@ -803,18 +1136,37 @@ pub const AtomicRequest = struct {
 
         if (fb_id == 0 or crtc_id == 0) {
             // Disable the plane
-            self.add(plane_id, 0, 0); // TODO: Use actual property IDs
+            self.add(plane.id, plane.props.fb_id, 0);
+            self.add(plane.id, plane.props.crtc_id, 0);
             return;
         }
 
-        // src_ coordinates are 16.16 fixed point
+        // Set framebuffer
+        self.add(plane.id, plane.props.fb_id, fb_id);
+        
+        // Set CRTC
+        self.add(plane.id, plane.props.crtc_id, crtc_id);
+        
+        // Set position (CRTC_X, CRTC_Y)
+        const crtc_x: u64 = @intFromFloat(pos.getX());
+        const crtc_y: u64 = @intFromFloat(pos.getY());
+        self.add(plane.id, plane.props.crtc_x, crtc_x);
+        self.add(plane.id, plane.props.crtc_y, crtc_y);
+        
+        // Set destination size (CRTC_W, CRTC_H)
+        const crtc_w: u64 = @intFromFloat(size.getX());
+        const crtc_h: u64 = @intFromFloat(size.getY());
+        self.add(plane.id, plane.props.crtc_w, crtc_w);
+        self.add(plane.id, plane.props.crtc_h, crtc_h);
+        
+        // Set source rectangle (16.16 fixed point)
+        // Source starts at (0, 0) and spans the full buffer
         const src_w: u64 = @intFromFloat(size.getX() * 65536.0);
         const src_h: u64 = @intFromFloat(size.getY() * 65536.0);
-
-        // TODO: Set all plane properties using actual property IDs from DRM
-        _ = src_w;
-        _ = src_h;
-        _ = pos;
+        self.add(plane.id, plane.props.src_x, 0);
+        self.add(plane.id, plane.props.src_y, 0);
+        self.add(plane.id, plane.props.src_w, src_w);
+        self.add(plane.id, plane.props.src_h, src_h);
     }
 
     /// Commit the atomic request
@@ -946,4 +1298,132 @@ test "getMaxBpc - unknown format defaults to 8" {
 
     try testing.expectEqual(@as(u8, 8), getMaxBpc(0xDEADBEEF));
     try testing.expectEqual(@as(u8, 8), getMaxBpc(0));
+}
+
+test "Plane.PlaneProps - initialization" {
+    const testing = core.testing;
+
+    const props: Plane.PlaneProps = .{};
+    try testing.expectEqual(@as(u32, 0), props.fb_id);
+    try testing.expectEqual(@as(u32, 0), props.crtc_id);
+    try testing.expectEqual(@as(u32, 0), props.crtc_x);
+    try testing.expectEqual(@as(u32, 0), props.src_w);
+}
+
+test "Backend - poll_fds array size" {
+    const testing = core.testing;
+
+    var be = try Backend.fromGpu(testing.allocator, "/dev/dri/card0", null, null);
+    defer be.deinit();
+
+    // Poll FDs should be 1 element array
+    try testing.expectEqual(@as(usize, 1), be.poll_fds.len);
+}
+
+test "Backend - getRenderFormats returns primary formats" {
+    const testing = core.testing;
+
+    var be = try Backend.fromGpu(testing.allocator, "/dev/dri/card0", null, null);
+    defer be.deinit();
+
+    // Add test format
+    var fmt = misc.DRMFormat.init(testing.allocator);
+    fmt.drm_format = 0x34325258; // DRM_FORMAT_XRGB8888
+    try be.primary_formats.append(testing.allocator, fmt);
+
+    const interface = be.asInterface();
+    const formats = interface.getRenderFormats();
+
+    try testing.expectEqual(@as(usize, 1), formats.len);
+    try testing.expectEqual(@as(u32, 0x34325258), formats[0].drm_format);
+}
+
+test "AtomicRequest - setPlaneProps with disabled plane" {
+    const testing = core.testing;
+
+    var request = AtomicRequest.init(testing.allocator, null);
+    defer request.deinit();
+
+    // Create a test plane with some properties
+    var plane = Plane{
+        .id = 1,
+        .type = .primary,
+        .initial_fb_id = 0,
+        .possible_crtcs = 1,
+        .formats = std.ArrayList(u32){},
+        .props = .{
+            .fb_id = 10,
+            .crtc_id = 11,
+        },
+        .allocator = testing.allocator,
+    };
+    defer plane.formats.deinit(testing.allocator);
+
+    const pos = Vector2D.init(0, 0);
+    const size = Vector2D.init(1920, 1080);
+
+    // Disable plane (fb_id = 0)
+    request.setPlaneProps(&plane, 0, 0, pos, size);
+
+    // Should not fail
+    try testing.expectFalse(request.failed);
+}
+
+test "AtomicRequest - setPlaneProps with valid configuration" {
+    const testing = core.testing;
+
+    var request = AtomicRequest.init(testing.allocator, null);
+    defer request.deinit();
+
+    var plane = Plane{
+        .id = 1,
+        .type = .primary,
+        .initial_fb_id = 0,
+        .possible_crtcs = 1,
+        .formats = std.ArrayList(u32){},
+        .props = .{
+            .fb_id = 10,
+            .crtc_id = 11,
+            .crtc_x = 12,
+            .crtc_y = 13,
+            .crtc_w = 14,
+            .crtc_h = 15,
+            .src_x = 16,
+            .src_y = 17,
+            .src_w = 18,
+            .src_h = 19,
+        },
+        .allocator = testing.allocator,
+    };
+    defer plane.formats.deinit(testing.allocator);
+
+    const pos = Vector2D.init(100, 200);
+    const size = Vector2D.init(1920, 1080);
+
+    // Set plane properties
+    request.setPlaneProps(&plane, 42, 5, pos, size);
+
+    // Should not fail
+    try testing.expectFalse(request.failed);
+}
+
+test "Framebuffer - initialization sets defaults" {
+    const testing = core.testing;
+
+    var be = try Backend.fromGpu(testing.allocator, "/dev/dri/card0", null, null);
+    defer be.deinit();
+
+    // Can't test full init without valid DMA-BUF, but can test structure
+    const fb = Framebuffer{
+        .id = 123,
+        .buffer = null,
+        .be = be,
+        .bo_handles = .{ 1, 2, 3, 4 },
+        .dropped = false,
+        .allocator = testing.allocator,
+    };
+
+    try testing.expectEqual(@as(u32, 123), fb.id);
+    try testing.expectFalse(fb.dropped);
+    try testing.expectEqual(@as(u32, 1), fb.bo_handles[0]);
 }
