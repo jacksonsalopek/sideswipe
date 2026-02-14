@@ -5,7 +5,7 @@ const std = @import("std");
 const core = @import("core");
 const Signal = core.events.Signal;
 const backend = @import("backend");
-const BackendType = backend.backend.Type;
+const BackendType = backend.Type;
 const math = @import("core.math");
 const Vector2D = math.Vector2D;
 

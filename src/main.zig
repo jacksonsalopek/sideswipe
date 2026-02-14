@@ -20,6 +20,7 @@ pub fn main() !void {
     // Register options
     try parser.registerBoolOption("verbose", "v", "Enable verbose output");
     try parser.registerBoolOption("help", "h", "Show help message");
+    try parser.registerBoolOption("backend", "b", "Enable backend for nested mode (Wayland)");
     try parser.registerStringOption("output", "o", "Output file");
 
     // Try to parse, show help on error
@@ -77,18 +78,60 @@ pub fn main() !void {
     try compositor.protocols.xdg_shell.register(comp);
     logger.info("Registered: wl_compositor, xdg_wm_base", .{});
 
-    // Initialize backend (optional for now)
-    if (verbose) {
-        logger.debug("Backend initialization deferred - running in display-server-only mode", .{});
-    }
+    // Initialize backend if requested
+    const enable_backend = parser.getBool("backend") orelse false;
+    var coord: ?*backend.Coordinator = null;
+    defer if (coord) |c| c.deinit();
 
-    // TODO: Initialize backend for rendering
-    // const backends = [_]backend.backend.ImplementationOptions{
-    //     .{ .backend_type = .wayland, .request_mode = .if_available },
-    // };
-    // var coord = try backend.backend.Coordinator.create(allocator, &backends, .{});
-    // defer coord.deinit();
-    // comp.attachBackend(coord);
+    if (enable_backend) {
+        logger.info("Initializing backend (nested Wayland mode)...", .{});
+
+        const backend_opts = [_]backend.ImplementationOptions{
+            .{ .backend_type = .wayland, .request_mode = .if_available },
+        };
+
+        // Create backend coordinator with logging
+        const log_fn = struct {
+            fn logBackend(level: backend.LogLevel, message: []const u8) void {
+                const log_level: cli.LogLevel = switch (level) {
+                    .trace => .trace,
+                    .debug => .debug,
+                    .warning => .warn,
+                    .err => .err,
+                    .critical => .err,
+                };
+                // Note: This is a simplified logger call - ideally we'd use the actual logger instance
+                std.debug.print("[backend:{s}] {s}\n", .{ @tagName(log_level), message });
+            }
+        }.logBackend;
+
+        if (backend.Coordinator.create(allocator, &backend_opts, .{
+            .log_function = log_fn,
+        })) |c| {
+            // Try to start the backend
+            if (c.start()) |started| {
+                if (started) {
+                    comp.attachBackend(c);
+                    coord = c;
+                    logger.info("Backend initialized successfully", .{});
+                } else {
+                    logger.warn("Backend failed to start", .{});
+                    logger.info("Continuing in display-server-only mode", .{});
+                    c.deinit();
+                }
+            } else |err| {
+                logger.warn("Failed to start backend: {}", .{err});
+                logger.info("Continuing in display-server-only mode", .{});
+                c.deinit();
+            }
+        } else |err| {
+            logger.warn("Failed to create backend coordinator: {}", .{err});
+            logger.info("Continuing in display-server-only mode", .{});
+        }
+    } else {
+        logger.info("Backend disabled - running in display-server-only mode", .{});
+        logger.info("Use --backend flag to enable nested Wayland mode", .{});
+    }
 
     // TODO: Set up signal handlers for graceful shutdown (SIGINT, SIGTERM)
     // TODO: Initialize input management (wl_seat, libinput)

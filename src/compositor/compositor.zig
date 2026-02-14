@@ -12,7 +12,7 @@ const Surface = @import("surface.zig").Surface;
 pub const Compositor = struct {
     allocator: std.mem.Allocator,
     server: *wayland.Server,
-    coordinator: ?*backend.backend.Coordinator,
+    coordinator: ?*backend.Coordinator,
     surfaces: std.ArrayList(*Surface),
     next_surface_id: u32,
 
@@ -51,7 +51,7 @@ pub const Compositor = struct {
     }
 
     /// Attaches a backend coordinator to the compositor
-    pub fn attachBackend(self: *Self, coord: *backend.backend.Coordinator) void {
+    pub fn attachBackend(self: *Self, coord: *backend.Coordinator) void {
         self.coordinator = coord;
     }
 

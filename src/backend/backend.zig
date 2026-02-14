@@ -144,7 +144,64 @@ pub const Coordinator = struct {
         const fd_result = linux.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true });
         self.idle_fd = @intCast(fd_result);
 
+        // Instantiate backend implementations from options
+        errdefer {
+            for (self.implementations.items) |impl| {
+                impl.deinit();
+            }
+            self.implementations.deinit(alloc);
+        }
+
+        try self.instantiateBackends();
+
         return self;
+    }
+
+    /// Instantiate backend implementations from stored options
+    fn instantiateBackends(self: *Self) !void {
+        const wayland_module = @import("wayland.zig");
+
+        for (self.implementation_options) |opt| {
+            const impl_result = switch (opt.backend_type) {
+                .wayland => blk: {
+                    self.log(.debug, "Attempting to create Wayland backend");
+                    const backend_ptr = wayland_module.Backend.create(self.allocator, self) catch |err| {
+                        self.log(.warning, "Failed to create Wayland backend");
+                        break :blk err;
+                    };
+                    break :blk backend_ptr.iface();
+                },
+                .drm => blk: {
+                    self.log(.debug, "DRM backend not yet implemented");
+                    break :blk error.BackendNotImplemented;
+                },
+                .headless => blk: {
+                    self.log(.debug, "Headless backend not yet implemented");
+                    break :blk error.BackendNotImplemented;
+                },
+                .null => blk: {
+                    self.log(.debug, "Null backend - skipping");
+                    break :blk error.BackendNotImplemented;
+                },
+            };
+
+            if (impl_result) |impl| {
+                try self.implementations.append(self.allocator, impl);
+                self.log(.debug, "Successfully created backend");
+            } else |err| {
+                // Handle error based on request mode
+                if (opt.request_mode == .mandatory) {
+                    self.log(.critical, "Mandatory backend failed to create");
+                    return err;
+                }
+                // For if_available and fallback, just log and continue
+                self.log(.debug, "Optional backend not available, continuing");
+            }
+        }
+
+        if (self.implementations.items.len == 0) {
+            self.log(.warning, "No backends were successfully created");
+        }
     }
 
     pub fn deinit(self: *Self) void {
@@ -476,12 +533,9 @@ test "Coordinator - start with mandatory backend failure" {
     };
     const opts: Options = .{};
 
-    var coordinator = try Coordinator.create(testing.allocator, &backends, opts);
-    defer coordinator.deinit();
-
-    // Since no implementations are added, start should fail
-    const result = try coordinator.start();
-    try testing.expectFalse(result);
+    // Creation should fail because mandatory DRM backend is not implemented
+    const result = Coordinator.create(testing.allocator, &backends, opts);
+    try testing.expectError(error.BackendNotImplemented, result);
 }
 
 test "Coordinator - fallback backend activation" {
@@ -531,4 +585,55 @@ test "Coordinator - multiple backend types simultaneously" {
     defer coordinator.deinit();
 
     try testing.expectEqual(@as(usize, 3), coordinator.implementation_options.len);
+}
+
+test "Coordinator - instantiates wayland backend when WAYLAND_DISPLAY set" {
+    const testing = core.testing;
+
+    // Skip this test if WAYLAND_DISPLAY is not set
+    const wayland_display = std.posix.getenv("WAYLAND_DISPLAY");
+    if (wayland_display == null) {
+        return error.SkipZigTest;
+    }
+
+    const backends = [_]ImplementationOptions{
+        .{ .backend_type = .wayland, .request_mode = .if_available },
+    };
+    const opts: Options = .{};
+
+    var coordinator = try Coordinator.create(testing.allocator, &backends, opts);
+    defer coordinator.deinit();
+
+    // Should have created one implementation
+    try testing.expectEqual(@as(usize, 1), coordinator.implementations.items.len);
+    try testing.expectEqual(Type.wayland, coordinator.implementations.items[0].backendType());
+}
+
+test "Coordinator - handles unimplemented backends gracefully" {
+    const testing = core.testing;
+
+    const backends = [_]ImplementationOptions{
+        .{ .backend_type = .drm, .request_mode = .if_available },
+        .{ .backend_type = .headless, .request_mode = .if_available },
+        .{ .backend_type = .null, .request_mode = .if_available },
+    };
+    const opts: Options = .{};
+
+    var coordinator = try Coordinator.create(testing.allocator, &backends, opts);
+    defer coordinator.deinit();
+
+    // Should have created zero implementations (all are not yet implemented)
+    try testing.expectEqual(@as(usize, 0), coordinator.implementations.items.len);
+}
+
+test "Coordinator - mandatory backend failure propagates error" {
+    const testing = core.testing;
+
+    const backends = [_]ImplementationOptions{
+        .{ .backend_type = .drm, .request_mode = .mandatory },
+    };
+    const opts: Options = .{};
+
+    const result = Coordinator.create(testing.allocator, &backends, opts);
+    try testing.expectError(error.BackendNotImplemented, result);
 }
