@@ -199,10 +199,10 @@ if (cta_ext) |cta| {
 | **GTF timing** | **210** | 128 | **✅ 100%** |
 | **CTA-861** | **2,716** | 3,000 | **✅ 91%** |
 | DMT database | 0 | 1,629 | ⏳ 0% |
-| DisplayID | 0 | 1,236 | ⏳ 0% |
+| **DisplayID** | **403** | 1,236 | **⏳ 33%** |
 | High-level API | 65 | 483 | ⏳ 13% |
 | **Build tools** | **573** | 0 | **✅ 100%** |
-| **Total** | **5,828** | ~11,000 | **~71%** |
+| **Total** | **6,231** | ~11,000 | **~73%** |
 
 **Generated (auto, git-ignored):**
 - PNP ID database: 2,593 lines (2,557 manufacturers)

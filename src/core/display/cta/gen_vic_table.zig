@@ -3,8 +3,8 @@
 //! This parses cta-vic-table.c and generates a Zig lookup table.
 
 const std = @import("std");
-const logger_mod = @import("logger");
-const Logger = logger_mod.Logger;
+const cli = @import("core.cli");
+const Logger = cli.Logger;
 
 const VicEntry = struct {
     code: u8,

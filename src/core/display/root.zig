@@ -18,6 +18,7 @@ pub const edid = @import("edid/root.zig");
 pub const cta = @import("cta/root.zig");
 pub const cvt = @import("cvt.zig");
 pub const gtf = @import("gtf.zig");
+pub const displayid = @import("displayid/root.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
@@ -25,4 +26,5 @@ test {
     _ = @import("cta/root.zig");
     _ = @import("cvt.zig");
     _ = @import("gtf.zig");
+    _ = @import("displayid/root.zig");
 }

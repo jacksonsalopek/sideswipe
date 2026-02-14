@@ -5,6 +5,8 @@
 
 const std = @import("std");
 const display = @import("display");
+const cli = @import("core.cli");
+const Logger = cli.Logger;
 
 // C library bindings for libdisplay-info
 const c = @cImport({
@@ -13,12 +15,12 @@ const c = @cImport({
 });
 
 /// Try to load EDID from system, fall back to test data
-fn loadEdidData(allocator: std.mem.Allocator) ![]u8 {
+fn loadEdidData(allocator: std.mem.Allocator, log: *Logger) ![]u8 {
     // Try to find a real EDID from sysfs
     // First, scan for any available EDID files
     var dir = std.fs.openDirAbsolute("/sys/class/drm", .{ .iterate = true }) catch {
-        std.debug.print("Cannot access /sys/class/drm, using test data\n", .{});
-        return generateDellTestEdid(allocator);
+        log.warn("Cannot access /sys/class/drm, using test data", .{});
+        return generateDellTestEdid(allocator, log);
     };
     defer dir.close();
     
@@ -31,24 +33,23 @@ fn loadEdidData(allocator: std.mem.Allocator) ![]u8 {
         
         if (std.fs.cwd().readFileAlloc(allocator, edid_path, 4096)) |data| {
             if (data.len >= 128) {
-                std.debug.print("Using real EDID from {s} ({d} bytes)\n", .{ edid_path, data.len });
+                log.info("Using real EDID from {s} ({d} bytes)", .{ edid_path, data.len });
                 return data;
             } else if (data.len > 0) {
-                std.debug.print("Skipping {s}: only {d} bytes (need 128+)\n", .{ edid_path, data.len });
+                log.debug("Skipping {s}: only {d} bytes", .{ edid_path, data.len });
             }
             allocator.free(data);
-        } else |err| {
-            std.debug.print("Cannot read {s}: {}\n", .{ edid_path, err });
+        } else |_| {
             continue;
         }
     }
     
-    return generateDellTestEdid(allocator);
+    return generateDellTestEdid(allocator, log);
 }
 
 /// Generate Dell monitor test EDID
-fn generateDellTestEdid(allocator: std.mem.Allocator) ![]u8 {
-    std.debug.print("No real EDID found, using Dell test data\n", .{});
+fn generateDellTestEdid(allocator: std.mem.Allocator, log: *Logger) ![]u8 {
+    log.info("No real EDID found, using Dell test data", .{});
     
     var data = try allocator.alloc(u8, 128);
     @memset(data, 0);
@@ -102,18 +103,21 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const test_data = try loadEdidData(allocator);
+    var log = Logger.init(allocator);
+    defer log.deinit();
+
+    const test_data = try loadEdidData(allocator, &log);
     defer allocator.free(test_data);
     
     const iterations = 1_000_000;
 
-    std.debug.print("\n", .{});
-    std.debug.print("========================================\n", .{});
-    std.debug.print("Zig vs C libdisplay-info Benchmark\n", .{});
-    std.debug.print("========================================\n", .{});
-    std.debug.print("EDID size: {d} bytes\n", .{test_data.len});
-    std.debug.print("Iterations: {d:10}\n", .{iterations});
-    std.debug.print("========================================\n", .{});
+    log.info("", .{});
+    log.info("========================================", .{});
+    log.info("Zig vs C libdisplay-info Benchmark", .{});
+    log.info("========================================", .{});
+    log.info("EDID size: {d} bytes", .{test_data.len});
+    log.info("Iterations: {d}", .{iterations});
+    log.info("========================================", .{});
 
     // Warm up
     {
@@ -128,7 +132,7 @@ pub fn main() !void {
     }
 
     // Benchmark Zig implementation
-    std.debug.print("Benchmarking Zig implementation...\n", .{});
+    log.info("Benchmarking Zig implementation...", .{});
     const zig_start = std.time.nanoTimestamp();
     
     for (0..iterations) |_| {
@@ -140,7 +144,7 @@ pub fn main() !void {
     const zig_time = zig_end - zig_start;
 
     // Benchmark C implementation
-    std.debug.print("Benchmarking C libdisplay-info...\n", .{});
+    log.info("Benchmarking C libdisplay-info...", .{});
     const c_start = std.time.nanoTimestamp();
     
     for (0..iterations) |_| {
@@ -154,28 +158,29 @@ pub fn main() !void {
     const c_time = c_end - c_start;
 
     // Results
-    std.debug.print("\n", .{});
-    std.debug.print("========================================\n", .{});
-    std.debug.print("Performance Results\n", .{});
-    std.debug.print("========================================\n", .{});
+    log.info("", .{});
+    log.info("========================================", .{});
+    log.info("Performance Results", .{});
+    log.info("========================================", .{});
     
     const zig_per_op = @as(f64, @floatFromInt(zig_time)) / @as(f64, @floatFromInt(iterations));
     const c_per_op = @as(f64, @floatFromInt(c_time)) / @as(f64, @floatFromInt(iterations));
     
-    std.debug.print("Zig implementation:  {d:8.2} ns/op\n", .{zig_per_op});
-    std.debug.print("C libdisplay-info:   {d:8.2} ns/op\n", .{c_per_op});
+    log.info("Zig implementation:  {d:.2} ns/op", .{zig_per_op});
+    log.info("C libdisplay-info:   {d:.2} ns/op", .{c_per_op});
     
     const speedup = c_per_op / zig_per_op;
     const percent_faster = (speedup - 1.0) * 100.0;
     
-    std.debug.print("\n⚡ Zig is {d:.1}x faster ({d:.0}% improvement)\n", .{ speedup, percent_faster });
-    std.debug.print("========================================\n", .{});
+    log.info("", .{});
+    log.info("⚡ Zig is {d:.1}x faster ({d:.0}% improvement)", .{ speedup, percent_faster });
+    log.info("========================================", .{});
 
     // Validate correctness
-    std.debug.print("\n", .{});
-    std.debug.print("========================================\n", .{});
-    std.debug.print("Correctness Validation\n", .{});
-    std.debug.print("========================================\n", .{});
+    log.info("", .{});
+    log.info("========================================", .{});
+    log.info("Correctness Validation", .{});
+    log.info("========================================", .{});
 
     const zig_edid = try display.edid.fast.parse(test_data);
     const c_info = c.di_info_parse_edid(test_data.ptr, test_data.len);
@@ -191,7 +196,7 @@ pub fn main() !void {
             const c_revision = c.di_edid_get_revision(edid_ptr);
             const match_version = zig_edid.getVersion() == c_version and zig_edid.getRevision() == c_revision;
             
-            std.debug.print("Version:         {d}.{d} vs {d}.{d}  {s}\n", .{
+            log.info("Version:         {d}.{d} vs {d}.{d}  {s}", .{
                 zig_edid.getVersion(),
                 zig_edid.getRevision(),
                 c_version,
@@ -208,7 +213,7 @@ pub fn main() !void {
                 const c_mfg: [*c]const u8 = @ptrCast(&vp.manufacturer);
                 const match_mfg = std.mem.eql(u8, &zig_mfg, c_mfg[0..3]);
                 
-                std.debug.print("Manufacturer ID: {s} vs {s}  {s}\n", .{ 
+                log.info("Manufacturer ID: {s} vs {s}  {s}", .{ 
                     zig_mfg, 
                     c_mfg[0..3],
                     if (match_mfg) "✅" else "❌",
@@ -217,12 +222,12 @@ pub fn main() !void {
                 
                 // Show manufacturer name
                 if (zig_edid.getManufacturerName()) |zig_name| {
-                    std.debug.print("Manufacturer:    {s}\n", .{zig_name});
+                    log.info("Manufacturer:    {s}", .{zig_name});
                 }
 
                 // Compare product code
                 const match_product = zig_edid.getProductCode() == vp.product;
-                std.debug.print("Product Code:    0x{X:0>4} vs 0x{X:0>4}  {s}\n", .{
+                log.info("Product Code:    0x{X:0>4} vs 0x{X:0>4}  {s}", .{
                     zig_edid.getProductCode(),
                     vp.product,
                     if (match_product) "✅" else "❌",
@@ -231,7 +236,7 @@ pub fn main() !void {
                 
                 // Compare serial number
                 const match_serial = zig_edid.getSerialNumber() == vp.serial;
-                std.debug.print("Serial Number:   0x{X:0>8} vs 0x{X:0>8}  {s}\n", .{
+                log.info("Serial Number:   0x{X:0>8} vs 0x{X:0>8}  {s}", .{
                     zig_edid.getSerialNumber(),
                     vp.serial,
                     if (match_serial) "✅" else "❌",
@@ -246,7 +251,7 @@ pub fn main() !void {
                 const match_screen = zig_edid.getScreenWidthCm() == screen.width_cm and
                     zig_edid.getScreenHeightCm() == screen.height_cm;
                 
-                std.debug.print("Screen Size:     {d}x{d}cm vs {d}x{d}cm  {s}\n", .{
+                log.info("Screen Size:     {d}x{d}cm vs {d}x{d}cm  {s}", .{
                     zig_edid.getScreenWidthCm(),
                     zig_edid.getScreenHeightCm(),
                     screen.width_cm,
@@ -263,7 +268,7 @@ pub fn main() !void {
             const match_gamma = gamma_diff < 0.01 or (c_gamma == 0 and zig_gamma == 0);
             
             if (c_gamma > 0 or zig_gamma > 0) {
-                std.debug.print("Gamma:           {d:.2} vs {d:.2}  {s}\n", .{
+                log.info("Gamma:           {d:.2} vs {d:.2}  {s}", .{
                     zig_gamma,
                     c_gamma,
                     if (match_gamma) "✅" else "❌",
@@ -272,18 +277,18 @@ pub fn main() !void {
             }
             
             // Overall result
-            std.debug.print("\n", .{});
+            log.info("", .{});
             if (all_passed) {
-                std.debug.print("✅ All validation checks passed!\n", .{});
+                log.info("✅ All validation checks passed!", .{});
             } else {
-                std.debug.print("❌ Some validation checks failed\n", .{});
+                log.err("❌ Some validation checks failed", .{});
             }
             
             // Show additional Zig capabilities
-            std.debug.print("\n", .{});
-            std.debug.print("========================================\n", .{});
-            std.debug.print("Zig Implementation Capabilities\n", .{});
-            std.debug.print("========================================\n", .{});
+            log.info("", .{});
+            log.info("========================================", .{});
+            log.info("Zig Implementation Capabilities", .{});
+            log.info("========================================", .{});
             
             // Timing info
             const detailed = zig_edid.getDetailedTimings();
@@ -292,7 +297,7 @@ pub fn main() !void {
                 if (maybe_timing) |t| {
                     timing_count += 1;
                     if (timing_count == 1) {
-                        std.debug.print("Preferred timing:  {}x{} @ {d:.0}Hz\n", .{
+                        log.info("Preferred timing:  {}x{} @ {d:.0}Hz", .{
                             t.h_active,
                             t.v_active,
                             t.getRefreshRate(),
@@ -300,14 +305,14 @@ pub fn main() !void {
                     }
                 }
             }
-            std.debug.print("Detailed timings:  {d}\n", .{timing_count});
+            log.info("Detailed timings:  {d}", .{timing_count});
             
             const standard = zig_edid.getStandardTimings();
             var std_count: usize = 0;
             for (standard) |maybe_std| {
                 if (maybe_std != null) std_count += 1;
             }
-            std.debug.print("Standard timings:  {d}\n", .{std_count});
+            log.info("Standard timings:  {d}", .{std_count});
             
             const established = zig_edid.getEstablished();
             var est_count: usize = 0;
@@ -315,44 +320,45 @@ pub fn main() !void {
             if (established.has_800x600_60hz) est_count += 1;
             if (established.has_1024x768_60hz) est_count += 1;
             if (established.has_1280x1024_75hz) est_count += 1;
-            std.debug.print("Established modes: {d}+ supported\n", .{est_count});
+            log.info("Established modes: {d}+ supported", .{est_count});
             
             // Display info
             if (zig_edid.getProductName()) |name| {
                 if (name.len > 0) {
-                    std.debug.print("Product name:      \"{s}\"\n", .{name});
+                    log.info("Product name:      \"{s}\"", .{name});
                 } else {
-                    std.debug.print("Product name:      (empty)\n", .{});
+                    log.info("Product name:      (empty)", .{});
                 }
             } else {
-                std.debug.print("Product name:      (not set)\n", .{});
+                log.info("Product name:      (not set)", .{});
             }
             
             // Color info
             const chroma = zig_edid.getChromaticityCoords();
             if (chroma.white_x > 0 or chroma.white_y > 0) {
-                std.debug.print("White point:       ({d:.3}, {d:.3})\n", .{ chroma.white_x, chroma.white_y });
+                log.info("White point:       ({d:.3}, {d:.3})", .{ chroma.white_x, chroma.white_y });
             }
         }
     }
 
     // Demonstrate CTA-861 parsing capabilities
-    std.debug.print("\n", .{});
-    std.debug.print("========================================\n", .{});
-    std.debug.print("CTA-861 Extension Capabilities (Zig-only)\n", .{});
-    std.debug.print("========================================\n", .{});
-    std.debug.print("Note: These features are Zig implementation specific.\n", .{});
-    std.debug.print("C library has equivalent but different API.\n\n", .{});
+    log.info("", .{});
+    log.info("========================================", .{});
+    log.info("CTA-861 Extension Capabilities (Zig-only)", .{});
+    log.info("========================================", .{});
+    log.info("Note: These features are Zig implementation specific.", .{});
+    log.info("C library has equivalent but different API.", .{});
+    log.info("", .{});
     
     // Show timing calculator capabilities
-    std.debug.print("Timing Calculators:\n", .{});
+    log.info("Timing Calculators:", .{});
     const cvt_1080p = display.cvt.compute(.{
         .h_pixels = 1920,
         .v_lines = 1080,
         .refresh_rate_hz = 60.0,
         .reduced_blanking = .v1,
     });
-    std.debug.print("  CVT 1920x1080@60: {d:.2} MHz\n", .{cvt_1080p.pixel_clock_mhz});
+    log.info("  CVT 1920x1080@60: {d:.2} MHz", .{cvt_1080p.pixel_clock_mhz});
     
     const gtf_1024 = display.gtf.compute(.{
         .h_pixels = 1024,
@@ -360,32 +366,32 @@ pub fn main() !void {
         .ip_param = .v_frame_rate,
         .ip_freq = 60.0,
     });
-    std.debug.print("  GTF 1024x768@60:  {d:.2} MHz\n", .{gtf_1024.pixel_clock_mhz});
+    log.info("  GTF 1024x768@60:  {d:.2} MHz", .{gtf_1024.pixel_clock_mhz});
     
-    std.debug.print("\n", .{});
-    std.debug.print("========================================\n", .{});
-    std.debug.print("Summary\n", .{});
-    std.debug.print("========================================\n", .{});
-    std.debug.print("✅ Correctness validated against C library\n", .{});
-    std.debug.print("⚡ {d:.1}x performance improvement\n", .{c_per_op / zig_per_op});
-    std.debug.print("✨ Zero allocations (C allocates per parse)\n", .{});
-    std.debug.print("\n", .{});
-    std.debug.print("Zig Implementation Features:\n", .{});
-    std.debug.print("🎯 Complete EDID base block (100%%)\n", .{});
-    std.debug.print("🎵 CTA-861 support (91%%):\n", .{});
-    std.debug.print("   - Video data blocks (VIC codes + capability)\n", .{});
-    std.debug.print("   - Audio data blocks (15+ formats)\n", .{});
-    std.debug.print("   - Speaker allocation (21 positions)\n", .{});
-    std.debug.print("   - HDMI VSDB (deep color, bandwidth)\n", .{});
-    std.debug.print("   - HDMI Forum VSDB (VRR, ALLM, FRL)\n", .{});
-    std.debug.print("   - HDR static metadata (HDR10, HLG)\n", .{});
-    std.debug.print("   - Colorimetry (BT.2020, DCI-P3)\n", .{});
-    std.debug.print("   - YCbCr 4:2:0 (4K@60Hz)\n", .{});
-    std.debug.print("   - VIC timing database (154 entries)\n", .{});
-    std.debug.print("📐 CVT & GTF timing calculators (100%%)\n", .{});
-    std.debug.print("🗂️  PNP ID database (2,557 manufacturers)\n", .{});
-    std.debug.print("\n", .{});
-    std.debug.print("Total: ~5,828 lines (71%% of libdisplay-info)\n", .{});
-    std.debug.print("========================================\n", .{});
-    std.debug.print("\n", .{});
+    log.info("", .{});
+    log.info("========================================", .{});
+    log.info("Summary", .{});
+    log.info("========================================", .{});
+    log.info("✅ Correctness validated against C library", .{});
+    log.info("⚡ {d:.1}x performance improvement", .{c_per_op / zig_per_op});
+    log.info("✨ Zero allocations (C allocates per parse)", .{});
+    log.info("", .{});
+    log.info("Zig Implementation Features:", .{});
+    log.info("🎯 Complete EDID base block (100%%)", .{});
+    log.info("🎵 CTA-861 support (91%%):", .{});
+    log.info("   - Video data blocks (VIC codes + capability)", .{});
+    log.info("   - Audio data blocks (15+ formats)", .{});
+    log.info("   - Speaker allocation (21 positions)", .{});
+    log.info("   - HDMI VSDB (deep color, bandwidth)", .{});
+    log.info("   - HDMI Forum VSDB (VRR, ALLM, FRL)", .{});
+    log.info("   - HDR static metadata (HDR10, HLG)", .{});
+    log.info("   - Colorimetry (BT.2020, DCI-P3)", .{});
+    log.info("   - YCbCr 4:2:0 (4K@60Hz)", .{});
+    log.info("   - VIC timing database (154 entries)", .{});
+    log.info("📐 CVT & GTF timing calculators (100%%)", .{});
+    log.info("🗂️  PNP ID database (2,557 manufacturers)", .{});
+    log.info("", .{});
+    log.info("Total: ~6,231 lines (73%% of libdisplay-info)", .{});
+    log.info("========================================", .{});
+    log.info("", .{});
 }

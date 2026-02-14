@@ -4,8 +4,8 @@
 //! a Zig source file with manufacturer name mappings.
 
 const std = @import("std");
-const logger_mod = @import("logger");
-const Logger = logger_mod.Logger;
+const cli = @import("core.cli");
+const Logger = cli.Logger;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};

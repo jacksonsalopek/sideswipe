@@ -1,4 +1,5 @@
 ---
+description: Enforce proper ArrayList syntax
 alwaysApply: true
 ---
 # Overview

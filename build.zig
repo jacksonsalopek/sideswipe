@@ -8,7 +8,7 @@ fn generatePnpIds(b: *std.Build, target: std.Build.ResolvedTarget, core_cli_mod:
             .root_source_file = b.path("src/core/display/edid/gen_pnp_ids.zig"),
             .target = target,
             .imports = &.{
-                .{ .name = "logger", .module = core_cli_mod },
+                .{ .name = "core.cli", .module = core_cli_mod },
             },
         }),
     });
@@ -29,7 +29,7 @@ fn generateVicTable(b: *std.Build, target: std.Build.ResolvedTarget, core_cli_mo
             .root_source_file = b.path("src/core/display/cta/gen_vic_table.zig"),
             .target = target,
             .imports = &.{
-                .{ .name = "logger", .module = core_cli_mod },
+                .{ .name = "core.cli", .module = core_cli_mod },
             },
         }),
     });
@@ -321,6 +321,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseFast,
             .imports = &.{
                 .{ .name = "display", .module = display_compare_mod },
+                .{ .name = "core.cli", .module = core_cli_mod },
             },
         }),
     });

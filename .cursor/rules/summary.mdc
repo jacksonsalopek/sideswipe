@@ -1,4 +1,5 @@
 ---
+description: Enforce concise summaries - maximum 3 sentences
 alwaysApply: true
 ---
 
