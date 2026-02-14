@@ -5,7 +5,7 @@ const std = @import("std");
 const core = @import("core");
 const VTable = core.vtable.Interface;
 const math = @import("core.math");
-const Vector2D = math.vector2d.Type;
+const Vector2D = math.Vec2;
 const buffer = @import("buffer.zig");
 
 /// DRM format constants (from drm_fourcc.h)

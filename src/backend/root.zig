@@ -5,6 +5,7 @@ pub const attachment = @import("attachment.zig");
 pub const backend = @import("backend.zig");
 pub const buffer = @import("buffer.zig");
 pub const drm = @import("drm.zig");
+pub const egl_formats = @import("egl_formats.zig");
 pub const gbm = @import("gbm.zig");
 pub const input = @import("input.zig");
 pub const libinput = @import("libinput.zig");
@@ -23,6 +24,7 @@ test {
     _ = @import("backend.zig");
     _ = @import("buffer.zig");
     _ = @import("drm.zig");
+    _ = @import("egl_formats.zig");
     _ = @import("gbm.zig");
     _ = @import("input.zig");
     _ = @import("libinput.zig");

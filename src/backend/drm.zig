@@ -3,8 +3,9 @@
 
 const std = @import("std");
 const core = @import("core");
+const cvt = @import("core.display").cvt;
 const math = @import("core.math");
-const Vector2D = math.vector2d.Type;
+const Vector2D = math.Vec2;
 const backend = @import("backend.zig");
 const session = @import("session.zig");
 const allocator = @import("allocator.zig");
@@ -18,7 +19,6 @@ const c = @cImport({
     @cInclude("xf86drm.h");
     @cInclude("xf86drmMode.h");
     @cInclude("libudev.h");
-    @cInclude("libdisplay-info/cvt.h");
 });
 
 // DRM capability constants (from drm.h)
@@ -718,34 +718,31 @@ fn scanGPUs(alloc: std.mem.Allocator, sess: *session.Type) ![]const *session.Dev
 pub fn calculateMode(alloc: std.mem.Allocator, width: u32, height: u32, refresh: f64) !c.drmModeModeInfo {
     _ = alloc;
 
-    const options = c.di_cvt_options{
-        .red_blank_ver = c.DI_CVT_REDUCED_BLANKING_NONE,
-        .h_pixels = @intCast(width),
-        .v_lines = @intCast(height),
-        .ip_freq_rqd = if (refresh > 0) refresh else 60.0,
-    };
+    const timing = cvt.compute(.{
+        .reduced_blanking = .none,
+        .h_pixels = width,
+        .v_lines = height,
+        .refresh_rate_hz = if (refresh > 0) refresh else 60.0,
+    });
 
-    var timing: c.di_cvt_timing = undefined;
-    c.di_cvt_compute(&timing, &options);
-
-    const hsync_start: u16 = @intCast(@as(u32, @intCast(width)) + @as(u32, @intCast(timing.h_front_porch)));
-    const vsync_start: u16 = @intCast(@as(u32, @intCast(timing.v_lines_rnd)) + @as(u32, @intCast(timing.v_front_porch)));
-    const hsync_end: u16 = @intCast(@as(u32, hsync_start) + @as(u32, @intCast(timing.h_sync)));
-    const vsync_end: u16 = @intCast(@as(u32, vsync_start) + @as(u32, @intCast(timing.v_sync)));
+    const hsync_start: u16 = @intCast(timing.h_active + timing.h_front_porch);
+    const vsync_start: u16 = @intCast(timing.v_active + timing.v_front_porch);
+    const hsync_end: u16 = @intCast(@as(u32, hsync_start) + timing.h_sync);
+    const vsync_end: u16 = @intCast(@as(u32, vsync_start) + timing.v_sync);
 
     var mode_info: c.drmModeModeInfo = undefined;
     @memset(std.mem.asBytes(&mode_info), 0);
 
-    mode_info.clock = @intFromFloat(@round(timing.act_pixel_freq * 1000.0));
-    mode_info.hdisplay = @intCast(width);
+    mode_info.clock = @intFromFloat(@round(timing.pixel_clock_mhz * 1000.0));
+    mode_info.hdisplay = @intCast(timing.h_active);
     mode_info.hsync_start = hsync_start;
     mode_info.hsync_end = hsync_end;
-    mode_info.htotal = @intCast(@as(u32, hsync_end) + @as(u32, @intCast(timing.h_back_porch)));
-    mode_info.vdisplay = @intCast(timing.v_lines_rnd);
+    mode_info.htotal = @intCast(timing.h_total);
+    mode_info.vdisplay = @intCast(timing.v_active);
     mode_info.vsync_start = vsync_start;
     mode_info.vsync_end = vsync_end;
-    mode_info.vtotal = @intCast(@as(u32, vsync_end) + @as(u32, @intCast(timing.v_back_porch)));
-    mode_info.vrefresh = @intFromFloat(@round(timing.act_frame_rate));
+    mode_info.vtotal = @intCast(timing.v_total);
+    mode_info.vrefresh = @intFromFloat(@round(timing.refresh_rate_hz));
     mode_info.flags = c.DRM_MODE_FLAG_NHSYNC | c.DRM_MODE_FLAG_PVSYNC;
 
     // Set mode name

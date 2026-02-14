@@ -1,55 +1,55 @@
 const std = @import("std");
-const Vector2D = @import("vector2d.zig").Type;
+const Vec2 = @import("vector2d.zig").Vec2;
 const Transform = @import("transform.zig").Direction;
 
-pub const Type = struct {
+pub const Box = struct {
     x: f32 = 0,
     y: f32 = 0,
     width: f32 = 0,
     height: f32 = 0,
 
-    pub fn init(x: f32, y: f32, w: f32, h: f32) Type {
+    pub fn init(x: f32, y: f32, w: f32, h: f32) Box {
         return .{ .x = x, .y = y, .width = w, .height = h };
     }
 
-    pub fn at(self: Type) Vector2D {
-        return Vector2D.init(self.x, self.y);
+    pub fn at(self: Box) Vec2 {
+        return Vec2.init(self.x, self.y);
     }
 
-    pub fn pos(self: Type) Vector2D {
+    pub fn pos(self: Box) Vec2 {
         return self.at();
     }
 
-    pub fn size(self: Type) Vector2D {
-        return Vector2D.init(self.width, self.height);
+    pub fn size(self: Box) Vec2 {
+        return Vec2.init(self.width, self.height);
     }
 
-    pub fn middle(self: Type) Vector2D {
-        return Vector2D.init(
+    pub fn middle(self: Box) Vec2 {
+        return Vec2.init(
             self.x + self.width / 2.0,
             self.y + self.height / 2.0,
         );
     }
 
-    pub fn contains(self: Type, other: Type) bool {
+    pub fn contains(self: Box, other: Box) bool {
         return other.x >= self.x and
             other.x + other.width <= self.x + self.width and
             other.y >= self.y and
             other.y + other.height <= self.y + self.height;
     }
 
-    pub fn containsPoint(self: Type, point: Vector2D) bool {
+    pub fn containsPoint(self: Box, point: Vec2) bool {
         return point.getX() >= self.x and
             point.getX() < self.x + self.width and
             point.getY() >= self.y and
             point.getY() < self.y + self.height;
     }
 
-    pub fn empty(self: Type) bool {
+    pub fn empty(self: Box) bool {
         return self.width == 0 or self.height == 0;
     }
 
-    pub fn translate(self: Type, delta: Vector2D) Type {
+    pub fn translate(self: Box, delta: Vec2) Box {
         return .{
             .x = self.x + delta.getX(),
             .y = self.y + delta.getY(),
@@ -58,7 +58,7 @@ pub const Type = struct {
         };
     }
 
-    pub fn scale(self: Type, s: f32) Type {
+    pub fn scale(self: Box, s: f32) Box {
         return .{
             .x = self.x * s,
             .y = self.y * s,
@@ -67,7 +67,7 @@ pub const Type = struct {
         };
     }
 
-    pub fn scaleFromCenter(self: Type, s: f32) Type {
+    pub fn scaleFromCenter(self: Box, s: f32) Box {
         const center = self.middle();
         const new_width = self.width * s;
         const new_height = self.height * s;
@@ -80,7 +80,7 @@ pub const Type = struct {
         };
     }
 
-    pub fn expand(self: Type, value: f32) Type {
+    pub fn expand(self: Box, value: f32) Box {
         return .{
             .x = self.x - value,
             .y = self.y - value,
@@ -89,7 +89,7 @@ pub const Type = struct {
         };
     }
 
-    pub fn noNegativeSize(self: Type) Type {
+    pub fn noNegativeSize(self: Box) Box {
         var result = self;
         if (result.width < 0) {
             result.x += result.width;
@@ -102,7 +102,7 @@ pub const Type = struct {
         return result;
     }
 
-    pub fn roundInternal(self: Type) Type {
+    pub fn roundInternal(self: Box) Box {
         const new_x = @floor(self.x);
         const new_y = @floor(self.y);
 
@@ -114,7 +114,7 @@ pub const Type = struct {
         };
     }
 
-    pub fn round(self: Type) Type {
+    pub fn round(self: Box) Box {
         return .{
             .x = @round(self.x),
             .y = @round(self.y),
@@ -123,7 +123,7 @@ pub const Type = struct {
         };
     }
 
-    pub fn floor(self: Type) Type {
+    pub fn floor(self: Box) Box {
         return .{
             .x = @floor(self.x),
             .y = @floor(self.y),
@@ -132,7 +132,7 @@ pub const Type = struct {
         };
     }
 
-    pub fn intersection(self: Type, other: Type) Type {
+    pub fn intersection(self: Box, other: Box) Box {
         const x1 = @max(self.x, other.x);
         const y1 = @max(self.y, other.y);
         const x2 = @min(self.x + self.width, other.x + other.width);
@@ -146,27 +146,27 @@ pub const Type = struct {
         };
     }
 
-    pub fn overlaps(self: Type, other: Type) bool {
+    pub fn overlaps(self: Box, other: Box) bool {
         return !self.intersection(other).empty();
     }
 
-    pub fn inside(self: Type, other: Type) bool {
+    pub fn inside(self: Box, other: Box) bool {
         return self.x >= other.x and
             self.y >= other.y and
             self.x + self.width <= other.x + other.width and
             self.y + self.height <= other.y + other.height;
     }
 
-    pub fn closest(self: Type, point: Vector2D) Vector2D {
+    pub fn closest(self: Box, point: Vec2) Vec2 {
         if (self.containsPoint(point)) return point;
 
-        return Vector2D.init(
+        return Vec2.init(
             std.math.clamp(point.getX(), self.x, self.x + self.width),
             std.math.clamp(point.getY(), self.y, self.y + self.height),
         );
     }
 
-    pub fn addExtents(self: Type, extents: Extents) Type {
+    pub fn addExtents(self: Box, extents: Extents) Box {
         return .{
             .x = self.x - extents.left,
             .y = self.y - extents.top,
@@ -175,7 +175,7 @@ pub const Type = struct {
         };
     }
 
-    pub fn subtractExtents(self: Type, extents: Extents) Type {
+    pub fn subtractExtents(self: Box, extents: Extents) Box {
         return .{
             .x = self.x + extents.left,
             .y = self.y + extents.top,
@@ -184,7 +184,7 @@ pub const Type = struct {
         };
     }
 
-    pub fn extentsFrom(self: Type, other: Type) Extents {
+    pub fn extentsFrom(self: Box, other: Box) Extents {
         return .{
             .top = other.y - self.y,
             .bottom = (self.y + self.height) - (other.y + other.height),
@@ -193,20 +193,20 @@ pub const Type = struct {
         };
     }
 
-    pub fn transform(self: Type, t: Transform, w: f32, h: f32) Type {
+    pub fn transform(self: Box, t: Transform, w: f32, h: f32) Box {
         return switch (t) {
             .normal => self,
-            .@"90" => Type.init(h - self.y - self.height, self.x, self.height, self.width),
-            .@"180" => Type.init(w - self.x - self.width, h - self.y - self.height, self.width, self.height),
-            .@"270" => Type.init(self.y, w - self.x - self.width, self.height, self.width),
-            .flipped => Type.init(w - self.x - self.width, self.y, self.width, self.height),
-            .flipped_90 => Type.init(self.y, self.x, self.height, self.width),
-            .flipped_180 => Type.init(self.x, h - self.y - self.height, self.width, self.height),
-            .flipped_270 => Type.init(h - self.y - self.height, w - self.x - self.width, self.height, self.width),
+            .@"90" => Box.init(h - self.y - self.height, self.x, self.height, self.width),
+            .@"180" => Box.init(w - self.x - self.width, h - self.y - self.height, self.width, self.height),
+            .@"270" => Box.init(self.y, w - self.x - self.width, self.height, self.width),
+            .flipped => Box.init(w - self.x - self.width, self.y, self.width, self.height),
+            .flipped_90 => Box.init(self.y, self.x, self.height, self.width),
+            .flipped_180 => Box.init(self.x, h - self.y - self.height, self.width, self.height),
+            .flipped_270 => Box.init(h - self.y - self.height, w - self.x - self.width, self.height, self.width),
         };
     }
 
-    pub fn eql(self: Type, other: Type) bool {
+    pub fn eql(self: Box, other: Box) bool {
         return self.x == other.x and
             self.y == other.y and
             self.width == other.width and
@@ -231,7 +231,7 @@ pub const Extents = struct {
 };
 
 test "Type initialization" {
-    const box = Type.init(10, 20, 100, 50);
+    const box = Box.init(10, 20, 100, 50);
     try std.testing.expectEqual(@as(f64, 10), box.x);
     try std.testing.expectEqual(@as(f64, 20), box.y);
     try std.testing.expectEqual(@as(f64, 100), box.width);
@@ -239,31 +239,31 @@ test "Type initialization" {
 }
 
 test "Type.middle" {
-    const box = Type.init(0, 0, 100, 50);
+    const box = Box.init(0, 0, 100, 50);
     const mid = box.middle();
     try std.testing.expectEqual(@as(f32, 50), mid.getX());
     try std.testing.expectEqual(@as(f32, 25), mid.getY());
 }
 
 test "Type.contains" {
-    const outer = Type.init(0, 0, 100, 100);
-    const inner = Type.init(10, 10, 20, 20);
-    const outside = Type.init(50, 50, 100, 100);
+    const outer = Box.init(0, 0, 100, 100);
+    const inner = Box.init(10, 10, 20, 20);
+    const outside = Box.init(50, 50, 100, 100);
 
     try std.testing.expect(outer.contains(inner));
     try std.testing.expect(!outer.contains(outside));
 }
 
 test "Type.containsPoint" {
-    const box = Type.init(0, 0, 100, 100);
-    try std.testing.expect(box.containsPoint(Vector2D.init(50, 50)));
-    try std.testing.expect(!box.containsPoint(Vector2D.init(150, 50)));
-    try std.testing.expect(!box.containsPoint(Vector2D.init(100, 50))); // Edge is exclusive
+    const box = Box.init(0, 0, 100, 100);
+    try std.testing.expect(box.containsPoint(Vec2.init(50, 50)));
+    try std.testing.expect(!box.containsPoint(Vec2.init(150, 50)));
+    try std.testing.expect(!box.containsPoint(Vec2.init(100, 50))); // Edge is exclusive
 }
 
 test "Type.intersection" {
-    const box1 = Type.init(0, 0, 100, 100);
-    const box2 = Type.init(50, 50, 100, 100);
+    const box1 = Box.init(0, 0, 100, 100);
+    const box2 = Box.init(50, 50, 100, 100);
     const result = box1.intersection(box2);
 
     try std.testing.expectEqual(@as(f64, 50), result.x);
@@ -273,16 +273,16 @@ test "Type.intersection" {
 }
 
 test "Type.overlaps" {
-    const box1 = Type.init(0, 0, 100, 100);
-    const box2 = Type.init(50, 50, 100, 100);
-    const box3 = Type.init(200, 200, 100, 100);
+    const box1 = Box.init(0, 0, 100, 100);
+    const box2 = Box.init(50, 50, 100, 100);
+    const box3 = Box.init(200, 200, 100, 100);
 
     try std.testing.expect(box1.overlaps(box2));
     try std.testing.expect(!box1.overlaps(box3));
 }
 
 test "Type.scale" {
-    const box = Type.init(10, 10, 100, 50);
+    const box = Box.init(10, 10, 100, 50);
     const scaled = box.scale(2);
 
     try std.testing.expectEqual(@as(f64, 20), scaled.x);
@@ -292,7 +292,7 @@ test "Type.scale" {
 }
 
 test "Type.expand" {
-    const box = Type.init(10, 10, 100, 50);
+    const box = Box.init(10, 10, 100, 50);
     const expanded = box.expand(5);
 
     try std.testing.expectEqual(@as(f32, 5), expanded.x);
@@ -302,8 +302,8 @@ test "Type.expand" {
 }
 
 test "Type.translate" {
-    const box = Type.init(10, 20, 30, 40);
-    const translated = box.translate(Vector2D.init(5, -5));
+    const box = Box.init(10, 20, 30, 40);
+    const translated = box.translate(Vec2.init(5, -5));
 
     try std.testing.expectEqual(@as(f32, 15), translated.x);
     try std.testing.expectEqual(@as(f32, 15), translated.y);
@@ -312,7 +312,7 @@ test "Type.translate" {
 }
 
 test "Type.scaleFromCenter" {
-    const box = Type.init(10, 10, 20, 30);
+    const box = Box.init(10, 10, 20, 30);
 
     // Scale up from center
     const scaled_up = box.scaleFromCenter(2.0);
@@ -332,9 +332,9 @@ test "Type.scaleFromCenter" {
 }
 
 test "Type.inside" {
-    const inner = Type.init(10, 10, 20, 20);
-    const outer = Type.init(0, 0, 100, 100);
-    const overlapping = Type.init(50, 50, 100, 100);
+    const inner = Box.init(10, 10, 20, 20);
+    const outer = Box.init(0, 0, 100, 100);
+    const overlapping = Box.init(50, 50, 100, 100);
 
     try std.testing.expect(inner.inside(outer));
     try std.testing.expect(!outer.inside(inner));
@@ -342,8 +342,8 @@ test "Type.inside" {
 }
 
 test "Type.extentsFrom" {
-    const box1 = Type.init(0, 0, 100, 100);
-    const box2 = Type.init(50, 50, 100, 100);
+    const box1 = Box.init(0, 0, 100, 100);
+    const box2 = Box.init(50, 50, 100, 100);
 
     const extents = box1.extentsFrom(box2);
 
@@ -354,7 +354,7 @@ test "Type.extentsFrom" {
 }
 
 test "Type.transform - 90 degrees" {
-    const box = Type.init(10, 20, 30, 40);
+    const box = Box.init(10, 20, 30, 40);
     const transformed = box.transform(.@"90", 100, 200);
 
     try std.testing.expectEqual(@as(f32, 140), transformed.x); // 200 - 20 - 40
@@ -364,7 +364,7 @@ test "Type.transform - 90 degrees" {
 }
 
 test "Type.transform - flipped" {
-    const box = Type.init(10, 20, 30, 40);
+    const box = Box.init(10, 20, 30, 40);
     const transformed = box.transform(.flipped, 100, 200);
 
     try std.testing.expectEqual(@as(f32, 60), transformed.x); // 100 - 10 - 30
@@ -374,9 +374,9 @@ test "Type.transform - flipped" {
 }
 
 test "Type.empty" {
-    const empty1 = Type.init(0, 0, 0, 100);
-    const empty2 = Type.init(0, 0, 100, 0);
-    const not_empty = Type.init(0, 0, 10, 10);
+    const empty1 = Box.init(0, 0, 0, 100);
+    const empty2 = Box.init(0, 0, 100, 0);
+    const not_empty = Box.init(0, 0, 10, 10);
 
     try std.testing.expect(empty1.empty());
     try std.testing.expect(empty2.empty());
@@ -384,7 +384,7 @@ test "Type.empty" {
 }
 
 test "Type - negative dimensions" {
-    const box = Type.init(0, 0, -100, -100);
+    const box = Box.init(0, 0, -100, -100);
 
     // Negative dimensions are technically non-empty (just inverted)
     try std.testing.expectEqual(@as(f32, -100), box.width);
@@ -403,13 +403,13 @@ test "Type - negative dimensions" {
 
 test "Type - infinity coordinates" {
     const inf = std.math.inf(f32);
-    const box = Type.init(inf, 0, 100, 100);
+    const box = Box.init(inf, 0, 100, 100);
 
     try std.testing.expect(std.math.isInf(box.x));
     try std.testing.expect(std.math.isFinite(box.width));
 
     // Operations should handle infinity gracefully
-    const translated = box.translate(Vector2D.init(10, 10));
+    const translated = box.translate(Vec2.init(10, 10));
     try std.testing.expect(std.math.isInf(translated.x));
 
     // Middle with infinity
@@ -419,25 +419,25 @@ test "Type - infinity coordinates" {
 
 test "Type - NaN coordinates" {
     const nan_val = std.math.nan(f32);
-    const box = Type.init(nan_val, 0, 100, 100);
+    const box = Box.init(nan_val, 0, 100, 100);
 
     try std.testing.expect(std.math.isNan(box.x));
 
     // Operations with NaN propagate NaN
-    const translated = box.translate(Vector2D.init(10, 10));
+    const translated = box.translate(Vec2.init(10, 10));
     try std.testing.expect(std.math.isNan(translated.x));
 
     // containsPoint with NaN should return false
-    const contains = box.containsPoint(Vector2D.init(50, 50));
+    const contains = box.containsPoint(Vec2.init(50, 50));
     try std.testing.expect(!contains);
 }
 
 test "Type - overflow on large coordinates" {
     const very_large = std.math.floatMax(f32) - 10;
-    const box = Type.init(very_large, 0, 100, 100);
+    const box = Box.init(very_large, 0, 100, 100);
 
     // Translate should handle overflow
-    const translated = box.translate(Vector2D.init(100, 0));
+    const translated = box.translate(Vec2.init(100, 0));
 
     // Result may be infinity due to overflow, but should not crash
     try std.testing.expect(std.math.isFinite(translated.x) or std.math.isInf(translated.x));
@@ -445,26 +445,26 @@ test "Type - overflow on large coordinates" {
 
 test "Type - zero-area box containment at boundary" {
     // Zero-width box
-    const zero_width = Type.init(10, 10, 0, 100);
+    const zero_width = Box.init(10, 10, 0, 100);
 
     // Point exactly at x=10 (left edge)
-    const point_at_edge = Vector2D.init(10, 50);
+    const point_at_edge = Vec2.init(10, 50);
 
     // Zero-width box should not contain points (empty)
     try std.testing.expect(zero_width.empty());
     try std.testing.expect(!zero_width.containsPoint(point_at_edge));
 
     // Zero-height box
-    const zero_height = Type.init(10, 10, 100, 0);
-    const point_at_y = Vector2D.init(50, 10);
+    const zero_height = Box.init(10, 10, 100, 0);
+    const point_at_y = Vec2.init(50, 10);
 
     try std.testing.expect(zero_height.empty());
     try std.testing.expect(!zero_height.containsPoint(point_at_y));
 }
 
 test "Type - empty box operations" {
-    const empty = Type.init(10, 10, 0, 0);
-    const normal = Type.init(0, 0, 100, 100);
+    const empty = Box.init(10, 10, 0, 0);
+    const normal = Box.init(0, 0, 100, 100);
 
     try std.testing.expect(empty.empty());
 
@@ -485,7 +485,7 @@ test "Type - empty box operations" {
 }
 
 test "Type.scaleFromCenter - zero scale factor" {
-    const box = Type.init(10, 10, 100, 50);
+    const box = Box.init(10, 10, 100, 50);
     const scaled = box.scaleFromCenter(0.0);
 
     // Should result in zero-area box at center
@@ -502,7 +502,7 @@ test "Type.scaleFromCenter - zero scale factor" {
 }
 
 test "Type.scaleFromCenter - negative scale factor" {
-    const box = Type.init(10, 10, 100, 50);
+    const box = Box.init(10, 10, 100, 50);
     const scaled = box.scaleFromCenter(-1.0);
 
     // Negative scale creates negative dimensions
@@ -516,8 +516,8 @@ test "Type.scaleFromCenter - negative scale factor" {
 }
 
 test "Type - intersection with non-overlapping boxes" {
-    const box1 = Type.init(0, 0, 50, 50);
-    const box2 = Type.init(100, 100, 50, 50);
+    const box1 = Box.init(0, 0, 50, 50);
+    const box2 = Box.init(100, 100, 50, 50);
 
     const intersect = box1.intersection(box2);
 
@@ -528,7 +528,7 @@ test "Type - intersection with non-overlapping boxes" {
 }
 
 test "Type - intersection of box with itself" {
-    const box = Type.init(10, 20, 100, 80);
+    const box = Box.init(10, 20, 100, 80);
     const intersect = box.intersection(box);
 
     // Type intersected with itself should be itself
@@ -539,12 +539,12 @@ test "Type - intersection of box with itself" {
 }
 
 test "Type.contains - touching boundaries" {
-    const outer = Type.init(0, 0, 100, 100);
+    const outer = Box.init(0, 0, 100, 100);
 
     // Type exactly at boundaries
-    const at_left_edge = Type.init(0, 0, 50, 50);
-    const at_right_edge = Type.init(50, 50, 50, 50);
-    const exceeds_by_one = Type.init(0, 0, 101, 100);
+    const at_left_edge = Box.init(0, 0, 50, 50);
+    const at_right_edge = Box.init(50, 50, 50, 50);
+    const exceeds_by_one = Box.init(0, 0, 101, 100);
 
     try std.testing.expect(outer.contains(at_left_edge));
     try std.testing.expect(outer.contains(at_right_edge));
@@ -552,12 +552,12 @@ test "Type.contains - touching boundaries" {
 }
 
 test "Type.containsPoint - exact boundary test" {
-    const box = Type.init(10, 10, 100, 100);
+    const box = Box.init(10, 10, 100, 100);
 
     // Points at exact boundaries
-    const top_left = Vector2D.init(10, 10);
-    const bottom_right = Vector2D.init(110, 110);
-    const just_inside = Vector2D.init(10.001, 10.001);
+    const top_left = Vec2.init(10, 10);
+    const bottom_right = Vec2.init(110, 110);
+    const just_inside = Vec2.init(10.001, 10.001);
 
     // Inclusive at start, exclusive at end
     try std.testing.expect(box.containsPoint(top_left));
@@ -566,7 +566,7 @@ test "Type.containsPoint - exact boundary test" {
 }
 
 test "Type.transform - all transforms preserve area" {
-    const box = Type.init(10, 20, 100, 50);
+    const box = Box.init(10, 20, 100, 50);
     const area = box.width * box.height;
 
     const transforms = [_]Transform{
@@ -584,7 +584,7 @@ test "Type.transform - all transforms preserve area" {
 }
 
 test "Type.expand - negative expansion (shrink)" {
-    const box = Type.init(10, 10, 100, 50);
+    const box = Box.init(10, 10, 100, 50);
     const shrunk = box.expand(-5);
 
     // Negative expansion shrinks the box
@@ -595,7 +595,7 @@ test "Type.expand - negative expansion (shrink)" {
 }
 
 test "Type.expand - over-shrink creates negative dimensions" {
-    const box = Type.init(10, 10, 20, 20);
+    const box = Box.init(10, 10, 20, 20);
     const over_shrunk = box.expand(-15);
 
     // Over-shrinking creates negative dimensions
@@ -609,10 +609,10 @@ test "Type.expand - over-shrink creates negative dimensions" {
 }
 
 test "Type.extentsFrom - various configurations" {
-    const box1 = Type.init(0, 0, 100, 100);
+    const box1 = Box.init(0, 0, 100, 100);
 
     // box2 inside box1
-    const box2_inside = Type.init(10, 10, 20, 20);
+    const box2_inside = Box.init(10, 10, 20, 20);
     const extents_inside = box1.extentsFrom(box2_inside);
     try std.testing.expect(extents_inside.top > 0);
     try std.testing.expect(extents_inside.left > 0);
@@ -620,7 +620,7 @@ test "Type.extentsFrom - various configurations" {
     try std.testing.expect(extents_inside.right > 0);
 
     // box2 extends beyond box1
-    const box2_beyond = Type.init(50, 50, 100, 100);
+    const box2_beyond = Box.init(50, 50, 100, 100);
     const extents_beyond = box1.extentsFrom(box2_beyond);
     try std.testing.expect(extents_beyond.top > 0);
     try std.testing.expect(extents_beyond.bottom < 0); // Extends beyond
@@ -628,7 +628,7 @@ test "Type.extentsFrom - various configurations" {
 }
 
 test "Type.roundInternal" {
-    const box = Type.init(10.7, 20.3, 100.6, 50.8);
+    const box = Box.init(10.7, 20.3, 100.6, 50.8);
     const rounded = box.roundInternal();
 
     // Floor the position
@@ -641,7 +641,7 @@ test "Type.roundInternal" {
 }
 
 test "Type.round" {
-    const box = Type.init(10.4, 20.6, 100.3, 50.7);
+    const box = Box.init(10.4, 20.6, 100.3, 50.7);
     const rounded = box.round();
 
     try std.testing.expectEqual(@as(f32, 10), rounded.x);
@@ -651,7 +651,7 @@ test "Type.round" {
 }
 
 test "Type.floor" {
-    const box = Type.init(10.9, 20.9, 100.9, 50.9);
+    const box = Box.init(10.9, 20.9, 100.9, 50.9);
     const floored = box.floor();
 
     try std.testing.expectEqual(@as(f32, 10), floored.x);
@@ -661,10 +661,10 @@ test "Type.floor" {
 }
 
 test "Type.eql" {
-    const box1 = Type.init(10, 20, 100, 50);
-    const box2 = Type.init(10, 20, 100, 50);
-    const box3 = Type.init(10, 20, 100, 51);
-    const box4 = Type.init(11, 20, 100, 50);
+    const box1 = Box.init(10, 20, 100, 50);
+    const box2 = Box.init(10, 20, 100, 50);
+    const box3 = Box.init(10, 20, 100, 51);
+    const box4 = Box.init(11, 20, 100, 50);
 
     try std.testing.expect(box1.eql(box2));
     try std.testing.expect(!box1.eql(box3));
@@ -673,8 +673,8 @@ test "Type.eql" {
 }
 
 test "Type.closest - point inside box" {
-    const box = Type.init(10, 10, 100, 100);
-    const point = Vector2D.init(50, 50);
+    const box = Box.init(10, 10, 100, 100);
+    const point = Vec2.init(50, 50);
     const closest_point = box.closest(point);
 
     // Point inside should return the point itself
@@ -683,38 +683,38 @@ test "Type.closest - point inside box" {
 }
 
 test "Type.closest - point outside box" {
-    const box = Type.init(10, 10, 100, 100);
+    const box = Box.init(10, 10, 100, 100);
 
     // Point to the right
-    const point_right = Vector2D.init(200, 50);
+    const point_right = Vec2.init(200, 50);
     const closest_right = box.closest(point_right);
     try std.testing.expectEqual(@as(f32, 110), closest_right.getX()); // Clamped to right edge
     try std.testing.expectEqual(@as(f32, 50), closest_right.getY());
 
     // Point to the left
-    const point_left = Vector2D.init(-50, 50);
+    const point_left = Vec2.init(-50, 50);
     const closest_left = box.closest(point_left);
     try std.testing.expectEqual(@as(f32, 10), closest_left.getX()); // Clamped to left edge
     try std.testing.expectEqual(@as(f32, 50), closest_left.getY());
 
     // Point below
-    const point_below = Vector2D.init(50, 200);
+    const point_below = Vec2.init(50, 200);
     const closest_below = box.closest(point_below);
     try std.testing.expectEqual(@as(f32, 50), closest_below.getX());
     try std.testing.expectEqual(@as(f32, 110), closest_below.getY()); // Clamped to bottom edge
 
     // Point above
-    const point_above = Vector2D.init(50, -50);
+    const point_above = Vec2.init(50, -50);
     const closest_above = box.closest(point_above);
     try std.testing.expectEqual(@as(f32, 50), closest_above.getX());
     try std.testing.expectEqual(@as(f32, 10), closest_above.getY()); // Clamped to top edge
 }
 
 test "Type.closest - point at corner" {
-    const box = Type.init(10, 10, 100, 100);
+    const box = Box.init(10, 10, 100, 100);
 
     // Point at diagonal corner (bottom-right outside)
-    const point_corner = Vector2D.init(200, 200);
+    const point_corner = Vec2.init(200, 200);
     const closest_corner = box.closest(point_corner);
 
     try std.testing.expectEqual(@as(f32, 110), closest_corner.getX());
@@ -722,7 +722,7 @@ test "Type.closest - point at corner" {
 }
 
 test "Type.addExtents" {
-    const box = Type.init(10, 10, 100, 50);
+    const box = Box.init(10, 10, 100, 50);
     const extents = Extents{
         .top = 5,
         .bottom = 5,
@@ -739,7 +739,7 @@ test "Type.addExtents" {
 }
 
 test "Type.subtractExtents" {
-    const box = Type.init(10, 10, 100, 50);
+    const box = Box.init(10, 10, 100, 50);
     const extents = Extents{
         .top = 5,
         .bottom = 5,
@@ -779,7 +779,7 @@ test "Extents.addExtents" {
 }
 
 test "Type.transform - 180 degrees" {
-    const box = Type.init(10, 20, 30, 40);
+    const box = Box.init(10, 20, 30, 40);
     const transformed = box.transform(.@"180", 100, 200);
 
     try std.testing.expectEqual(@as(f32, 60), transformed.x); // 100 - 10 - 30
@@ -789,7 +789,7 @@ test "Type.transform - 180 degrees" {
 }
 
 test "Type.transform - 270 degrees" {
-    const box = Type.init(10, 20, 30, 40);
+    const box = Box.init(10, 20, 30, 40);
     const transformed = box.transform(.@"270", 100, 200);
 
     try std.testing.expectEqual(@as(f32, 20), transformed.x);
@@ -799,7 +799,7 @@ test "Type.transform - 270 degrees" {
 }
 
 test "Type.transform - normal" {
-    const box = Type.init(10, 20, 30, 40);
+    const box = Box.init(10, 20, 30, 40);
     const transformed = box.transform(.normal, 100, 200);
 
     // Normal transform should return the box unchanged
@@ -810,7 +810,7 @@ test "Type.transform - normal" {
 }
 
 test "Type.transform - flipped_90" {
-    const box = Type.init(10, 20, 30, 40);
+    const box = Box.init(10, 20, 30, 40);
     const transformed = box.transform(.flipped_90, 100, 200);
 
     try std.testing.expectEqual(@as(f32, 20), transformed.x);
@@ -820,7 +820,7 @@ test "Type.transform - flipped_90" {
 }
 
 test "Type.transform - flipped_180" {
-    const box = Type.init(10, 20, 30, 40);
+    const box = Box.init(10, 20, 30, 40);
     const transformed = box.transform(.flipped_180, 100, 200);
 
     try std.testing.expectEqual(@as(f32, 10), transformed.x);
@@ -830,7 +830,7 @@ test "Type.transform - flipped_180" {
 }
 
 test "Type.transform - flipped_270" {
-    const box = Type.init(10, 20, 30, 40);
+    const box = Box.init(10, 20, 30, 40);
     const transformed = box.transform(.flipped_270, 100, 200);
 
     try std.testing.expectEqual(@as(f32, 140), transformed.x); // 200 - 20 - 40

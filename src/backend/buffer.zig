@@ -23,7 +23,7 @@ pub const Type = enum(u32) {
 /// DMA-BUF attributes
 pub const DMABUFAttrs = struct {
     success: bool = false,
-    size: vector2d.Type = .{},
+    size: vector2d.Vec2 = .{},
     format: u32 = 0, // fourcc
     modifier: u64 = 0,
     planes: i32 = 1,
@@ -37,7 +37,7 @@ pub const SSHMAttrs = struct {
     success: bool = false,
     fd: i32 = 0,
     format: u32 = 0,
-    size: vector2d.Type = .{},
+    size: vector2d.Vec2 = .{},
     stride: i32 = 0,
     offset: i64 = 0,
 };
@@ -149,7 +149,7 @@ pub const Interface = struct {
 
 /// Base buffer implementation with default behavior
 pub const Buffer = struct {
-    size: vector2d.Type = .{},
+    size: vector2d.Vec2 = .{},
     is_opaque: bool = false,
     locked_by_backend: bool = false,
     locks: i32 = 0,
@@ -412,7 +412,7 @@ test "Buffer - attachment lifecycle with buffer destruction" {
 test "Buffer - DMABUFAttrs validation (planes, strides, offsets)" {
     const attrs = DMABUFAttrs{
         .success = true,
-        .size = vector2d.Type.init(1920, 1080),
+        .size = vector2d.Vec2.init(1920, 1080),
         .format = 0x34325258,
         .modifier = 0x0100000000000002,
         .planes = 3,

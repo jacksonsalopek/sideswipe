@@ -1,49 +1,52 @@
 const std = @import("std");
 const Transform = @import("transform.zig").Direction;
 
-pub const Type = struct {
+pub const Vec2 = struct {
     v: @Vector(2, f32) = @splat(0),
 
-    pub fn init(x: f32, y: f32) Type {
+    /// Alias for backwards compatibility
+    pub const Type = Vec2;
+
+    pub fn init(x: f32, y: f32) Vec2 {
         return .{ .v = .{ x, y } };
     }
 
     /// Get x component
-    pub inline fn getX(self: Type) f32 {
+    pub inline fn getX(self: Vec2) f32 {
         return self.v[0];
     }
 
     /// Get y component
-    pub inline fn getY(self: Type) f32 {
+    pub inline fn getY(self: Vec2) f32 {
         return self.v[1];
     }
 
     /// Set x component
-    pub inline fn setX(self: *Type, value: f32) void {
+    pub inline fn setX(self: *Vec2, value: f32) void {
         self.v[0] = value;
     }
 
     /// Set y component
-    pub inline fn setY(self: *Type, value: f32) void {
+    pub inline fn setY(self: *Vec2, value: f32) void {
         self.v[1] = value;
     }
 
     /// Normalizes the vector and returns the max absolute component
-    pub fn normalize(self: *Type) f64 {
+    pub fn normalize(self: *Vec2) f64 {
         const max = @max(@abs(self.v[0]), @abs(self.v[1]));
         self.v /= @as(@Vector(2, f32), @splat(max));
         return max;
     }
 
-    pub fn floor(self: Type) Type {
+    pub fn floor(self: Vec2) Vec2 {
         return .{ .v = @floor(self.v) };
     }
 
-    pub fn round(self: Type) Type {
+    pub fn round(self: Vec2) Vec2 {
         return .{ .v = @round(self.v) };
     }
 
-    pub fn clamp(self: Type, min: Type, max: Type) Type {
+    pub fn clamp(self: Vec2, min: Type, max: Type) Vec2 {
         return .{
             .v = .{
                 std.math.clamp(self.v[0], min.v[0], if (max.v[0] < min.v[0]) std.math.inf(f32) else max.v[0]),
@@ -52,26 +55,26 @@ pub const Type = struct {
         };
     }
 
-    pub fn distance(self: Type, other: Type) f32 {
+    pub fn distance(self: Vec2, other: Type) f32 {
         return @sqrt(self.distanceSq(other));
     }
 
-    pub fn distanceSq(self: Type, other: Type) f32 {
+    pub fn distanceSq(self: Vec2, other: Type) f32 {
         const diff = self.v - other.v;
         const sq = diff * diff;
         return @reduce(.Add, sq);
     }
 
-    pub fn size(self: Type) f64 {
+    pub fn size(self: Vec2) f64 {
         const sq = self.v * self.v;
         return @sqrt(@reduce(.Add, sq));
     }
 
-    pub fn getComponentMax(self: Type, other: Type) Type {
+    pub fn getComponentMax(self: Vec2, other: Type) Vec2 {
         return .{ .v = @max(self.v, other.v) };
     }
 
-    pub fn transform(self: Type, t: Transform, monitor_size: Type) Type {
+    pub fn transform(self: Vec2, t: Transform, monitor_size: Type) Vec2 {
         const x = self.v[0];
         const y = self.v[1];
         const mx = monitor_size.v[0];
@@ -88,33 +91,33 @@ pub const Type = struct {
         };
     }
 
-    pub fn add(self: Type, other: Type) Type {
+    pub fn add(self: Vec2, other: Type) Vec2 {
         return .{ .v = self.v + other.v };
     }
 
-    pub fn sub(self: Type, other: Type) Type {
+    pub fn sub(self: Vec2, other: Type) Vec2 {
         return .{ .v = self.v - other.v };
     }
 
-    pub fn mul(self: Type, scalar: f32) Type {
+    pub fn mul(self: Vec2, scalar: f32) Vec2 {
         return .{ .v = self.v * @as(@Vector(2, f32), @splat(scalar)) };
     }
 
-    pub fn scale(self: Type, scalar: f32) Type {
+    pub fn scale(self: Vec2, scalar: f32) Vec2 {
         return self.mul(scalar);
     }
 
-    pub fn div(self: Type, scalar: f32) Type {
+    pub fn div(self: Vec2, scalar: f32) Vec2 {
         return .{ .v = self.v / @as(@Vector(2, f32), @splat(scalar)) };
     }
 
-    pub fn eql(self: Type, other: Type) bool {
+    pub fn eql(self: Vec2, other: Type) bool {
         return @reduce(.And, self.v == other.v);
     }
 };
 
 test "Type.normalize" {
-    var v = Type.init(10, 5);
+    var v = Vec2.init(10, 5);
     const max = v.normalize();
 
     try std.testing.expectEqual(@as(f64, 10), max);
@@ -123,7 +126,7 @@ test "Type.normalize" {
 }
 
 test "Type.floor" {
-    const v = Type.init(10.7, 5.3);
+    const v = Vec2.init(10.7, 5.3);
     const result = v.floor();
 
     try std.testing.expectEqual(@as(f32, 10), result.getX());
@@ -131,7 +134,7 @@ test "Type.floor" {
 }
 
 test "Type.round" {
-    const v = Type.init(10.4, 5.6);
+    const v = Vec2.init(10.4, 5.6);
     const result = v.round();
 
     try std.testing.expectEqual(@as(f32, 10), result.getX());
@@ -139,9 +142,9 @@ test "Type.round" {
 }
 
 test "Type.clamp" {
-    const v = Type.init(15, 5);
-    const min = Type.init(0, 0);
-    const max = Type.init(10, 10);
+    const v = Vec2.init(15, 5);
+    const min = Vec2.init(0, 0);
+    const max = Vec2.init(10, 10);
     const result = v.clamp(min, max);
 
     try std.testing.expectEqual(@as(f32, 10), result.getX());
@@ -149,31 +152,31 @@ test "Type.clamp" {
 }
 
 test "Type.distance" {
-    const v1 = Type.init(0, 0);
-    const v2 = Type.init(3, 4);
+    const v1 = Vec2.init(0, 0);
+    const v2 = Vec2.init(3, 4);
     const dist = v1.distance(v2);
 
     try std.testing.expectEqual(@as(f32, 5), dist);
 }
 
 test "Type.distanceSq" {
-    const v1 = Type.init(0, 0);
-    const v2 = Type.init(3, 4);
+    const v1 = Vec2.init(0, 0);
+    const v2 = Vec2.init(3, 4);
     const dist_sq = v1.distanceSq(v2);
 
     try std.testing.expectEqual(@as(f32, 25), dist_sq);
 }
 
 test "Type.size" {
-    const v = Type.init(3, 4);
+    const v = Vec2.init(3, 4);
     const s = v.size();
 
     try std.testing.expectEqual(@as(f64, 5), s);
 }
 
 test "Type.getComponentMax" {
-    const v1 = Type.init(10, 5);
-    const v2 = Type.init(3, 8);
+    const v1 = Vec2.init(10, 5);
+    const v2 = Vec2.init(3, 8);
     const result = v1.getComponentMax(v2);
 
     try std.testing.expectEqual(@as(f32, 10), result.getX());
@@ -181,8 +184,8 @@ test "Type.getComponentMax" {
 }
 
 test "Type.transform 90 degrees" {
-    const v = Type.init(10, 20);
-    const monitor = Type.init(1920, 1080);
+    const v = Vec2.init(10, 20);
+    const monitor = Vec2.init(1920, 1080);
     const result = v.transform(.@"90", monitor);
 
     try std.testing.expectEqual(@as(f32, 20), result.getX());
@@ -190,8 +193,8 @@ test "Type.transform 90 degrees" {
 }
 
 test "Type.transform 180 degrees" {
-    const v = Type.init(10, 20);
-    const monitor = Type.init(1920, 1080);
+    const v = Vec2.init(10, 20);
+    const monitor = Vec2.init(1920, 1080);
     const result = v.transform(.@"180", monitor);
 
     try std.testing.expectEqual(@as(f32, 1910), result.getX()); // 1920 - 10
@@ -199,8 +202,8 @@ test "Type.transform 180 degrees" {
 }
 
 test "Type arithmetic" {
-    const v1 = Type.init(10, 20);
-    const v2 = Type.init(5, 3);
+    const v1 = Vec2.init(10, 20);
+    const v2 = Vec2.init(5, 3);
 
     const sum = v1.add(v2);
     try std.testing.expectEqual(@as(f32, 15), sum.getX());
@@ -216,8 +219,8 @@ test "Type arithmetic" {
 }
 
 test "Type.transform - all 8 variants" {
-    const v = Type.init(10, 20);
-    const monitor = Type.init(1920, 1080);
+    const v = Vec2.init(10, 20);
+    const monitor = Vec2.init(1920, 1080);
 
     // Normal (identity)
     const normal = v.transform(.normal, monitor);
@@ -261,7 +264,7 @@ test "Type.transform - all 8 variants" {
 }
 
 test "Type.div - division by zero" {
-    const v = Type.init(10, 20);
+    const v = Vec2.init(10, 20);
     const result = v.div(0);
 
     // Division by zero produces infinity
@@ -272,7 +275,7 @@ test "Type.div - division by zero" {
 }
 
 test "Type.div - negative zero" {
-    const v = Type.init(10, 20);
+    const v = Vec2.init(10, 20);
     const result = v.div(-0.0);
 
     // Division by negative zero
@@ -281,7 +284,7 @@ test "Type.div - negative zero" {
 }
 
 test "Type.div - very small divisor" {
-    const v = Type.init(1, 1);
+    const v = Vec2.init(1, 1);
     const tiny = std.math.floatMin(f32);
     const result = v.div(tiny);
 
@@ -291,7 +294,7 @@ test "Type.div - very small divisor" {
 }
 
 test "Type.normalize - zero vector" {
-    var v = Type.init(0, 0);
+    var v = Vec2.init(0, 0);
     const max = v.normalize();
 
     try std.testing.expectEqual(@as(f64, 0), max);
@@ -301,7 +304,7 @@ test "Type.normalize - zero vector" {
 }
 
 test "Type.normalize - negative values" {
-    var v = Type.init(-10, -5);
+    var v = Vec2.init(-10, -5);
     const max = v.normalize();
 
     // Max is based on absolute values
@@ -311,7 +314,7 @@ test "Type.normalize - negative values" {
 }
 
 test "Type.normalize - one component zero" {
-    var v = Type.init(10, 0);
+    var v = Vec2.init(10, 0);
     const max = v.normalize();
 
     try std.testing.expectEqual(@as(f64, 10), max);
@@ -320,9 +323,9 @@ test "Type.normalize - one component zero" {
 }
 
 test "Type.clamp - inverted bounds" {
-    const v = Type.init(50, 50);
-    const min = Type.init(100, 100);
-    const max = Type.init(0, 0);
+    const v = Vec2.init(50, 50);
+    const min = Vec2.init(100, 100);
+    const max = Vec2.init(0, 0);
 
     // When max < min, clamp uses infinity as upper bound
     const result = v.clamp(min, max);
@@ -333,9 +336,9 @@ test "Type.clamp - inverted bounds" {
 }
 
 test "Type.clamp - partially inverted bounds" {
-    const v = Type.init(50, 50);
-    const min = Type.init(0, 100);
-    const max = Type.init(100, 0);
+    const v = Vec2.init(50, 50);
+    const min = Vec2.init(0, 100);
+    const max = Vec2.init(100, 0);
 
     const result = v.clamp(min, max);
 
@@ -345,9 +348,9 @@ test "Type.clamp - partially inverted bounds" {
 }
 
 test "Type.clamp - with NaN in value" {
-    const v = Type.init(std.math.nan(f32), 50);
-    const min = Type.init(0, 0);
-    const max = Type.init(100, 100);
+    const v = Vec2.init(std.math.nan(f32), 50);
+    const min = Vec2.init(0, 0);
+    const max = Vec2.init(100, 100);
 
     const result = v.clamp(min, max);
 
@@ -357,9 +360,9 @@ test "Type.clamp - with NaN in value" {
 }
 
 test "Type.clamp - with infinity" {
-    const v = Type.init(50, 50);
-    const min = Type.init(0, 0);
-    const max = Type.init(std.math.inf(f32), 100);
+    const v = Vec2.init(50, 50);
+    const min = Vec2.init(0, 0);
+    const max = Vec2.init(std.math.inf(f32), 100);
 
     const result = v.clamp(min, max);
 
@@ -368,8 +371,8 @@ test "Type.clamp - with infinity" {
 }
 
 test "Type - negative values in operations" {
-    const v1 = Type.init(-10, -20);
-    const v2 = Type.init(5, 3);
+    const v1 = Vec2.init(-10, -20);
+    const v2 = Vec2.init(5, 3);
 
     // Add with negative
     const sum = v1.add(v2);
@@ -393,8 +396,8 @@ test "Type - negative values in operations" {
 }
 
 test "Type.distance - negative coordinates" {
-    const v1 = Type.init(-10, -20);
-    const v2 = Type.init(-7, -16);
+    const v1 = Vec2.init(-10, -20);
+    const v2 = Vec2.init(-7, -16);
     const dist = v1.distance(v2);
 
     try std.testing.expectEqual(@as(f32, 5), dist);
@@ -402,10 +405,10 @@ test "Type.distance - negative coordinates" {
 
 test "Type - infinity handling" {
     const inf = std.math.inf(f32);
-    const v = Type.init(inf, 10);
+    const v = Vec2.init(inf, 10);
 
     // Add with infinity
-    const sum = v.add(Type.init(10, 10));
+    const sum = v.add(Vec2.init(10, 10));
     try std.testing.expect(std.math.isInf(sum.getX()));
     try std.testing.expectEqual(@as(f32, 20), sum.getY());
 
@@ -414,7 +417,7 @@ test "Type - infinity handling" {
     try std.testing.expect(std.math.isInf(scaled.getX()));
 
     // Distance with infinity
-    const dist = v.distance(Type.init(0, 0));
+    const dist = v.distance(Vec2.init(0, 0));
     try std.testing.expect(std.math.isInf(dist));
 
     // Floor with infinity
@@ -424,10 +427,10 @@ test "Type - infinity handling" {
 
 test "Type - NaN handling" {
     const nan_val = std.math.nan(f32);
-    const v = Type.init(nan_val, 10);
+    const v = Vec2.init(nan_val, 10);
 
     // Add with NaN
-    const sum = v.add(Type.init(10, 10));
+    const sum = v.add(Vec2.init(10, 10));
     try std.testing.expect(std.math.isNan(sum.getX()));
     try std.testing.expectEqual(@as(f32, 20), sum.getY());
 
@@ -436,7 +439,7 @@ test "Type - NaN handling" {
     try std.testing.expect(std.math.isNan(scaled.getX()));
 
     // Distance with NaN
-    const dist = v.distance(Type.init(0, 0));
+    const dist = v.distance(Vec2.init(0, 0));
     try std.testing.expect(std.math.isNan(dist));
 
     // Round with NaN
@@ -445,14 +448,14 @@ test "Type - NaN handling" {
 }
 
 test "Type.size - zero vector" {
-    const v = Type.init(0, 0);
+    const v = Vec2.init(0, 0);
     const s = v.size();
 
     try std.testing.expectEqual(@as(f64, 0), s);
 }
 
 test "Type.size - negative components" {
-    const v = Type.init(-3, -4);
+    const v = Vec2.init(-3, -4);
     const s = v.size();
 
     // Size is always positive (based on squared values)
@@ -461,7 +464,7 @@ test "Type.size - negative components" {
 
 test "Type - very large values" {
     const large = std.math.floatMax(f32) / 10;
-    const v = Type.init(large, large);
+    const v = Vec2.init(large, large);
 
     // Operations should handle large values
     const scaled = v.mul(0.5);
@@ -474,7 +477,7 @@ test "Type - very large values" {
 
 test "Type - very small values" {
     const tiny = std.math.floatMin(f32);
-    const v = Type.init(tiny, tiny);
+    const v = Vec2.init(tiny, tiny);
 
     // Operations should handle very small values
     const scaled = v.mul(2);
@@ -487,8 +490,8 @@ test "Type - very small values" {
 
 test "Type.eql - NaN comparison" {
     const nan_val = std.math.nan(f32);
-    const v1 = Type.init(nan_val, 10);
-    const v2 = Type.init(nan_val, 10);
+    const v1 = Vec2.init(nan_val, 10);
+    const v2 = Vec2.init(nan_val, 10);
 
     // NaN != NaN
     try std.testing.expect(!v1.eql(v2));
@@ -497,23 +500,23 @@ test "Type.eql - NaN comparison" {
 
 test "Type.eql - infinity comparison" {
     const inf = std.math.inf(f32);
-    const v1 = Type.init(inf, 10);
-    const v2 = Type.init(inf, 10);
+    const v1 = Vec2.init(inf, 10);
+    const v2 = Vec2.init(inf, 10);
 
     // inf == inf
     try std.testing.expect(v1.eql(v2));
 }
 
 test "Type.eql - negative zero" {
-    const v1 = Type.init(0.0, 0.0);
-    const v2 = Type.init(-0.0, -0.0);
+    const v1 = Vec2.init(0.0, 0.0);
+    const v2 = Vec2.init(-0.0, -0.0);
 
     // 0.0 == -0.0 in IEEE 754
     try std.testing.expect(v1.eql(v2));
 }
 
 test "Type.floor - negative values" {
-    const v = Type.init(-10.7, -5.3);
+    const v = Vec2.init(-10.7, -5.3);
     const result = v.floor();
 
     try std.testing.expectEqual(@as(f32, -11), result.getX());
@@ -521,7 +524,7 @@ test "Type.floor - negative values" {
 }
 
 test "Type.round - negative values" {
-    const v = Type.init(-10.4, -5.6);
+    const v = Vec2.init(-10.4, -5.6);
     const result = v.round();
 
     try std.testing.expectEqual(@as(f32, -10), result.getX());
@@ -530,8 +533,8 @@ test "Type.round - negative values" {
 
 test "Type.distanceSq - overflow potential" {
     const large = std.math.floatMax(f32) / 2;
-    const v1 = Type.init(large, large);
-    const v2 = Type.init(0, 0);
+    const v1 = Vec2.init(large, large);
+    const v2 = Vec2.init(0, 0);
 
     const dist_sq = v1.distanceSq(v2);
 
@@ -540,8 +543,8 @@ test "Type.distanceSq - overflow potential" {
 }
 
 test "Type.getComponentMax - with negative values" {
-    const v1 = Type.init(-5, 10);
-    const v2 = Type.init(-3, 8);
+    const v1 = Vec2.init(-5, 10);
+    const v2 = Vec2.init(-3, 8);
     const result = v1.getComponentMax(v2);
 
     try std.testing.expectEqual(@as(f32, -3), result.getX());
@@ -550,8 +553,8 @@ test "Type.getComponentMax - with negative values" {
 
 test "Type.getComponentMax - with NaN" {
     const nan_val = std.math.nan(f32);
-    const v1 = Type.init(10, 20);
-    const v2 = Type.init(nan_val, 15);
+    const v1 = Vec2.init(10, 20);
+    const v2 = Vec2.init(nan_val, 15);
     const result = v1.getComponentMax(v2);
 
     // @max with NaN selects the non-NaN value
@@ -560,8 +563,8 @@ test "Type.getComponentMax - with NaN" {
 }
 
 test "Type.transform - with negative coordinates" {
-    const v = Type.init(-10, -20);
-    const monitor = Type.init(1920, 1080);
+    const v = Vec2.init(-10, -20);
+    const monitor = Vec2.init(1920, 1080);
     const result = v.transform(.@"90", monitor);
 
     try std.testing.expectEqual(@as(f32, -20), result.getX());
@@ -569,7 +572,7 @@ test "Type.transform - with negative coordinates" {
 }
 
 test "Type.scale - alias for mul" {
-    const v = Type.init(10, 20);
+    const v = Vec2.init(10, 20);
     const scaled = v.scale(2);
     const mulled = v.mul(2);
 

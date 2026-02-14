@@ -1,6 +1,6 @@
 const std = @import("std");
 const math = @import("core.math");
-const Vector2D = math.vector2d.Type;
+const Vector2D = math.Vec2;
 const BezierCurve = @import("bezier.zig").BezierCurve;
 const AnimationConfig = @import("config.zig").AnimationConfig;
 

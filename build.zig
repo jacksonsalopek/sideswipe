@@ -156,6 +156,13 @@ pub fn build(b: *std.Build) void {
     });
     core_anim_mod.addImport("core.math", core_math_mod);
 
+    const core_graphics_mod = b.addModule("core.graphics", .{
+        .root_source_file = b.path("src/core/graphics/root.zig"),
+        .target = target,
+        .link_libc = true,
+    });
+    core_graphics_mod.addImport("core.math", core_math_mod);
+
     const core_os_mod = b.addModule("core.os", .{
         .root_source_file = b.path("src/core/os/root.zig"),
         .target = target,
@@ -202,7 +209,8 @@ pub fn build(b: *std.Build) void {
     backend_mod.linkSystemLibrary("libseat", .{});
     backend_mod.linkSystemLibrary("wayland-client", .{});
     backend_mod.linkSystemLibrary("wayland-cursor", .{});
-    backend_mod.linkSystemLibrary("libdisplay-info", .{});
+    // libdisplay-info no longer needed - using native Zig implementation
+    // backend_mod.linkSystemLibrary("libdisplay-info", .{});
     backend_mod.addImport("core.string", core_string_mod);
     backend_mod.addImport("core.math", core_math_mod);
 
@@ -291,8 +299,13 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("wayland-client");
     exe.linkSystemLibrary("wayland-server");
     exe.linkSystemLibrary("wayland-cursor");
-    exe.linkSystemLibrary("libdisplay-info");
+    // libdisplay-info no longer needed - using native Zig implementation
+    // exe.linkSystemLibrary("libdisplay-info");
     exe.linkLibC();
+
+    // Ensure generated files are created before build
+    exe.step.dependOn(generate_pnp);
+    exe.step.dependOn(generate_vic);
 
     b.installArtifact(exe);
 
@@ -384,6 +397,23 @@ pub fn build(b: *std.Build) void {
     core_anim_tests.linkLibC();
     const run_core_anim_tests = b.addRunArtifact(core_anim_tests);
     test_step.dependOn(&run_core_anim_tests.step);
+
+    // Test core.graphics module
+    const core_graphics_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core/graphics/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "core.math", .module = core_math_mod },
+            },
+        }),
+    });
+    core_graphics_tests.linkSystemLibrary("pixman-1");
+    core_graphics_tests.linkLibC();
+    const run_core_graphics_tests = b.addRunArtifact(core_graphics_tests);
+    test_step.dependOn(&run_core_graphics_tests.step);
 
     // Test core.os module
     const core_os_tests = b.addTest(.{
@@ -486,7 +516,8 @@ pub fn build(b: *std.Build) void {
     backend_tests.linkSystemLibrary("libseat");
     backend_tests.linkSystemLibrary("wayland-client");
     backend_tests.linkSystemLibrary("wayland-cursor");
-    backend_tests.linkSystemLibrary("libdisplay-info");
+    // libdisplay-info no longer needed - using native Zig implementation
+    // backend_tests.linkSystemLibrary("libdisplay-info");
     backend_tests.linkLibC();
     const run_backend_tests = b.addRunArtifact(backend_tests);
     test_step.dependOn(&run_backend_tests.step);
@@ -566,7 +597,8 @@ pub fn build(b: *std.Build) void {
         file_tests.linkSystemLibrary("wayland-client");
         file_tests.linkSystemLibrary("wayland-server");
         file_tests.linkSystemLibrary("wayland-cursor");
-        file_tests.linkSystemLibrary("libdisplay-info");
+        // libdisplay-info no longer needed - using native Zig implementation
+        // file_tests.linkSystemLibrary("libdisplay-info");
         file_tests.linkLibC();
 
         if (b.option([]const u8, "filter", "Test name filter")) |filter| {

@@ -1,6 +1,6 @@
 const std = @import("std");
-const Box = @import("box.zig").Type;
-const Mat3x3 = @import("mat3x3.zig").Type;
+const Box = @import("box.zig").Box;
+const Mat3x3 = @import("mat3x3.zig").Mat3x3;
 const Transform = @import("transform.zig").Direction;
 
 pub fn transformBox(box: Box, t: Transform, box_width: f32, box_height: f32) Box {

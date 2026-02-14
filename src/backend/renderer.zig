@@ -4,7 +4,7 @@
 const std = @import("std");
 const core = @import("core");
 const math = @import("core.math");
-const Vector2D = math.vector2d.Type;
+const Vector2D = math.Vec2;
 const buffer = @import("buffer.zig");
 const misc = @import("misc.zig");
 

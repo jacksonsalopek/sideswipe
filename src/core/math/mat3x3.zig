@@ -1,11 +1,14 @@
 const std = @import("std");
 const string = @import("core.string").string;
-const Vector2D = @import("vector2d.zig").Type;
-const Box = @import("box.zig").Type;
+const Vec2 = @import("vector2d.zig").Vec2;
+const Box = @import("box.zig").Box;
 const Transform = @import("transform.zig").Direction;
 
-pub const Type = struct {
+pub const Mat3x3 = struct {
     matrix: [9]f32,
+    
+    /// Alias for backwards compatibility
+    pub const Type = Mat3x3;
 
     const transform_matrices = std.StaticStringMap([9]f32).initComptime(.{
         .{ "normal", .{ 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0 } },
@@ -18,15 +21,15 @@ pub const Type = struct {
         .{ "flipped_270", .{ 0.0, -1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0 } },
     });
 
-    pub fn init() Type {
+    pub fn init() Mat3x3 {
         return .{ .matrix = [_]f32{0} ** 9 };
     }
 
-    pub fn initFromArray(mat: [9]f32) Type {
+    pub fn initFromArray(mat: [9]f32) Mat3x3 {
         return .{ .matrix = mat };
     }
 
-    pub fn identity() Type {
+    pub fn identity() Mat3x3 {
         return initFromArray(.{ 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0 });
     }
 
@@ -43,8 +46,8 @@ pub const Type = struct {
         };
     }
 
-    pub fn outputProjection(size: Vector2D, t: Transform) Type {
-        var mat = Type.init();
+    pub fn outputProjection(size: Vec2, t: Transform) Mat3x3 {
+        var mat = Mat3x3.init();
 
         const transform_mat = getTransformMatrix(t);
         const x: f32 = 2.0 / size.getX();
@@ -72,8 +75,8 @@ pub const Type = struct {
         return self.matrix;
     }
 
-    pub fn projectBox(self: Type, box: Box, t: Transform, rot: f32) Type {
-        var mat = Type.identity();
+    pub fn projectBox(self: Mat3x3, box: Box, t: Transform, rot: f32) Mat3x3 {
+        var mat = Mat3x3.identity();
 
         const box_size = box.size();
 
@@ -88,9 +91,9 @@ pub const Type = struct {
         _ = mat.scale(box_size);
 
         if (t != .normal) {
-            _ = mat.translate(Vector2D.init(0.5, 0.5));
+            _ = mat.translate(Vec2.init(0.5, 0.5));
             _ = mat.applyTransform(t);
-            _ = mat.translate(Vector2D.init(-0.5, -0.5));
+            _ = mat.translate(Vec2.init(-0.5, -0.5));
         }
 
         var result = self.copy();
@@ -98,43 +101,43 @@ pub const Type = struct {
         return result;
     }
 
-    pub fn applyTransform(self: *Type, t: Transform) *Type {
+    pub fn applyTransform(self: *Mat3x3, t: Transform) *Mat3x3 {
         const transform_mat = getTransformMatrix(t);
-        _ = self.multiply(Type.initFromArray(transform_mat));
+        _ = self.multiply(Mat3x3.initFromArray(transform_mat));
         return self;
     }
 
-    pub fn rotate(self: *Type, rot: f32) *Type {
+    pub fn rotate(self: *Mat3x3, rot: f32) *Mat3x3 {
         const cos_rot = @cos(rot);
         const sin_rot = @sin(rot);
         const rotation_mat = [9]f32{ cos_rot, -sin_rot, 0.0, sin_rot, cos_rot, 0.0, 0.0, 0.0, 1.0 };
-        _ = self.multiply(Type.initFromArray(rotation_mat));
+        _ = self.multiply(Mat3x3.initFromArray(rotation_mat));
         return self;
     }
 
-    pub fn scale(self: *Type, scale_vec: Vector2D) *Type {
+    pub fn scale(self: *Mat3x3, scale_vec: Vec2) *Mat3x3 {
         const scale_mat = [9]f32{ scale_vec.getX(), 0.0, 0.0, 0.0, scale_vec.getY(), 0.0, 0.0, 0.0, 1.0 };
-        _ = self.multiply(Type.initFromArray(scale_mat));
+        _ = self.multiply(Mat3x3.initFromArray(scale_mat));
         return self;
     }
 
-    pub fn scaleScalar(self: *Type, scale_factor: f32) *Type {
-        return self.scale(Vector2D.init(scale_factor, scale_factor));
+    pub fn scaleScalar(self: *Mat3x3, scale_factor: f32) *Mat3x3 {
+        return self.scale(Vec2.init(scale_factor, scale_factor));
     }
 
-    pub fn translate(self: *Type, offset: Vector2D) *Type {
+    pub fn translate(self: *Mat3x3, offset: Vec2) *Mat3x3 {
         const translation_mat = [9]f32{ 1.0, 0.0, offset.getX(), 0.0, 1.0, offset.getY(), 0.0, 0.0, 1.0 };
-        _ = self.multiply(Type.initFromArray(translation_mat));
+        _ = self.multiply(Mat3x3.initFromArray(translation_mat));
         return self;
     }
 
-    pub fn transpose(self: *Type) *Type {
+    pub fn transpose(self: *Mat3x3) *Mat3x3 {
         const m = self.matrix;
         self.matrix = [9]f32{ m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8] };
         return self;
     }
 
-    pub fn multiply(self: *Type, other: Type) *Type {
+    pub fn multiply(self: *Mat3x3, other: Mat3x3) *Mat3x3 {
         const m1 = self.matrix;
         const m2 = other.matrix;
 
@@ -156,12 +159,12 @@ pub const Type = struct {
         return self;
     }
 
-    pub fn copy(self: Type) Type {
+    pub fn copy(self: Mat3x3) Mat3x3 {
         return self;
     }
 
     pub fn format(
-        self: Type,
+        self: Mat3x3,
         comptime fmt: string,
         options: std.fmt.FormatOptions,
         writer: anytype,
@@ -187,32 +190,32 @@ pub const Type = struct {
     }
 };
 
-test "Type.identity" {
-    const mat = Type.identity();
+test "Mat3x3.identity" {
+    const mat = Mat3x3.identity();
     try std.testing.expectEqual(@as(f32, 1.0), mat.matrix[0]);
     try std.testing.expectEqual(@as(f32, 0.0), mat.matrix[1]);
     try std.testing.expectEqual(@as(f32, 1.0), mat.matrix[4]);
     try std.testing.expectEqual(@as(f32, 1.0), mat.matrix[8]);
 }
 
-test "Type.translate" {
-    var mat = Type.identity();
-    _ = mat.translate(Vector2D.init(10, 20));
+test "Mat3x3.translate" {
+    var mat = Mat3x3.identity();
+    _ = mat.translate(Vec2.init(10, 20));
 
     try std.testing.expectEqual(@as(f32, 10.0), mat.matrix[2]);
     try std.testing.expectEqual(@as(f32, 20.0), mat.matrix[5]);
 }
 
-test "Type.scale" {
-    var mat = Type.identity();
-    _ = mat.scale(Vector2D.init(2, 3));
+test "Mat3x3.scale" {
+    var mat = Mat3x3.identity();
+    _ = mat.scale(Vec2.init(2, 3));
 
     try std.testing.expectEqual(@as(f32, 2.0), mat.matrix[0]);
     try std.testing.expectEqual(@as(f32, 3.0), mat.matrix[4]);
 }
 
-test "Type.rotate" {
-    var mat = Type.identity();
+test "Mat3x3.rotate" {
+    var mat = Mat3x3.identity();
     _ = mat.rotate(std.math.pi / 2.0); // 90 degrees
 
     // cos(90) ≈ 0, sin(90) ≈ 1
@@ -222,12 +225,12 @@ test "Type.rotate" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), mat.matrix[4], 0.0001);
 }
 
-test "Type.multiply" {
-    var mat1 = Type.identity();
-    _ = mat1.translate(Vector2D.init(5, 5));
+test "Mat3x3.multiply" {
+    var mat1 = Mat3x3.identity();
+    _ = mat1.translate(Vec2.init(5, 5));
 
-    var mat2 = Type.identity();
-    _ = mat2.scale(Vector2D.init(2, 2));
+    var mat2 = Mat3x3.identity();
+    _ = mat2.scale(Vec2.init(2, 2));
 
     _ = mat1.multiply(mat2);
 
@@ -236,8 +239,8 @@ test "Type.multiply" {
     try std.testing.expectEqual(@as(f32, 2.0), mat1.matrix[4]);
 }
 
-test "Type.transpose" {
-    var mat = Type.initFromArray(.{ 1, 2, 3, 4, 5, 6, 7, 8, 9 });
+test "Mat3x3.transpose" {
+    var mat = Mat3x3.initFromArray(.{ 1, 2, 3, 4, 5, 6, 7, 8, 9 });
     _ = mat.transpose();
 
     try std.testing.expectEqual(@as(f32, 1), mat.matrix[0]);
@@ -248,8 +251,8 @@ test "Type.transpose" {
     try std.testing.expectEqual(@as(f32, 8), mat.matrix[5]);
 }
 
-test "Type.format" {
-    const mat = Type.identity();
+test "Mat3x3.format" {
+    const mat = Mat3x3.identity();
     var buf: [200]u8 = undefined;
 
     // Test the custom format function directly
@@ -262,15 +265,15 @@ test "Type.format" {
     try std.testing.expect(std.mem.indexOf(u8, result, "mat3x3") != null);
 }
 
-test "Type - complex compositor chain" {
+test "Mat3x3 - complex compositor chain" {
     // Test from hyprutils: outputProjection + projectBox + translate + scale + transpose
-    const output_size = Vector2D.init(1920, 1080);
-    const jeremy = Type.outputProjection(output_size, .flipped_90);
+    const output_size = Vec2.init(1920, 1080);
+    const jeremy = Mat3x3.outputProjection(output_size, .flipped_90);
 
     const box = Box.init(10, 10, 200, 200);
     var matrix_box_1 = jeremy.projectBox(box, .normal, 0);
-    _ = matrix_box_1.translate(Vector2D.init(100, 100));
-    _ = matrix_box_1.scale(Vector2D.init(1.25, 1.5));
+    _ = matrix_box_1.translate(Vec2.init(100, 100));
+    _ = matrix_box_1.scale(Vec2.init(1.25, 1.5));
     const matrix_box = matrix_box_1.transpose();
 
     // Expected values from hyprutils test (with tolerance for precision)
@@ -290,9 +293,9 @@ test "Type - complex compositor chain" {
     try std.testing.expectApproxEqAbs(expected[8], result[8], 0.1);
 }
 
-test "Type - matrix with NaN values" {
+test "Mat3x3 - matrix with NaN values" {
     const nan = std.math.nan(f32);
-    const mat = Type.initFromArray(.{ nan, 0, 0, 0, nan, 0, 0, 0, 1 });
+    const mat = Mat3x3.initFromArray(.{ nan, 0, 0, 0, nan, 0, 0, 0, 1 });
 
     const result = mat.getMatrix();
     try std.testing.expect(std.math.isNan(result[0]));
@@ -300,15 +303,15 @@ test "Type - matrix with NaN values" {
 
     // Operations with NaN propagate NaN
     var mat_copy = mat;
-    _ = mat_copy.translate(Vector2D.init(10, 10));
+    _ = mat_copy.translate(Vec2.init(10, 10));
 
     const after_translate = mat_copy.getMatrix();
     try std.testing.expect(std.math.isNan(after_translate[0]));
 }
 
-test "Type - matrix with infinity values" {
+test "Mat3x3 - matrix with infinity values" {
     const inf = std.math.inf(f32);
-    const mat = Type.initFromArray(.{ inf, 0, 0, 0, inf, 0, 0, 0, 1 });
+    const mat = Mat3x3.initFromArray(.{ inf, 0, 0, 0, inf, 0, 0, 0, 1 });
 
     const result = mat.getMatrix();
     try std.testing.expect(std.math.isInf(result[0]));
@@ -316,15 +319,15 @@ test "Type - matrix with infinity values" {
 
     // Operations with infinity
     var mat_copy = mat;
-    _ = mat_copy.scale(Vector2D.init(2, 2));
+    _ = mat_copy.scale(Vec2.init(2, 2));
 
     const after_scale = mat_copy.getMatrix();
     try std.testing.expect(std.math.isInf(after_scale[0]));
 }
 
-test "Type - singular matrix (determinant zero)" {
+test "Mat3x3 - singular matrix (determinant zero)" {
     // All zeros except bottom-right (singular)
-    const singular = Type.initFromArray(.{ 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    const singular = Mat3x3.initFromArray(.{ 0, 0, 0, 0, 0, 0, 0, 0, 1 });
 
     const result = singular.getMatrix();
     try std.testing.expectEqual(@as(f32, 0), result[0]);
@@ -332,20 +335,20 @@ test "Type - singular matrix (determinant zero)" {
 
     // Operations should still work (even if mathematically singular)
     var mat_copy = singular;
-    _ = mat_copy.translate(Vector2D.init(5, 5));
+    _ = mat_copy.translate(Vec2.init(5, 5));
 
     // Should not crash
     _ = mat_copy.getMatrix();
 }
 
-test "Type - long chain of transformations" {
-    var mat = Type.identity();
+test "Mat3x3 - long chain of transformations" {
+    var mat = Mat3x3.identity();
 
     // 100 iterations of transformation
     var i: usize = 0;
     while (i < 100) : (i += 1) {
-        _ = mat.translate(Vector2D.init(0.1, 0.1));
-        _ = mat.scale(Vector2D.init(1.001, 1.001));
+        _ = mat.translate(Vec2.init(0.1, 0.1));
+        _ = mat.scale(Vec2.init(1.001, 1.001));
         _ = mat.rotate(@as(f32, @floatCast(0.01)));
     }
 
@@ -362,12 +365,12 @@ test "Type - long chain of transformations" {
     }
 }
 
-test "Type.format - with non-finite values" {
+test "Mat3x3.format - with non-finite values" {
     const nan = std.math.nan(f32);
     const inf = std.math.inf(f32);
 
-    const mat_nan = Type.initFromArray(.{ nan, 0, 0, 0, 1, 0, 0, 0, 1 });
-    const mat_inf = Type.initFromArray(.{ inf, 0, 0, 0, 1, 0, 0, 0, 1 });
+    const mat_nan = Mat3x3.initFromArray(.{ nan, 0, 0, 0, 1, 0, 0, 0, 1 });
+    const mat_inf = Mat3x3.initFromArray(.{ inf, 0, 0, 0, 1, 0, 0, 0, 1 });
 
     var buf: [300]u8 = undefined;
 
@@ -384,12 +387,12 @@ test "Type.format - with non-finite values" {
     try std.testing.expect(result2.len > 0);
 }
 
-test "Type - rotation preserves structure" {
+test "Mat3x3 - rotation preserves structure" {
     // Test that rotation maintains reasonable matrix values
     const angles = [_]f32{ 0, std.math.pi / 4.0, std.math.pi / 2.0, std.math.pi, 2.0 * std.math.pi };
 
     for (angles) |angle| {
-        var mat = Type.identity();
+        var mat = Mat3x3.identity();
         _ = mat.rotate(angle);
 
         const result = mat.getMatrix();
@@ -406,9 +409,9 @@ test "Type - rotation preserves structure" {
     }
 }
 
-test "Type.projectBox - with rotation at π intervals" {
-    const output_size = Vector2D.init(1920, 1080);
-    const mat = Type.outputProjection(output_size, .normal);
+test "Mat3x3.projectBox - with rotation at π intervals" {
+    const output_size = Vec2.init(1920, 1080);
+    const mat = Mat3x3.outputProjection(output_size, .normal);
 
     const box = Box.init(100, 100, 200, 200);
 
@@ -432,9 +435,9 @@ test "Type.projectBox - with rotation at π intervals" {
     }
 }
 
-test "Type - multiply by zero matrix" {
-    var identity = Type.identity();
-    const zero = Type.init(); // All zeros
+test "Mat3x3 - multiply by zero matrix" {
+    var identity = Mat3x3.identity();
+    const zero = Mat3x3.init(); // All zeros
 
     const result = identity.multiply(zero);
     const matrix = result.getMatrix();
@@ -445,10 +448,10 @@ test "Type - multiply by zero matrix" {
     }
 }
 
-test "Type - chained operations maintain finite values" {
-    var mat = Type.identity();
-    _ = mat.translate(Vector2D.init(10, 20));
-    _ = mat.scale(Vector2D.init(2, 3));
+test "Mat3x3 - chained operations maintain finite values" {
+    var mat = Mat3x3.identity();
+    _ = mat.translate(Vec2.init(10, 20));
+    _ = mat.scale(Vec2.init(2, 3));
     _ = mat.rotate(@as(f32, @floatCast(std.math.pi / 4.0)));
 
     const result = mat.getMatrix();
@@ -464,14 +467,14 @@ test "Type - chained operations maintain finite values" {
     }
 }
 
-test "Type - identity is neutral element" {
-    var mat = Type.identity();
-    _ = mat.translate(Vector2D.init(5, 10));
-    _ = mat.scale(Vector2D.init(2, 3));
+test "Mat3x3 - identity is neutral element" {
+    var mat = Mat3x3.identity();
+    _ = mat.translate(Vec2.init(5, 10));
+    _ = mat.scale(Vec2.init(2, 3));
 
     const original = mat.getMatrix();
 
-    var identity = Type.identity();
+    var identity = Mat3x3.identity();
 
     // M * I = M
     const result1 = mat.multiply(identity);
@@ -490,9 +493,9 @@ test "Type - identity is neutral element" {
     }
 }
 
-test "Type - scale by zero" {
-    var mat = Type.identity();
-    _ = mat.scale(Vector2D.init(0, 0));
+test "Mat3x3 - scale by zero" {
+    var mat = Mat3x3.identity();
+    _ = mat.scale(Vec2.init(0, 0));
 
     const result = mat.getMatrix();
 
@@ -501,10 +504,10 @@ test "Type - scale by zero" {
     try std.testing.expectEqual(@as(f32, 0), result[4]);
 }
 
-test "Type - transpose twice returns original" {
-    var mat = Type.identity();
-    _ = mat.translate(Vector2D.init(10, 20));
-    _ = mat.scale(Vector2D.init(2, 3));
+test "Mat3x3 - transpose twice returns original" {
+    var mat = Mat3x3.identity();
+    _ = mat.translate(Vec2.init(10, 20));
+    _ = mat.scale(Vec2.init(2, 3));
 
     const original = mat.getMatrix();
 
@@ -519,8 +522,8 @@ test "Type - transpose twice returns original" {
     }
 }
 
-test "Type - outputProjection for all transforms" {
-    const output_size = Vector2D.init(1920, 1080);
+test "Mat3x3 - outputProjection for all transforms" {
+    const output_size = Vec2.init(1920, 1080);
 
     const transforms = [_]Transform{
         .normal,  .@"90",      .@"180",      .@"270",
@@ -528,7 +531,7 @@ test "Type - outputProjection for all transforms" {
     };
 
     for (transforms) |t| {
-        const mat = Type.outputProjection(output_size, t);
+        const mat = Mat3x3.outputProjection(output_size, t);
         const result = mat.getMatrix();
 
         // All values should be finite
@@ -541,8 +544,8 @@ test "Type - outputProjection for all transforms" {
     }
 }
 
-test "Type - numerical drift in rotation" {
-    var mat = Type.identity();
+test "Mat3x3 - numerical drift in rotation" {
+    var mat = Mat3x3.identity();
 
     // Small rotation repeated many times
     const small_angle: f32 = 0.01; // ~0.57 degrees
@@ -563,9 +566,9 @@ test "Type - numerical drift in rotation" {
     }
 }
 
-test "Type.projectBox - rotation at exact multiples of π" {
-    const output_size = Vector2D.init(1920, 1080);
-    const mat = Type.outputProjection(output_size, .normal);
+test "Mat3x3.projectBox - rotation at exact multiples of π" {
+    const output_size = Vec2.init(1920, 1080);
+    const mat = Mat3x3.outputProjection(output_size, .normal);
     const box = Box.init(100, 100, 200, 200);
 
     const pi = std.math.pi;
@@ -582,8 +585,8 @@ test "Type.projectBox - rotation at exact multiples of π" {
     }
 }
 
-test "Type - very small rotation angles" {
-    var mat = Type.identity();
+test "Mat3x3 - very small rotation angles" {
+    var mat = Mat3x3.identity();
 
     // Very small angle (numerical precision test)
     const tiny_angle: f32 = 1e-6;
@@ -592,21 +595,21 @@ test "Type - very small rotation angles" {
     const result = mat.getMatrix();
 
     // Should be very close to identity
-    const identity_mat = Type.identity().getMatrix();
+    const identity_mat = Mat3x3.identity().getMatrix();
 
     for (result, identity_mat) |r, id| {
         try std.testing.expectApproxEqAbs(id, r, 0.01);
     }
 }
 
-test "Type - commutative scaling" {
-    var mat1 = Type.identity();
-    _ = mat1.scale(Vector2D.init(2, 3));
-    _ = mat1.scale(Vector2D.init(4, 5));
+test "Mat3x3 - commutative scaling" {
+    var mat1 = Mat3x3.identity();
+    _ = mat1.scale(Vec2.init(2, 3));
+    _ = mat1.scale(Vec2.init(4, 5));
 
-    var mat2 = Type.identity();
-    _ = mat2.scale(Vector2D.init(4, 5));
-    _ = mat2.scale(Vector2D.init(2, 3));
+    var mat2 = Mat3x3.identity();
+    _ = mat2.scale(Vec2.init(4, 5));
+    _ = mat2.scale(Vec2.init(2, 3));
 
     const result1 = mat1.getMatrix();
     const result2 = mat2.getMatrix();
@@ -617,14 +620,14 @@ test "Type - commutative scaling" {
     }
 }
 
-test "Type - translate then scale vs scale then translate" {
-    var translate_first = Type.identity();
-    _ = translate_first.translate(Vector2D.init(10, 20));
-    _ = translate_first.scale(Vector2D.init(2, 2));
+test "Mat3x3 - translate then scale vs scale then translate" {
+    var translate_first = Mat3x3.identity();
+    _ = translate_first.translate(Vec2.init(10, 20));
+    _ = translate_first.scale(Vec2.init(2, 2));
 
-    var scale_first = Type.identity();
-    _ = scale_first.scale(Vector2D.init(2, 2));
-    _ = scale_first.translate(Vector2D.init(10, 20));
+    var scale_first = Mat3x3.identity();
+    _ = scale_first.scale(Vec2.init(2, 2));
+    _ = scale_first.translate(Vec2.init(10, 20));
 
     const result1 = translate_first.getMatrix();
     const result2 = scale_first.getMatrix();
