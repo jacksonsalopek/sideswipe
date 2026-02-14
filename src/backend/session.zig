@@ -5,6 +5,8 @@ const std = @import("std");
 const posix = std.posix;
 const core = @import("core");
 const input = @import("input.zig");
+const ipc = @import("ipc");
+const Signal = core.events.Signal;
 
 const c = @cImport({
     @cInclude("libudev.h");
@@ -23,6 +25,17 @@ pub const libinput = c.struct_libinput;
 pub const libinput_event = c.struct_libinput_event;
 pub const libinput_device = c.struct_libinput_device;
 pub const libinput_tablet_tool = c.struct_libinput_tablet_tool;
+
+// Import input event structures from IPC module (no duplication)
+pub const KeyboardKeyEvent = ipc.signals.KeyboardKeyEvent;
+pub const PointerMotionEvent = ipc.signals.PointerMotionEvent;
+pub const PointerMotionAbsoluteEvent = ipc.signals.PointerMotionAbsoluteEvent;
+pub const PointerButtonEvent = ipc.signals.PointerButtonEvent;
+pub const PointerAxisEvent = ipc.signals.PointerAxisEvent;
+pub const TouchDownEvent = ipc.signals.TouchDownEvent;
+pub const TouchUpEvent = ipc.signals.TouchUpEvent;
+pub const TouchMotionEvent = ipc.signals.TouchMotionEvent;
+pub const TouchCancelEvent = ipc.signals.TouchCancelEvent;
 
 /// Session device change event type
 pub const ChangeEventType = enum(u32) {
@@ -261,12 +274,22 @@ pub const Type = struct {
     libseat_handle: ?*libseat = null,
     libinput_handle: ?*libinput = null,
 
-    // Backend reference
-    backend: ?*anyopaque = null,
+    // Event signals
+    signal_ready: Signal(void),
+    signal_device_change: Signal(ChangeEvent),
+    signal_keyboard_key: Signal(KeyboardKeyEvent),
+    signal_pointer_motion: Signal(PointerMotionEvent),
+    signal_pointer_motion_absolute: Signal(PointerMotionAbsoluteEvent),
+    signal_pointer_button: Signal(PointerButtonEvent),
+    signal_pointer_axis: Signal(PointerAxisEvent),
+    signal_touch_down: Signal(TouchDownEvent),
+    signal_touch_up: Signal(TouchUpEvent),
+    signal_touch_motion: Signal(TouchMotionEvent),
+    signal_touch_cancel: Signal(TouchCancelEvent),
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, backend: ?*anyopaque) !*Self {
+    pub fn init(allocator: std.mem.Allocator) !*Self {
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
 
@@ -275,13 +298,36 @@ pub const Type = struct {
             .seat_name = "", // Will be set during initialization
             .session_devices = std.ArrayList(*Device){},
             .libinput_devices = std.ArrayList(*LibinputDevice){},
-            .backend = backend,
+            .signal_ready = Signal(void).init(allocator),
+            .signal_device_change = Signal(ChangeEvent).init(allocator),
+            .signal_keyboard_key = Signal(KeyboardKeyEvent).init(allocator),
+            .signal_pointer_motion = Signal(PointerMotionEvent).init(allocator),
+            .signal_pointer_motion_absolute = Signal(PointerMotionAbsoluteEvent).init(allocator),
+            .signal_pointer_button = Signal(PointerButtonEvent).init(allocator),
+            .signal_pointer_axis = Signal(PointerAxisEvent).init(allocator),
+            .signal_touch_down = Signal(TouchDownEvent).init(allocator),
+            .signal_touch_up = Signal(TouchUpEvent).init(allocator),
+            .signal_touch_motion = Signal(TouchMotionEvent).init(allocator),
+            .signal_touch_cancel = Signal(TouchCancelEvent).init(allocator),
         };
 
         return self;
     }
 
     pub fn deinit(self: *Self) void {
+        // Clean up signals
+        self.signal_ready.deinit();
+        self.signal_device_change.deinit();
+        self.signal_keyboard_key.deinit();
+        self.signal_pointer_motion.deinit();
+        self.signal_pointer_motion_absolute.deinit();
+        self.signal_pointer_button.deinit();
+        self.signal_pointer_axis.deinit();
+        self.signal_touch_down.deinit();
+        self.signal_touch_up.deinit();
+        self.signal_touch_motion.deinit();
+        self.signal_touch_cancel.deinit();
+
         // Clean up libinput devices
         for (self.libinput_devices.items) |device| {
             device.deinit();
@@ -316,8 +362,8 @@ pub const Type = struct {
     }
 
     /// Attempt to create a session for the given backend
-    pub fn attempt(allocator: std.mem.Allocator, backend: ?*anyopaque) !*Self {
-        const session = try Self.init(allocator, backend);
+    pub fn attempt(allocator: std.mem.Allocator) !*Self {
+        const session = try Self.init(allocator);
         errdefer session.deinit();
 
         // Initialize libseat
@@ -445,7 +491,9 @@ pub const Type = struct {
             }
         }
 
-        // TODO: Emit ready signal to backend
+        // Emit ready signal to backend
+        std.log.debug("Session ready - emitting signal", .{});
+        self.signal_ready.emit({});
     }
 
     fn dispatchUdevEvents(self: *Self) void {
@@ -477,7 +525,15 @@ pub const Type = struct {
                 }
             } else if (std.mem.eql(u8, action, "change")) {
                 // Device changed - emit hotplug event
-                // TODO: Emit change event to backend
+                core.cli.log.debug("Device changed: {s}", .{devnode});
+                const change_event = ChangeEvent{
+                    .event_type = .hotplug,
+                    .hotplug = .{
+                        .connector_id = 0, // Would need to parse from udev properties
+                        .prop_id = 0,
+                    },
+                };
+                self.signal_device_change.emit(change_event);
             }
         }
     }
@@ -527,19 +583,233 @@ pub const Type = struct {
             },
             c.LIBINPUT_EVENT_KEYBOARD_KEY => {
                 // Keyboard event - route to keyboard interface
-                // TODO: Extract key event data and emit
+                const kbd_event = c.libinput_event_get_keyboard_event(event);
+                if (kbd_event) |ke| {
+                    const time_msec = c.libinput_event_keyboard_get_time(ke);
+                    const key = c.libinput_event_keyboard_get_key(ke);
+                    const key_state = c.libinput_event_keyboard_get_key_state(ke);
+
+                    const state: KeyboardKeyEvent.KeyState = if (key_state == c.LIBINPUT_KEY_STATE_PRESSED)
+                        .pressed
+                    else
+                        .released;
+
+                    core.cli.log.debug("Keyboard event: key={d} state={s} time={d}", .{ key, @tagName(state), time_msec });
+
+                    self.signal_keyboard_key.emit(.{
+                        .time_msec = time_msec,
+                        .key = key,
+                        .state = state,
+                    });
+                }
             },
-            c.LIBINPUT_EVENT_POINTER_MOTION, c.LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE, c.LIBINPUT_EVENT_POINTER_BUTTON, c.LIBINPUT_EVENT_POINTER_AXIS => {
-                // Pointer events - route to pointer interface
-                // TODO: Extract pointer event data and emit
+            c.LIBINPUT_EVENT_POINTER_MOTION => {
+                // Relative pointer motion
+                const ptr_event = c.libinput_event_get_pointer_event(event);
+                if (ptr_event) |pe| {
+                    const time_msec = c.libinput_event_pointer_get_time(pe);
+                    const dx = c.libinput_event_pointer_get_dx(pe);
+                    const dy = c.libinput_event_pointer_get_dy(pe);
+
+                    core.cli.log.debug("Pointer motion: dx={d:.2} dy={d:.2}", .{ dx, dy });
+
+                    self.signal_pointer_motion.emit(.{
+                        .time_msec = time_msec,
+                        .delta_x = dx,
+                        .delta_y = dy,
+                    });
+                }
             },
-            c.LIBINPUT_EVENT_TOUCH_DOWN, c.LIBINPUT_EVENT_TOUCH_UP, c.LIBINPUT_EVENT_TOUCH_MOTION, c.LIBINPUT_EVENT_TOUCH_CANCEL, c.LIBINPUT_EVENT_TOUCH_FRAME => {
-                // Touch events - route to touch interface
-                // TODO: Extract touch event data and emit
+            c.LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE => {
+                // Absolute pointer motion
+                const ptr_event = c.libinput_event_get_pointer_event(event);
+                if (ptr_event) |pe| {
+                    const time_msec = c.libinput_event_pointer_get_time(pe);
+                    const x = c.libinput_event_pointer_get_absolute_x(pe);
+                    const y = c.libinput_event_pointer_get_absolute_y(pe);
+
+                    core.cli.log.debug("Pointer motion absolute: x={d:.2} y={d:.2}", .{ x, y });
+
+                    self.signal_pointer_motion_absolute.emit(.{
+                        .time_msec = time_msec,
+                        .x = x,
+                        .y = y,
+                    });
+                }
+            },
+            c.LIBINPUT_EVENT_POINTER_BUTTON => {
+                // Pointer button
+                const ptr_event = c.libinput_event_get_pointer_event(event);
+                if (ptr_event) |pe| {
+                    const time_msec = c.libinput_event_pointer_get_time(pe);
+                    const button = c.libinput_event_pointer_get_button(pe);
+                    const button_state = c.libinput_event_pointer_get_button_state(pe);
+
+                    const state: PointerButtonEvent.ButtonState = if (button_state == c.LIBINPUT_BUTTON_STATE_PRESSED)
+                        .pressed
+                    else
+                        .released;
+
+                    core.cli.log.debug("Pointer button: button={d} state={s}", .{ button, @tagName(state) });
+
+                    self.signal_pointer_button.emit(.{
+                        .time_msec = time_msec,
+                        .button = button,
+                        .state = state,
+                        .serial = 0,
+                    });
+                }
+            },
+            c.LIBINPUT_EVENT_POINTER_AXIS => {
+                // Pointer axis (scroll)
+                const ptr_event = c.libinput_event_get_pointer_event(event);
+                if (ptr_event) |pe| {
+                    const time_msec = c.libinput_event_pointer_get_time(pe);
+
+                    // Check which axis has a value
+                    if (c.libinput_event_pointer_has_axis(pe, c.LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL) != 0) {
+                        const delta = c.libinput_event_pointer_get_axis_value(pe, c.LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
+                        const axis_source = c.libinput_event_pointer_get_axis_source(pe);
+
+                        const source: PointerAxisEvent.AxisSource = switch (axis_source) {
+                            c.LIBINPUT_POINTER_AXIS_SOURCE_WHEEL => .wheel,
+                            c.LIBINPUT_POINTER_AXIS_SOURCE_FINGER => .finger,
+                            c.LIBINPUT_POINTER_AXIS_SOURCE_CONTINUOUS => .continuous,
+                            c.LIBINPUT_POINTER_AXIS_SOURCE_WHEEL_TILT => .wheel_tilt,
+                            else => .wheel,
+                        };
+
+                        core.cli.log.debug("Pointer axis vertical: delta={d:.2} source={s}", .{ delta, @tagName(source) });
+
+                        self.signal_pointer_axis.emit(.{
+                            .time_msec = time_msec,
+                            .source = source,
+                            .orientation = .vertical,
+                            .delta = delta,
+                            .delta_discrete = 0, // Could be extracted from libinput if needed
+                        });
+                    }
+
+                    if (c.libinput_event_pointer_has_axis(pe, c.LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL) != 0) {
+                        const delta = c.libinput_event_pointer_get_axis_value(pe, c.LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL);
+                        const axis_source = c.libinput_event_pointer_get_axis_source(pe);
+
+                        const source: PointerAxisEvent.AxisSource = switch (axis_source) {
+                            c.LIBINPUT_POINTER_AXIS_SOURCE_WHEEL => .wheel,
+                            c.LIBINPUT_POINTER_AXIS_SOURCE_FINGER => .finger,
+                            c.LIBINPUT_POINTER_AXIS_SOURCE_CONTINUOUS => .continuous,
+                            c.LIBINPUT_POINTER_AXIS_SOURCE_WHEEL_TILT => .wheel_tilt,
+                            else => .wheel,
+                        };
+
+                        core.cli.log.debug("Pointer axis horizontal: delta={d:.2} source={s}", .{ delta, @tagName(source) });
+
+                        self.signal_pointer_axis.emit(.{
+                            .time_msec = time_msec,
+                            .source = source,
+                            .orientation = .horizontal,
+                            .delta = delta,
+                            .delta_discrete = 0,
+                        });
+                    }
+                }
+            },
+            c.LIBINPUT_EVENT_TOUCH_DOWN => {
+                // Touch down
+                const touch_event = c.libinput_event_get_touch_event(event);
+                if (touch_event) |te| {
+                    const time_msec = c.libinput_event_touch_get_time(te);
+                    const slot = c.libinput_event_touch_get_seat_slot(te);
+                    const x = c.libinput_event_touch_get_x(te);
+                    const y = c.libinput_event_touch_get_y(te);
+
+                    core.cli.log.debug("Touch down: slot={d} x={d:.2} y={d:.2}", .{ slot, x, y });
+
+                    self.signal_touch_down.emit(.{
+                        .time_msec = time_msec,
+                        .touch_id = slot,
+                        .x = x,
+                        .y = y,
+                    });
+                }
+            },
+            c.LIBINPUT_EVENT_TOUCH_UP => {
+                // Touch up
+                const touch_event = c.libinput_event_get_touch_event(event);
+                if (touch_event) |te| {
+                    const time_msec = c.libinput_event_touch_get_time(te);
+                    const slot = c.libinput_event_touch_get_seat_slot(te);
+
+                    core.cli.log.debug("Touch up: slot={d}", .{slot});
+
+                    self.signal_touch_up.emit(.{
+                        .time_msec = time_msec,
+                        .touch_id = slot,
+                    });
+                }
+            },
+            c.LIBINPUT_EVENT_TOUCH_MOTION => {
+                // Touch motion
+                const touch_event = c.libinput_event_get_touch_event(event);
+                if (touch_event) |te| {
+                    const time_msec = c.libinput_event_touch_get_time(te);
+                    const slot = c.libinput_event_touch_get_seat_slot(te);
+                    const x = c.libinput_event_touch_get_x(te);
+                    const y = c.libinput_event_touch_get_y(te);
+
+                    core.cli.log.debug("Touch motion: slot={d} x={d:.2} y={d:.2}", .{ slot, x, y });
+
+                    self.signal_touch_motion.emit(.{
+                        .time_msec = time_msec,
+                        .touch_id = slot,
+                        .x = x,
+                        .y = y,
+                    });
+                }
+            },
+            c.LIBINPUT_EVENT_TOUCH_CANCEL => {
+                // Touch cancel
+                const touch_event = c.libinput_event_get_touch_event(event);
+                if (touch_event) |te| {
+                    const time_msec = c.libinput_event_touch_get_time(te);
+                    const slot = c.libinput_event_touch_get_seat_slot(te);
+
+                    core.cli.log.debug("Touch cancel: slot={d}", .{slot});
+
+                    self.signal_touch_cancel.emit(.{
+                        .time_msec = time_msec,
+                        .touch_id = slot,
+                    });
+                }
+            },
+            c.LIBINPUT_EVENT_TOUCH_FRAME => {
+                // Touch frame - marks end of logical touch event group
+                // Currently no signal for this, could be added if needed
+                core.cli.log.debug("Touch frame event", .{});
+            },
+            c.LIBINPUT_EVENT_SWITCH_TOGGLE => {
+                // Switch event (e.g., lid switch)
+                core.cli.log.debug("Switch toggle event", .{});
+                // TODO: Implement switch event signal if needed
+            },
+            c.LIBINPUT_EVENT_TABLET_TOOL_AXIS, c.LIBINPUT_EVENT_TABLET_TOOL_PROXIMITY, c.LIBINPUT_EVENT_TABLET_TOOL_TIP, c.LIBINPUT_EVENT_TABLET_TOOL_BUTTON => {
+                // Tablet tool events
+                core.cli.log.debug("Tablet tool event: type={d}", .{event_type});
+                // TODO: Implement tablet event signals if needed
+            },
+            c.LIBINPUT_EVENT_TABLET_PAD_BUTTON, c.LIBINPUT_EVENT_TABLET_PAD_RING, c.LIBINPUT_EVENT_TABLET_PAD_STRIP => {
+                // Tablet pad events
+                core.cli.log.debug("Tablet pad event: type={d}", .{event_type});
+                // TODO: Implement tablet pad event signals if needed
+            },
+            c.LIBINPUT_EVENT_GESTURE_SWIPE_BEGIN, c.LIBINPUT_EVENT_GESTURE_SWIPE_UPDATE, c.LIBINPUT_EVENT_GESTURE_SWIPE_END, c.LIBINPUT_EVENT_GESTURE_PINCH_BEGIN, c.LIBINPUT_EVENT_GESTURE_PINCH_UPDATE, c.LIBINPUT_EVENT_GESTURE_PINCH_END, c.LIBINPUT_EVENT_GESTURE_HOLD_BEGIN, c.LIBINPUT_EVENT_GESTURE_HOLD_END => {
+                // Gesture events
+                core.cli.log.debug("Gesture event: type={d}", .{event_type});
+                // TODO: Implement gesture event signals if needed
             },
             else => {
-                // Other event types (switch, tablet, etc.)
-                // TODO: Handle remaining event types
+                // Unknown event type
+                core.cli.log.debug("Unhandled libinput event type: {d}", .{event_type});
             },
         }
     }
@@ -556,7 +826,7 @@ const testing = core.testing;
 
 // Tests
 test "Session - initialization" {
-    var sess = try Type.init(testing.allocator, null);
+    var sess = try Type.init(testing.allocator);
     defer sess.deinit();
 
     try testing.expect(sess.active);
@@ -566,7 +836,7 @@ test "Session - initialization" {
 }
 
 test "Device - basic initialization" {
-    var sess = try Type.init(testing.allocator, null);
+    var sess = try Type.init(testing.allocator);
     defer sess.deinit();
 
     var device = try Device.init(testing.allocator, sess, "/dev/dri/card0");
@@ -578,9 +848,166 @@ test "Device - basic initialization" {
 }
 
 test "Session - switch VT returns false when not implemented" {
-    var sess = try Type.init(testing.allocator, null);
+    var sess = try Type.init(testing.allocator);
     defer sess.deinit();
 
     const result = sess.switchVt(2);
     try testing.expectFalse(result);
+}
+
+test "Session - signals are initialized" {
+    var sess = try Type.init(testing.allocator);
+    defer sess.deinit();
+
+    // Verify all signals are initialized
+    try testing.expectEqual(@as(usize, 0), sess.signal_ready.listeners.items.len);
+    try testing.expectEqual(@as(usize, 0), sess.signal_keyboard_key.listeners.items.len);
+    try testing.expectEqual(@as(usize, 0), sess.signal_pointer_motion.listeners.items.len);
+    try testing.expectEqual(@as(usize, 0), sess.signal_touch_down.listeners.items.len);
+}
+
+test "Session - keyboard signal emission" {
+    var sess = try Type.init(testing.allocator);
+    defer sess.deinit();
+
+    const State = struct {
+        var last_key: u32 = 0;
+        var count: i32 = 0;
+
+        fn callback(event: KeyboardKeyEvent, userdata: ?*anyopaque) void {
+            _ = userdata;
+            last_key = event.key;
+            count += 1;
+        }
+    };
+    State.last_key = 0;
+    State.count = 0;
+
+    var listener = try sess.signal_keyboard_key.listen(State.callback, null);
+    defer listener.deinit();
+
+    sess.signal_keyboard_key.emit(.{
+        .time_msec = 1000,
+        .key = 42,
+        .state = .pressed,
+    });
+
+    try testing.expectEqual(@as(u32, 42), State.last_key);
+    try testing.expectEqual(@as(i32, 1), State.count);
+}
+
+test "Session - pointer motion signal emission" {
+    var sess = try Type.init(testing.allocator);
+    defer sess.deinit();
+
+    const State = struct {
+        var delta_x: f64 = 0;
+        var delta_y: f64 = 0;
+
+        fn callback(event: PointerMotionEvent, userdata: ?*anyopaque) void {
+            _ = userdata;
+            delta_x = event.delta_x;
+            delta_y = event.delta_y;
+        }
+    };
+    State.delta_x = 0;
+    State.delta_y = 0;
+
+    var listener = try sess.signal_pointer_motion.listen(State.callback, null);
+    defer listener.deinit();
+
+    sess.signal_pointer_motion.emit(.{
+        .time_msec = 2000,
+        .delta_x = 10.5,
+        .delta_y = -5.2,
+    });
+
+    try testing.expectEqual(@as(f64, 10.5), State.delta_x);
+    try testing.expectEqual(@as(f64, -5.2), State.delta_y);
+}
+
+test "Session - touch down signal emission" {
+    var sess = try Type.init(testing.allocator);
+    defer sess.deinit();
+
+    const State = struct {
+        var touch_id: i32 = -1;
+        var x: f64 = 0;
+        var y: f64 = 0;
+
+        fn callback(event: TouchDownEvent, userdata: ?*anyopaque) void {
+            _ = userdata;
+            touch_id = event.touch_id;
+            x = event.x;
+            y = event.y;
+        }
+    };
+    State.touch_id = -1;
+    State.x = 0;
+    State.y = 0;
+
+    var listener = try sess.signal_touch_down.listen(State.callback, null);
+    defer listener.deinit();
+
+    sess.signal_touch_down.emit(.{
+        .time_msec = 3000,
+        .touch_id = 5,
+        .x = 123.45,
+        .y = 678.90,
+    });
+
+    try testing.expectEqual(@as(i32, 5), State.touch_id);
+    try testing.expectEqual(@as(f64, 123.45), State.x);
+    try testing.expectEqual(@as(f64, 678.90), State.y);
+}
+
+test "Session - ready signal emission" {
+    var sess = try Type.init(testing.allocator);
+    defer sess.deinit();
+
+    const State = struct {
+        var ready_called: bool = false;
+
+        fn callback(userdata: ?*anyopaque) void {
+            _ = userdata;
+            ready_called = true;
+        }
+    };
+    State.ready_called = false;
+
+    var listener = try sess.signal_ready.listen(State.callback, null);
+    defer listener.deinit();
+
+    sess.signal_ready.emit({});
+
+    try testing.expect(State.ready_called);
+}
+
+test "Session - device change signal emission" {
+    var sess = try Type.init(testing.allocator);
+    defer sess.deinit();
+
+    const State = struct {
+        var event_type: ChangeEventType = .hotplug;
+        var called: bool = false;
+
+        fn callback(event: ChangeEvent, userdata: ?*anyopaque) void {
+            _ = userdata;
+            event_type = event.event_type;
+            called = true;
+        }
+    };
+    State.event_type = .hotplug;
+    State.called = false;
+
+    var listener = try sess.signal_device_change.listen(State.callback, null);
+    defer listener.deinit();
+
+    sess.signal_device_change.emit(.{
+        .event_type = .lease,
+        .hotplug = .{},
+    });
+
+    try testing.expect(State.called);
+    try testing.expectEqual(ChangeEventType.lease, State.event_type);
 }

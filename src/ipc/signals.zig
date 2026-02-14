@@ -4,17 +4,13 @@
 const std = @import("std");
 const core = @import("core");
 const Signal = core.events.Signal;
-const backend = @import("backend");
-const BackendType = backend.Type;
-const math = @import("core.math");
-const Vector2D = math.Vector2D;
+const BackendType = core.backend.Type;
 
 /// Keyboard key event data
 pub const KeyboardKeyEvent = struct {
     time_msec: u32,
     key: u32,
     state: KeyState,
-    output: ?*anyopaque = null, // Optional output context
 
     pub const KeyState = enum(u32) {
         released = 0,
@@ -28,7 +24,6 @@ pub const KeyboardModifiersEvent = struct {
     latched: u32,
     locked: u32,
     group: u32,
-    output: ?*anyopaque = null,
 };
 
 /// Pointer motion event data (relative)
@@ -36,7 +31,6 @@ pub const PointerMotionEvent = struct {
     time_msec: u32,
     delta_x: f64,
     delta_y: f64,
-    output: ?*anyopaque = null,
 };
 
 /// Pointer motion event data (absolute)
@@ -44,7 +38,6 @@ pub const PointerMotionAbsoluteEvent = struct {
     time_msec: u32,
     x: f64,
     y: f64,
-    output: ?*anyopaque = null,
 };
 
 /// Pointer button event data
@@ -53,7 +46,6 @@ pub const PointerButtonEvent = struct {
     button: u32,
     state: ButtonState,
     serial: u32 = 0,
-    output: ?*anyopaque = null,
 
     pub const ButtonState = enum(u32) {
         released = 0,
@@ -68,7 +60,6 @@ pub const PointerAxisEvent = struct {
     orientation: AxisOrientation,
     delta: f64,
     delta_discrete: i32,
-    output: ?*anyopaque = null,
 
     pub const AxisSource = enum(u32) {
         wheel = 0,
@@ -88,13 +79,39 @@ pub const PointerEnterEvent = struct {
     surface_x: f64,
     surface_y: f64,
     serial: u32,
-    output: ?*anyopaque = null,
 };
 
 /// Pointer leave event (unfocus)
 pub const PointerLeaveEvent = struct {
     serial: u32,
-    output: ?*anyopaque = null,
+};
+
+/// Touch down event
+pub const TouchDownEvent = struct {
+    time_msec: u32,
+    touch_id: i32,
+    x: f64,
+    y: f64,
+};
+
+/// Touch up event
+pub const TouchUpEvent = struct {
+    time_msec: u32,
+    touch_id: i32,
+};
+
+/// Touch motion event
+pub const TouchMotionEvent = struct {
+    time_msec: u32,
+    touch_id: i32,
+    x: f64,
+    y: f64,
+};
+
+/// Touch cancel event
+pub const TouchCancelEvent = struct {
+    time_msec: u32,
+    touch_id: i32,
 };
 
 /// Frame event for render timing
@@ -141,6 +158,12 @@ pub const Manager = struct {
     pointer_enter: Signal(PointerEnterEvent),
     pointer_leave: Signal(PointerLeaveEvent),
 
+    // Touch signals
+    touch_down: Signal(TouchDownEvent),
+    touch_up: Signal(TouchUpEvent),
+    touch_motion: Signal(TouchMotionEvent),
+    touch_cancel: Signal(TouchCancelEvent),
+
     // Frame/render signals
     frame: Signal(FrameEvent),
 
@@ -165,6 +188,10 @@ pub const Manager = struct {
             .pointer_axis = Signal(PointerAxisEvent).init(allocator),
             .pointer_enter = Signal(PointerEnterEvent).init(allocator),
             .pointer_leave = Signal(PointerLeaveEvent).init(allocator),
+            .touch_down = Signal(TouchDownEvent).init(allocator),
+            .touch_up = Signal(TouchUpEvent).init(allocator),
+            .touch_motion = Signal(TouchMotionEvent).init(allocator),
+            .touch_cancel = Signal(TouchCancelEvent).init(allocator),
             .frame = Signal(FrameEvent).init(allocator),
             .output_configure = Signal(OutputConfigureEvent).init(allocator),
             .output_close = Signal(OutputCloseEvent).init(allocator),
@@ -182,6 +209,10 @@ pub const Manager = struct {
         self.pointer_axis.deinit();
         self.pointer_enter.deinit();
         self.pointer_leave.deinit();
+        self.touch_down.deinit();
+        self.touch_up.deinit();
+        self.touch_motion.deinit();
+        self.touch_cancel.deinit();
         self.frame.deinit();
         self.output_configure.deinit();
         self.output_close.deinit();
@@ -199,6 +230,10 @@ pub const Manager = struct {
         self.pointer_axis.clear();
         self.pointer_enter.clear();
         self.pointer_leave.clear();
+        self.touch_down.clear();
+        self.touch_up.clear();
+        self.touch_motion.clear();
+        self.touch_cancel.clear();
         self.frame.clear();
         self.output_configure.clear();
         self.output_close.clear();
@@ -467,4 +502,128 @@ test "BackendReadyEvent - signal emission" {
     manager.backend_ready.emit(.{ .backend_type = .wayland });
 
     try testing.expectEqual(BackendType.wayland, State.backend_type);
+}
+
+test "TouchDownEvent - signal emission" {
+    var manager = Manager.init(testing.allocator);
+    defer manager.deinit();
+
+    const State = struct {
+        var touch_id: i32 = -1;
+        var x: f64 = 0;
+        var y: f64 = 0;
+
+        fn callback(event: TouchDownEvent, userdata: ?*anyopaque) void {
+            _ = userdata;
+            touch_id = event.touch_id;
+            x = event.x;
+            y = event.y;
+        }
+    };
+    State.touch_id = -1;
+    State.x = 0;
+    State.y = 0;
+
+    var listener = try manager.touch_down.listen(State.callback, null);
+    defer listener.deinit();
+
+    manager.touch_down.emit(.{
+        .time_msec = 1000,
+        .touch_id = 5,
+        .x = 100.0,
+        .y = 200.0,
+    });
+
+    try testing.expectEqual(@as(i32, 5), State.touch_id);
+    try testing.expectEqual(@as(f64, 100.0), State.x);
+    try testing.expectEqual(@as(f64, 200.0), State.y);
+}
+
+test "TouchUpEvent - signal emission" {
+    var manager = Manager.init(testing.allocator);
+    defer manager.deinit();
+
+    const State = struct {
+        var touch_id: i32 = -1;
+
+        fn callback(event: TouchUpEvent, userdata: ?*anyopaque) void {
+            _ = userdata;
+            touch_id = event.touch_id;
+        }
+    };
+    State.touch_id = -1;
+
+    var listener = try manager.touch_up.listen(State.callback, null);
+    defer listener.deinit();
+
+    manager.touch_up.emit(.{
+        .time_msec = 2000,
+        .touch_id = 7,
+    });
+
+    try testing.expectEqual(@as(i32, 7), State.touch_id);
+}
+
+test "TouchMotionEvent - signal emission" {
+    var manager = Manager.init(testing.allocator);
+    defer manager.deinit();
+
+    const State = struct {
+        var touch_id: i32 = -1;
+        var x: f64 = 0;
+        var y: f64 = 0;
+
+        fn callback(event: TouchMotionEvent, userdata: ?*anyopaque) void {
+            _ = userdata;
+            touch_id = event.touch_id;
+            x = event.x;
+            y = event.y;
+        }
+    };
+    State.touch_id = -1;
+    State.x = 0;
+    State.y = 0;
+
+    var listener = try manager.touch_motion.listen(State.callback, null);
+    defer listener.deinit();
+
+    manager.touch_motion.emit(.{
+        .time_msec = 3000,
+        .touch_id = 3,
+        .x = 150.5,
+        .y = 250.5,
+    });
+
+    try testing.expectEqual(@as(i32, 3), State.touch_id);
+    try testing.expectEqual(@as(f64, 150.5), State.x);
+    try testing.expectEqual(@as(f64, 250.5), State.y);
+}
+
+test "TouchCancelEvent - signal emission" {
+    var manager = Manager.init(testing.allocator);
+    defer manager.deinit();
+
+    const State = struct {
+        var touch_id: i32 = -1;
+        var count: i32 = 0;
+
+        fn callback(event: TouchCancelEvent, userdata: ?*anyopaque) void {
+            _ = userdata;
+            touch_id = event.touch_id;
+            count += 1;
+        }
+    };
+    State.touch_id = -1;
+    State.count = 0;
+
+    var listener = try manager.touch_cancel.listen(State.callback, null);
+    defer listener.deinit();
+
+    manager.touch_cancel.emit(.{
+        .time_msec = 4000,
+        .touch_id = 9,
+    });
+
+    try testing.expectEqual(@as(i32, 9), State.touch_id);
+    try testing.expectEqual(@as(i32, 1), State.count);
 }

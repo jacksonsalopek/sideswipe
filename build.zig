@@ -12,12 +12,12 @@ fn generatePnpIds(b: *std.Build, target: std.Build.ResolvedTarget, core_cli_mod:
             },
         }),
     });
-    
+
     // Run it with arguments
     const gen_pnp = b.addRunArtifact(gen_exe);
     gen_pnp.addArg("/usr/share/hwdata/pnp.ids");
     gen_pnp.addArg("src/core/display/edid/pnp_ids.zig");
-    
+
     return &gen_pnp.step;
 }
 
@@ -33,12 +33,12 @@ fn generateVicTable(b: *std.Build, target: std.Build.ResolvedTarget, core_cli_mo
             },
         }),
     });
-    
+
     // Run it with arguments
     const gen_vic = b.addRunArtifact(gen_exe);
     gen_vic.addArg("vendor/libdisplay-info/cta-vic-table.c");
     gen_vic.addArg("src/core/display/cta/vic_table.zig");
-    
+
     return &gen_vic.step;
 }
 
@@ -196,6 +196,17 @@ pub fn build(b: *std.Build) void {
     core_mod.linkSystemLibrary("pixman-1", .{});
     core_math_mod.linkSystemLibrary("pixman-1", .{});
 
+    // IPC module for inter-process communication (must be defined before backend to break circular dependency)
+    const ipc_mod = b.addModule("ipc", .{
+        .root_source_file = b.path("src/ipc/root.zig"),
+        .target = target,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "core", .module = core_mod },
+            .{ .name = "core.os", .module = core_os_mod },
+        },
+    });
+
     // Backend module
     const backend_mod = b.addModule("backend", .{
         .root_source_file = b.path("src/backend/root.zig"),
@@ -206,6 +217,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "core", .module = core_mod },
             .{ .name = "core.string", .module = core_string_mod },
             .{ .name = "core.math", .module = core_math_mod },
+            .{ .name = "ipc", .module = ipc_mod },
         },
     });
     backend_mod.addIncludePath(b.path("protocols"));
@@ -226,19 +238,6 @@ pub fn build(b: *std.Build) void {
 
     // Note: backend.drm uses relative imports and is tested via backend module tests
     // Cannot be tested standalone due to module path restrictions
-
-    // IPC module for inter-process communication
-    const ipc_mod = b.addModule("ipc", .{
-        .root_source_file = b.path("src/ipc/root.zig"),
-        .target = target,
-        .link_libc = true,
-        .imports = &.{
-            .{ .name = "core", .module = core_mod },
-            .{ .name = "backend", .module = backend_mod },
-        },
-    });
-    ipc_mod.addImport("core.math", core_math_mod);
-    ipc_mod.addImport("core.os", core_os_mod);
 
     // Wayland server module
     const wayland_mod = b.addModule("wayland", .{
@@ -353,7 +352,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .link_libc = true,
     });
-    
+
     const compare_c_exe = b.addExecutable(.{
         .name = "compare_c",
         .root_module = b.createModule(.{
@@ -529,6 +528,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "core.string", .module = core_string_mod },
                 .{ .name = "core.math", .module = core_math_mod },
                 .{ .name = "core.display", .module = core_display_mod },
+                .{ .name = "ipc", .module = ipc_mod },
             },
         }),
     });
@@ -563,8 +563,6 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "core", .module = core_mod },
-                .{ .name = "backend", .module = backend_mod },
-                .{ .name = "core.math", .module = core_math_mod },
                 .{ .name = "core.os", .module = core_os_mod },
             },
         }),

@@ -8,14 +8,10 @@ const allocator = @import("allocator.zig");
 const session = @import("session.zig");
 const misc = @import("misc.zig");
 const renderer = @import("renderer.zig");
+const gbm = @import("gbm.zig");
 
-/// Backend type enumeration
-pub const Type = enum(u32) {
-    wayland = 0,
-    drm = 1,
-    headless = 2,
-    null = 3,
-};
+/// Backend type enumeration (re-exported from core for convenience)
+pub const Type = core.backend.Type;
 
 /// Backend request mode
 pub const RequestMode = enum(u32) {
@@ -275,7 +271,16 @@ pub const Coordinator = struct {
                         continue;
                     };
 
-                    // TODO: Create GBM allocator with reopened_fd
+                    // Create GBM allocator with reopened FD
+                    const gbm_alloc = gbm.Allocator.create(self.allocator, reopened_fd) catch |err| {
+                        self.log(.err, "Failed to create GBM allocator");
+                        std.log.err("GBM allocator creation failed: {}", .{err});
+                        // Continue without allocator - renderer is still available
+                        break;
+                    };
+                    self.primary_allocator = gbm_alloc.asInterface();
+                    self.log(.debug, "GBM allocator initialized");
+
                     break;
                 }
             }
