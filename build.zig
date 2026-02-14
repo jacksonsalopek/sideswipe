@@ -51,13 +51,22 @@ fn setupWaylandProtocols(b: *std.Build) *std.Build.Step {
     });
 
     // Generate xdg-shell protocol (server-side)
-    const xdg_shell_header = b.addSystemCommand(&.{
+    const xdg_shell_server_header = b.addSystemCommand(&.{
         "wayland-scanner",
         "server-header",
         "/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml",
         "protocols/xdg-shell-protocol.h",
     });
-    xdg_shell_header.step.dependOn(&mkdir_protocols.step);
+    xdg_shell_server_header.step.dependOn(&mkdir_protocols.step);
+
+    // Generate xdg-shell protocol (client-side)
+    const xdg_shell_client_header = b.addSystemCommand(&.{
+        "wayland-scanner",
+        "client-header",
+        "/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml",
+        "protocols/xdg-shell-client-protocol.h",
+    });
+    xdg_shell_client_header.step.dependOn(&mkdir_protocols.step);
 
     const xdg_shell_code = b.addSystemCommand(&.{
         "wayland-scanner",
@@ -86,7 +95,8 @@ fn setupWaylandProtocols(b: *std.Build) *std.Build.Step {
 
     // Create a step that depends on all protocol generation
     const protocols_step = b.step("_protocols_internal", "Internal step for all protocol generation");
-    protocols_step.dependOn(&xdg_shell_header.step);
+    protocols_step.dependOn(&xdg_shell_server_header.step);
+    protocols_step.dependOn(&xdg_shell_client_header.step);
     protocols_step.dependOn(&xdg_shell_code.step);
     protocols_step.dependOn(&dmabuf_header.step);
     protocols_step.dependOn(&dmabuf_code.step);
@@ -523,6 +533,7 @@ pub fn build(b: *std.Build) void {
     backend_tests.addIncludePath(b.path("protocols"));
     backend_tests.addObject(xdg_shell_c);
     backend_tests.addObject(dmabuf_c);
+    backend_tests.step.dependOn(generate_protocols);
     backend_tests.linkSystemLibrary("libdrm");
     backend_tests.linkSystemLibrary("libinput");
     backend_tests.linkSystemLibrary("pixman-1");
@@ -572,6 +583,9 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    wayland_tests.addIncludePath(b.path("protocols"));
+    wayland_tests.addObject(xdg_shell_c);
+    wayland_tests.step.dependOn(generate_protocols);
     wayland_tests.linkSystemLibrary("wayland-server");
     wayland_tests.linkLibC();
     const run_wayland_tests = b.addRunArtifact(wayland_tests);
@@ -594,6 +608,7 @@ pub fn build(b: *std.Build) void {
     });
     compositor_tests.addIncludePath(b.path("protocols"));
     compositor_tests.addObject(xdg_shell_c);
+    compositor_tests.step.dependOn(generate_protocols);
     compositor_tests.linkSystemLibrary("wayland-server");
     compositor_tests.linkSystemLibrary("libdrm");
     compositor_tests.linkSystemLibrary("libinput");

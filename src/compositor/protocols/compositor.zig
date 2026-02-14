@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const wayland = @import("wayland");
-const c = wayland.c.c;
+const c = wayland.c;
 
 const Compositor = @import("../compositor.zig").Compositor;
 const Surface = @import("../surface.zig").Surface;

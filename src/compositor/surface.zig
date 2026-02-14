@@ -4,7 +4,7 @@
 const std = @import("std");
 const core = @import("core");
 const math = @import("core.math");
-const c = @import("wayland").c.c;
+const c = @import("wayland").c;
 
 const Compositor = @import("compositor.zig").Compositor;
 
@@ -305,7 +305,7 @@ test "Surface - attach and commit" {
 
     // Create a dummy buffer resource (in real usage this would be a wl_resource from client)
     var dummy_resource: u32 = 0xDEADBEEF;
-    const dummy_buffer: *c.wl_resource = @ptrCast(&dummy_resource);
+    const dummy_buffer: *c.wl_resource = @ptrCast(@alignCast(&dummy_resource));
 
     surface.attach(dummy_buffer, 0, 0);
     try testing.expectEqual(dummy_buffer, surface.pending.buffer.buffer);

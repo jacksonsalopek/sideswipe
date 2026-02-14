@@ -1,7 +1,7 @@
 //! Wayland server protocol implementation
 //! Provides Zig wrappers around libwayland-server for compositor development
 
-pub const c = @import("c.zig");
+pub const c = @import("c.zig").c;
 pub const client = @import("client.zig");
 pub const display = @import("display.zig");
 pub const event_loop = @import("event_loop.zig");

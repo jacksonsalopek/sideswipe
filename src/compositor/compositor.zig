@@ -82,7 +82,7 @@ pub const Compositor = struct {
 
     /// Gets the next serial number from the display
     pub fn nextSerial(self: *Self) u32 {
-        const c = @import("wayland").c.c;
+        const c = @import("wayland").c;
         return c.wl_display_next_serial(self.server.getDisplay());
     }
 };
