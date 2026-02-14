@@ -305,8 +305,7 @@ pub fn build(b: *std.Build) void {
 
     // Ensure generated files are created before build
     exe.step.dependOn(generate_pnp);
-    // VIC table is now committed, no need to generate
-    // exe.step.dependOn(generate_vic);
+    exe.step.dependOn(generate_vic);
 
     b.installArtifact(exe);
 
@@ -484,10 +483,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
     core_display_tests.linkLibC();
-    // Display tests depend on generated PNP IDs (VIC table now committed)
+    // Display tests depend on generated PNP IDs and VIC table
     core_display_tests.step.dependOn(generate_pnp);
-    // VIC table is now committed, no need to generate
-    // core_display_tests.step.dependOn(generate_vic);
+    core_display_tests.step.dependOn(generate_vic);
     const run_core_display_tests = b.addRunArtifact(core_display_tests);
     test_step.dependOn(&run_core_display_tests.step);
 
