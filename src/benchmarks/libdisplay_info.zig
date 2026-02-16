@@ -4,8 +4,8 @@
 const std = @import("std");
 const root = @import("root.zig");
 const core = @import("core");
-const display = core.display;
-const cli = core.cli;
+const display = @import("core.display");
+const cli = @import("core.cli");
 const testing = core.testing;
 
 // C library bindings for libdisplay-info
