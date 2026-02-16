@@ -181,7 +181,8 @@ pub fn main() !void {
     try compositor.protocols.output.register(comp);
     try compositor.protocols.seat.register(comp);
     try compositor.protocols.data_device.register(comp);
-    logger.info("Registered: wl_compositor, xdg_wm_base, wl_output, wl_seat, wl_data_device_manager", .{});
+    try compositor.protocols.linux_dmabuf.register(comp);
+    logger.info("Registered: wl_compositor, xdg_wm_base, wl_output, wl_seat, wl_data_device_manager, zwp_linux_dmabuf_v1", .{});
 
     // Initialize backend if requested
     const enable_backend = parser.getBool("backend") orelse false;

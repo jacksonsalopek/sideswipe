@@ -12,6 +12,7 @@ pub const protocols = struct {
     pub const output = @import("protocols/output.zig");
     pub const seat = @import("protocols/seat.zig");
     pub const data_device = @import("protocols/data_device.zig");
+    pub const linux_dmabuf = @import("protocols/linux_dmabuf.zig");
 };
 
 // Convenience re-exports

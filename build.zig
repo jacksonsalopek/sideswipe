@@ -76,14 +76,23 @@ fn setupWaylandProtocols(b: *std.Build) *std.Build.Step {
     });
     xdg_shell_code.step.dependOn(&mkdir_protocols.step);
 
-    // Generate linux-dmabuf protocol
-    const dmabuf_header = b.addSystemCommand(&.{
+    // Generate linux-dmabuf protocol (server-side)
+    const dmabuf_server_header = b.addSystemCommand(&.{
+        "wayland-scanner",
+        "server-header",
+        "/usr/share/wayland-protocols/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml",
+        "protocols/linux-dmabuf-unstable-v1-protocol.h",
+    });
+    dmabuf_server_header.step.dependOn(&mkdir_protocols.step);
+
+    // Generate linux-dmabuf protocol (client-side)
+    const dmabuf_client_header = b.addSystemCommand(&.{
         "wayland-scanner",
         "client-header",
         "/usr/share/wayland-protocols/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml",
         "protocols/linux-dmabuf-unstable-v1-client-protocol.h",
     });
-    dmabuf_header.step.dependOn(&mkdir_protocols.step);
+    dmabuf_client_header.step.dependOn(&mkdir_protocols.step);
 
     const dmabuf_code = b.addSystemCommand(&.{
         "wayland-scanner",
@@ -98,7 +107,8 @@ fn setupWaylandProtocols(b: *std.Build) *std.Build.Step {
     protocols_step.dependOn(&xdg_shell_server_header.step);
     protocols_step.dependOn(&xdg_shell_client_header.step);
     protocols_step.dependOn(&xdg_shell_code.step);
-    protocols_step.dependOn(&dmabuf_header.step);
+    protocols_step.dependOn(&dmabuf_server_header.step);
+    protocols_step.dependOn(&dmabuf_client_header.step);
     protocols_step.dependOn(&dmabuf_code.step);
 
     return protocols_step;
