@@ -4,6 +4,7 @@
 const std = @import("std");
 const posix = std.posix;
 const core = @import("core");
+const cli = @import("core.cli");
 const input = @import("input.zig");
 const ipc = @import("ipc");
 const Signal = core.events.Signal;
@@ -28,6 +29,7 @@ pub const libinput_tablet_tool = c.struct_libinput_tablet_tool;
 
 // Import input event structures from IPC module (no duplication)
 pub const KeyboardKeyEvent = ipc.signals.KeyboardKeyEvent;
+pub const KeyboardModifiersEvent = ipc.signals.KeyboardModifiersEvent;
 pub const PointerMotionEvent = ipc.signals.PointerMotionEvent;
 pub const PointerMotionAbsoluteEvent = ipc.signals.PointerMotionAbsoluteEvent;
 pub const PointerButtonEvent = ipc.signals.PointerButtonEvent;
@@ -278,6 +280,7 @@ pub const Type = struct {
     signal_ready: Signal(void),
     signal_device_change: Signal(ChangeEvent),
     signal_keyboard_key: Signal(KeyboardKeyEvent),
+    signal_keyboard_modifiers: Signal(KeyboardModifiersEvent),
     signal_pointer_motion: Signal(PointerMotionEvent),
     signal_pointer_motion_absolute: Signal(PointerMotionAbsoluteEvent),
     signal_pointer_button: Signal(PointerButtonEvent),
@@ -301,6 +304,7 @@ pub const Type = struct {
             .signal_ready = Signal(void).init(allocator),
             .signal_device_change = Signal(ChangeEvent).init(allocator),
             .signal_keyboard_key = Signal(KeyboardKeyEvent).init(allocator),
+            .signal_keyboard_modifiers = Signal(KeyboardModifiersEvent).init(allocator),
             .signal_pointer_motion = Signal(PointerMotionEvent).init(allocator),
             .signal_pointer_motion_absolute = Signal(PointerMotionAbsoluteEvent).init(allocator),
             .signal_pointer_button = Signal(PointerButtonEvent).init(allocator),
@@ -319,6 +323,7 @@ pub const Type = struct {
         self.signal_ready.deinit();
         self.signal_device_change.deinit();
         self.signal_keyboard_key.deinit();
+        self.signal_keyboard_modifiers.deinit();
         self.signal_pointer_motion.deinit();
         self.signal_pointer_motion_absolute.deinit();
         self.signal_pointer_button.deinit();
@@ -466,7 +471,7 @@ pub const Type = struct {
         self.enumerateExistingDrmDevices();
 
         // Emit ready signal to backend
-        std.log.debug("Session ready - emitting signal", .{});
+        cli.log.debug("Session ready - emitting signal", .{});
         self.signal_ready.emit({});
     }
 
@@ -537,7 +542,7 @@ pub const Type = struct {
     }
 
     fn handleUdevChange(self: *Self, devnode: []const u8) void {
-        core.cli.log.debug("Device changed: {s}", .{devnode});
+        cli.log.debug("Device changed: {s}", .{devnode});
         const change_event = ChangeEvent{
             .event_type = .hotplug,
             .hotplug = .{
@@ -582,31 +587,31 @@ pub const Type = struct {
             c.LIBINPUT_EVENT_TOUCH_FRAME => {
                 // Touch frame - marks end of logical touch event group
                 // Currently no signal for this, could be added if needed
-                core.cli.log.debug("Touch frame event", .{});
+                cli.log.debug("Touch frame event", .{});
             },
             c.LIBINPUT_EVENT_SWITCH_TOGGLE => {
                 // Switch event (e.g., lid switch)
-                core.cli.log.debug("Switch toggle event", .{});
+                cli.log.debug("Switch toggle event", .{});
                 // TODO: Implement switch event signal if needed
             },
             c.LIBINPUT_EVENT_TABLET_TOOL_AXIS, c.LIBINPUT_EVENT_TABLET_TOOL_PROXIMITY, c.LIBINPUT_EVENT_TABLET_TOOL_TIP, c.LIBINPUT_EVENT_TABLET_TOOL_BUTTON => {
                 // Tablet tool events
-                core.cli.log.debug("Tablet tool event: type={d}", .{event_type});
+                cli.log.debug("Tablet tool event: type={d}", .{event_type});
                 // TODO: Implement tablet event signals if needed
             },
             c.LIBINPUT_EVENT_TABLET_PAD_BUTTON, c.LIBINPUT_EVENT_TABLET_PAD_RING, c.LIBINPUT_EVENT_TABLET_PAD_STRIP => {
                 // Tablet pad events
-                core.cli.log.debug("Tablet pad event: type={d}", .{event_type});
+                cli.log.debug("Tablet pad event: type={d}", .{event_type});
                 // TODO: Implement tablet pad event signals if needed
             },
             c.LIBINPUT_EVENT_GESTURE_SWIPE_BEGIN, c.LIBINPUT_EVENT_GESTURE_SWIPE_UPDATE, c.LIBINPUT_EVENT_GESTURE_SWIPE_END, c.LIBINPUT_EVENT_GESTURE_PINCH_BEGIN, c.LIBINPUT_EVENT_GESTURE_PINCH_UPDATE, c.LIBINPUT_EVENT_GESTURE_PINCH_END, c.LIBINPUT_EVENT_GESTURE_HOLD_BEGIN, c.LIBINPUT_EVENT_GESTURE_HOLD_END => {
                 // Gesture events
-                core.cli.log.debug("Gesture event: type={d}", .{event_type});
+                cli.log.debug("Gesture event: type={d}", .{event_type});
                 // TODO: Implement gesture event signals if needed
             },
             else => {
                 // Unknown event type
-                core.cli.log.debug("Unhandled libinput event type: {d}", .{event_type});
+                cli.log.debug("Unhandled libinput event type: {d}", .{event_type});
             },
         }
     }
@@ -647,7 +652,7 @@ pub const Type = struct {
         else
             .released;
 
-        core.cli.log.debug("Keyboard event: key={d} state={s} time={d}", .{ key, @tagName(state), time_msec });
+        cli.log.debug("Keyboard event: key={d} state={s} time={d}", .{ key, @tagName(state), time_msec });
 
         self.signal_keyboard_key.emit(.{
             .time_msec = time_msec,
@@ -663,7 +668,7 @@ pub const Type = struct {
         const dx = c.libinput_event_pointer_get_dx(ptr_event);
         const dy = c.libinput_event_pointer_get_dy(ptr_event);
 
-        core.cli.log.debug("Pointer motion: dx={d:.2} dy={d:.2}", .{ dx, dy });
+        cli.log.debug("Pointer motion: dx={d:.2} dy={d:.2}", .{ dx, dy });
 
         self.signal_pointer_motion.emit(.{
             .time_msec = time_msec,
@@ -679,7 +684,7 @@ pub const Type = struct {
         const x = c.libinput_event_pointer_get_absolute_x(ptr_event);
         const y = c.libinput_event_pointer_get_absolute_y(ptr_event);
 
-        core.cli.log.debug("Pointer motion absolute: x={d:.2} y={d:.2}", .{ x, y });
+        cli.log.debug("Pointer motion absolute: x={d:.2} y={d:.2}", .{ x, y });
 
         self.signal_pointer_motion_absolute.emit(.{
             .time_msec = time_msec,
@@ -700,7 +705,7 @@ pub const Type = struct {
         else
             .released;
 
-        core.cli.log.debug("Pointer button: button={d} state={s}", .{ button, @tagName(state) });
+        cli.log.debug("Pointer button: button={d} state={s}", .{ button, @tagName(state) });
 
         self.signal_pointer_button.emit(.{
             .time_msec = time_msec,
@@ -736,7 +741,7 @@ pub const Type = struct {
             else => .wheel,
         };
 
-        core.cli.log.debug("Pointer axis {s}: delta={d:.2} source={s}", .{ @tagName(orientation), delta, @tagName(source) });
+        cli.log.debug("Pointer axis {s}: delta={d:.2} source={s}", .{ @tagName(orientation), delta, @tagName(source) });
 
         self.signal_pointer_axis.emit(.{
             .time_msec = time_msec,
@@ -755,7 +760,7 @@ pub const Type = struct {
         const x = c.libinput_event_touch_get_x(touch_event);
         const y = c.libinput_event_touch_get_y(touch_event);
 
-        core.cli.log.debug("Touch down: slot={d} x={d:.2} y={d:.2}", .{ slot, x, y });
+        cli.log.debug("Touch down: slot={d} x={d:.2} y={d:.2}", .{ slot, x, y });
 
         self.signal_touch_down.emit(.{
             .time_msec = time_msec,
@@ -771,7 +776,7 @@ pub const Type = struct {
         const time_msec = c.libinput_event_touch_get_time(touch_event);
         const slot = c.libinput_event_touch_get_seat_slot(touch_event);
 
-        core.cli.log.debug("Touch up: slot={d}", .{slot});
+        cli.log.debug("Touch up: slot={d}", .{slot});
 
         self.signal_touch_up.emit(.{
             .time_msec = time_msec,
@@ -787,7 +792,7 @@ pub const Type = struct {
         const x = c.libinput_event_touch_get_x(touch_event);
         const y = c.libinput_event_touch_get_y(touch_event);
 
-        core.cli.log.debug("Touch motion: slot={d} x={d:.2} y={d:.2}", .{ slot, x, y });
+        cli.log.debug("Touch motion: slot={d} x={d:.2} y={d:.2}", .{ slot, x, y });
 
         self.signal_touch_motion.emit(.{
             .time_msec = time_msec,
@@ -803,7 +808,7 @@ pub const Type = struct {
         const time_msec = c.libinput_event_touch_get_time(touch_event);
         const slot = c.libinput_event_touch_get_seat_slot(touch_event);
 
-        core.cli.log.debug("Touch cancel: slot={d}", .{slot});
+        cli.log.debug("Touch cancel: slot={d}", .{slot});
 
         self.signal_touch_cancel.emit(.{
             .time_msec = time_msec,

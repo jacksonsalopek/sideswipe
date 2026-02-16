@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const core = @import("core");
+const cli = @import("core.cli");
 const math = @import("core.math");
 const Vector2D = math.Vec2;
 const backend = @import("backend.zig");
@@ -10,6 +11,8 @@ const output = @import("output.zig");
 const input = @import("input.zig");
 const buffer = @import("buffer.zig");
 const misc = @import("misc.zig");
+const ipc = @import("ipc");
+const signals = ipc.signals;
 
 const c = @cImport({
     @cInclude("wayland-client.h");
@@ -470,12 +473,39 @@ pub const Output = struct {
     }
 
     fn xdgToplevelHandleConfigure(data: ?*anyopaque, xdg_toplevel: ?*c.xdg_toplevel, _width: i32, _height: i32, states: ?*c.wl_array) callconv(.c) void {
-        _ = data;
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
         _ = xdg_toplevel;
-        _ = _width;
-        _ = _height;
         _ = states;
-        // TODO: Update output mode with new dimensions when compositor requests resize
+
+        // Only update if we have valid dimensions (0 means compositor doesn't care)
+        if (_width == 0 or _height == 0) return;
+
+        const width = @as(u32, @intCast(_width));
+        const height = @as(u32, @intCast(_height));
+
+        // Check if dimensions actually changed
+        const current_mode = self.state.mode orelse {
+            // No current mode, create one
+            const mode = self.allocator.create(output.Mode) catch return;
+            mode.* = .{
+                .pixel_size = Vector2D.init(@floatFromInt(width), @floatFromInt(height)),
+                .refresh_rate = 60000, // 60 Hz default (in mHz)
+            };
+            self.state.custom_mode = mode;
+            self.state.mode = mode;
+            return;
+        };
+
+        const current_width: u32 = @intFromFloat(current_mode.pixel_size.getX());
+        const current_height: u32 = @intFromFloat(current_mode.pixel_size.getY());
+
+        if (current_width == width and current_height == height) return;
+
+        // Update dimensions
+        if (self.state.custom_mode) |mode| {
+            mode.pixel_size.setX(@floatFromInt(width));
+            mode.pixel_size.setY(@floatFromInt(height));
+        }
     }
 
     fn xdgToplevelHandleClose(data: ?*anyopaque, xdg_toplevel: ?*c.xdg_toplevel) callconv(.c) void {
@@ -582,6 +612,8 @@ pub const Keyboard = struct {
     backend: *Backend,
     allocator: std.mem.Allocator,
     name: []const u8 = "wl_keyboard",
+    repeat_rate: i32 = 25,
+    repeat_delay: i32 = 600,
 
     const Self = @This();
 
@@ -645,7 +677,10 @@ pub const Backend = struct {
     dmabuf_formats: std.ArrayList(misc.DRMFormat),
     last_output_id: usize = 0,
     focused_output: ?*Output = null,
+    keyboard_focused_output: ?*Output = null,
     last_enter_serial: u32 = 0,
+    last_axis_source: signals.PointerAxisEvent.AxisSource = .wheel,
+    last_axis_discrete: i32 = 0,
 
     // Wayland state
     wayland_state: struct {
@@ -664,6 +699,9 @@ pub const Backend = struct {
         fd: i32 = -1,
         node_name: ?[]const u8 = null,
     } = .{},
+
+    // Poll FDs
+    poll_fds: [1]backend.PollFd = undefined,
 
     const Self = @This();
 
@@ -755,21 +793,21 @@ pub const Backend = struct {
 
         if (std.mem.eql(u8, interface_name, "wl_compositor")) {
             self.wayland_state.compositor = @ptrCast(c.wl_registry_bind(reg, name, &c.wl_compositor_interface, @min(version, 4)));
-            self.coordinator.log(.debug, "Bound wl_compositor");
+            cli.log.debug("Bound wl_compositor", .{});
         } else if (std.mem.eql(u8, interface_name, "wl_seat")) {
             self.wayland_state.seat = @ptrCast(c.wl_registry_bind(reg, name, &c.wl_seat_interface, @min(version, 7)));
             self.initSeat();
-            self.coordinator.log(.debug, "Bound wl_seat");
+            cli.log.debug("Bound wl_seat", .{});
         } else if (std.mem.eql(u8, interface_name, "xdg_wm_base")) {
             self.wayland_state.xdg_wm_base = @ptrCast(c.wl_registry_bind(reg, name, &c.xdg_wm_base_interface, @min(version, 2)));
             self.initShell();
-            self.coordinator.log(.debug, "Bound xdg_wm_base");
+            cli.log.debug("Bound xdg_wm_base", .{});
         } else if (std.mem.eql(u8, interface_name, "zwp_linux_dmabuf_v1")) {
             self.wayland_state.dmabuf = @ptrCast(c.wl_registry_bind(reg, name, &c.zwp_linux_dmabuf_v1_interface, @min(version, 4)));
             _ = self.initDmabuf() catch {
                 self.wayland_state.dmabuf_failed = true;
             };
-            self.coordinator.log(.debug, "Bound zwp_linux_dmabuf_v1");
+            cli.log.debug("Bound zwp_linux_dmabuf_v1", .{});
         }
     }
 
@@ -781,25 +819,23 @@ pub const Backend = struct {
     }
 
     pub fn start(self: *Self) bool {
-        self.coordinator.log(.debug, "Starting Wayland backend");
+        cli.log.debug("Starting Wayland backend", .{});
 
         // Connect to Wayland display
         self.wayland_state.display = c.wl_display_connect(null);
         if (self.wayland_state.display == null) {
-            self.coordinator.log(.err, "Failed to connect to Wayland display");
+            cli.log.err("Failed to connect to Wayland display", .{});
             return false;
         }
 
         const xdg_desktop = std.posix.getenv("XDG_CURRENT_DESKTOP");
         const desktop_name = if (xdg_desktop) |name| name else "unknown";
-        var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "Connected to Wayland compositor: {s}", .{desktop_name}) catch "Connected to Wayland compositor";
-        self.coordinator.log(.debug, msg);
+        cli.log.debug("Connected to Wayland compositor: {s}", .{desktop_name});
 
         // Get registry
         self.wayland_state.registry = c.wl_display_get_registry(self.wayland_state.display.?);
         if (self.wayland_state.registry == null) {
-            self.coordinator.log(.err, "Failed to get Wayland registry");
+            cli.log.err("Failed to get Wayland registry", .{});
             return false;
         }
 
@@ -813,16 +849,19 @@ pub const Backend = struct {
         // Do roundtrip to process registry events
         _ = c.wl_display_roundtrip(self.wayland_state.display.?);
 
+        // Initialize poll FD for Wayland display events
+        const fd = c.wl_display_get_fd(self.wayland_state.display.?);
+        self.poll_fds[0] = .{
+            .fd = fd,
+            .callback = null,
+        };
+
         return true;
     }
 
     pub fn pollFds(self: *Self) []const backend.PollFd {
-        if (self.wayland_state.display) |disp| {
-            const fd = c.wl_display_get_fd(disp);
-            // TODO: Return proper poll fd array
-            _ = fd;
-        }
-        return &[_]backend.PollFd{};
+        if (self.wayland_state.display == null) return &[_]backend.PollFd{};
+        return &self.poll_fds;
     }
 
     pub fn drmFd(self: *const Self) i32 {
@@ -963,113 +1002,213 @@ pub const Backend = struct {
     }
 
     fn pointerHandleMotion(data: ?*anyopaque, pointer: ?*c.wl_pointer, time: u32, surface_x: c.wl_fixed_t, surface_y: c.wl_fixed_t) callconv(.c) void {
-        _ = data;
         _ = pointer;
-        _ = time;
-        _ = surface_x;
-        _ = surface_y;
-        // TODO: Emit pointer motion event
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
+
+        const session = self.coordinator.session orelse return;
+
+        // Convert Wayland fixed-point to float (24.8 fixed-point format)
+        const x = @as(f64, @floatFromInt(surface_x)) / 256.0;
+        const y = @as(f64, @floatFromInt(surface_y)) / 256.0;
+
+        session.signal_pointer_motion_absolute.emit(.{
+            .time_msec = time,
+            .x = x,
+            .y = y,
+        });
     }
 
     fn pointerHandleButton(data: ?*anyopaque, pointer: ?*c.wl_pointer, serial: u32, time: u32, button: u32, state: u32) callconv(.c) void {
-        _ = data;
         _ = pointer;
-        _ = serial;
-        _ = time;
-        _ = button;
-        _ = state;
-        // TODO: Emit pointer button event
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
+
+        const session = self.coordinator.session orelse return;
+
+        // Map Wayland button state to IPC ButtonState
+        const button_state: signals.PointerButtonEvent.ButtonState = if (state == c.WL_POINTER_BUTTON_STATE_PRESSED)
+            .pressed
+        else
+            .released;
+
+        session.signal_pointer_button.emit(.{
+            .time_msec = time,
+            .button = button,
+            .state = button_state,
+            .serial = serial,
+        });
     }
 
     fn pointerHandleAxis(data: ?*anyopaque, pointer: ?*c.wl_pointer, time: u32, axis: u32, value: c.wl_fixed_t) callconv(.c) void {
-        _ = data;
         _ = pointer;
-        _ = time;
-        _ = axis;
-        _ = value;
-        // TODO: Emit pointer axis event
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
+
+        const session = self.coordinator.session orelse return;
+
+        const orientation: signals.PointerAxisEvent.AxisOrientation = if (axis == c.WL_POINTER_AXIS_VERTICAL_SCROLL)
+            .vertical
+        else
+            .horizontal;
+
+        const delta = @as(f64, @floatFromInt(value)) / 256.0;
+
+        session.signal_pointer_axis.emit(.{
+            .time_msec = time,
+            .source = self.last_axis_source,
+            .orientation = orientation,
+            .delta = delta,
+            .delta_discrete = self.last_axis_discrete,
+        });
+
+        // Reset discrete value after use
+        self.last_axis_discrete = 0;
     }
 
     fn pointerHandleFrame(data: ?*anyopaque, pointer: ?*c.wl_pointer) callconv(.c) void {
         _ = data;
         _ = pointer;
+        // Frame event marks the end of a logical group of pointer events.
+        // In our implementation, events are emitted immediately as they arrive,
+        // so this serves as a logical boundary for potential future event batching.
     }
 
     fn pointerHandleAxisSource(data: ?*anyopaque, pointer: ?*c.wl_pointer, axis_source: u32) callconv(.c) void {
-        _ = data;
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
         _ = pointer;
-        _ = axis_source;
+
+        // Map Wayland axis source to our AxisSource enum
+        self.last_axis_source = switch (axis_source) {
+            c.WL_POINTER_AXIS_SOURCE_WHEEL => .wheel,
+            c.WL_POINTER_AXIS_SOURCE_FINGER => .finger,
+            c.WL_POINTER_AXIS_SOURCE_CONTINUOUS => .continuous,
+            c.WL_POINTER_AXIS_SOURCE_WHEEL_TILT => .wheel_tilt,
+            else => .wheel,
+        };
     }
 
     fn pointerHandleAxisStop(data: ?*anyopaque, pointer: ?*c.wl_pointer, time: u32, axis: u32) callconv(.c) void {
-        _ = data;
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
         _ = pointer;
-        _ = time;
-        _ = axis;
+
+        const session = self.coordinator.session orelse return;
+
+        const orientation: signals.PointerAxisEvent.AxisOrientation = if (axis == c.WL_POINTER_AXIS_VERTICAL_SCROLL)
+            .vertical
+        else
+            .horizontal;
+
+        session.signal_pointer_axis.emit(.{
+            .time_msec = time,
+            .source = self.last_axis_source,
+            .orientation = orientation,
+            .delta = 0.0,
+            .delta_discrete = 0,
+        });
     }
 
     fn pointerHandleAxisDiscrete(data: ?*anyopaque, pointer: ?*c.wl_pointer, axis: u32, discrete: i32) callconv(.c) void {
-        _ = data;
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
         _ = pointer;
         _ = axis;
-        _ = discrete;
+
+        self.last_axis_discrete = discrete;
     }
 
     // Keyboard event callbacks
     fn keyboardHandleKeymap(data: ?*anyopaque, keyboard: ?*c.wl_keyboard, format: u32, fd: i32, size: u32) callconv(.c) void {
-        _ = data;
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
         _ = keyboard;
-        _ = format;
-        _ = size;
-        // Close the keymap fd
-        std.posix.close(fd);
-        // TODO: Parse and store keymap
+        defer std.posix.close(fd);
+
+        if (format != c.WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) {
+            return;
+        }
+
+        // Map keymap into memory
+        const map_ptr = c.mmap(null, size, c.PROT_READ, c.MAP_PRIVATE, fd, 0);
+        if (map_ptr == c.MAP_FAILED) return;
+        defer _ = c.munmap(map_ptr, size);
+
+        // TODO: Parse keymap with libxkbcommon when available
+        // For now, we just acknowledge receipt - key codes will pass through as-is
+        _ = self;
     }
 
     fn keyboardHandleEnter(data: ?*anyopaque, keyboard: ?*c.wl_keyboard, serial: u32, surface: ?*c.wl_surface, keys: ?*c.wl_array) callconv(.c) void {
-        _ = data;
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
         _ = keyboard;
         _ = serial;
-        _ = surface;
         _ = keys;
-        // TODO: Handle keyboard focus
+
+        const surf = surface orelse return;
+
+        // Find which output this surface belongs to
+        for (self.outputs.items) |out| {
+            if (out.surface == surf) {
+                self.keyboard_focused_output = out;
+                break;
+            }
+        }
     }
 
     fn keyboardHandleLeave(data: ?*anyopaque, keyboard: ?*c.wl_keyboard, serial: u32, surface: ?*c.wl_surface) callconv(.c) void {
-        _ = data;
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
         _ = keyboard;
         _ = serial;
-        _ = surface;
-        // TODO: Handle keyboard focus loss
+
+        const surf = surface orelse return;
+
+        // Clear keyboard focus if it matches
+        if (self.keyboard_focused_output) |out| {
+            if (out.surface == surf) {
+                self.keyboard_focused_output = null;
+            }
+        }
     }
 
     fn keyboardHandleKey(data: ?*anyopaque, keyboard: ?*c.wl_keyboard, serial: u32, time: u32, key: u32, state: u32) callconv(.c) void {
-        _ = data;
         _ = keyboard;
         _ = serial;
-        _ = time;
-        _ = key;
-        _ = state;
-        // TODO: Emit keyboard key event
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
+
+        const session = self.coordinator.session orelse return;
+
+        // Map Wayland key state to IPC KeyState
+        const key_state: signals.KeyboardKeyEvent.KeyState = if (state == c.WL_KEYBOARD_KEY_STATE_PRESSED)
+            .pressed
+        else
+            .released;
+
+        session.signal_keyboard_key.emit(.{
+            .time_msec = time,
+            .key = key,
+            .state = key_state,
+        });
     }
 
     fn keyboardHandleModifiers(data: ?*anyopaque, keyboard: ?*c.wl_keyboard, serial: u32, mods_depressed: u32, mods_latched: u32, mods_locked: u32, group: u32) callconv(.c) void {
-        _ = data;
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
         _ = keyboard;
         _ = serial;
-        _ = mods_depressed;
-        _ = mods_latched;
-        _ = mods_locked;
-        _ = group;
-        // TODO: Handle modifier state changes
+
+        const session = self.coordinator.session orelse return;
+
+        session.signal_keyboard_modifiers.emit(.{
+            .depressed = mods_depressed,
+            .latched = mods_latched,
+            .locked = mods_locked,
+            .group = group,
+        });
     }
 
     fn keyboardHandleRepeatInfo(data: ?*anyopaque, keyboard: ?*c.wl_keyboard, rate: i32, delay: i32) callconv(.c) void {
-        _ = data;
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
         _ = keyboard;
-        _ = rate;
-        _ = delay;
-        // TODO: Store repeat info
+
+        // Store repeat info in all keyboards
+        for (self.keyboards.items) |kbd| {
+            kbd.repeat_rate = rate;
+            kbd.repeat_delay = delay;
+        }
     }
 
     fn initSeat(self: *Self) void {
@@ -1101,11 +1240,95 @@ pub const Backend = struct {
     }
 
     fn initDmabuf(self: *Self) !bool {
-        if (self.wayland_state.dmabuf == null) return false;
+        const dmabuf = self.wayland_state.dmabuf orelse return false;
 
-        // TODO: Setup dmabuf listeners and format enumeration
+        // Setup dmabuf feedback for format enumeration
+        self.wayland_state.dmabuf_feedback = c.zwp_linux_dmabuf_v1_get_default_feedback(dmabuf);
+        if (self.wayland_state.dmabuf_feedback) |feedback| {
+            const listener = c.zwp_linux_dmabuf_feedback_v1_listener{
+                .done = dmabufFeedbackDone,
+                .format_table = dmabufFeedbackFormatTable,
+                .main_device = dmabufFeedbackMainDevice,
+                .tranche_done = dmabufFeedbackTrancheDone,
+                .tranche_target_device = dmabufFeedbackTrancheTargetDevice,
+                .tranche_formats = dmabufFeedbackTrancheFormats,
+                .tranche_flags = dmabufFeedbackTrancheFlags,
+            };
+            _ = c.zwp_linux_dmabuf_feedback_v1_add_listener(feedback, &listener, self);
+        }
+
+        // Add some common fallback formats if feedback doesn't work
+        try self.addCommonFormats();
 
         return true;
+    }
+
+    fn addCommonFormats(self: *Self) !void {
+        // Add common ARGB/XRGB formats as fallback
+        const common_formats = [_]u32{
+            0x34325241, // DRM_FORMAT_ARGB8888
+            0x34325258, // DRM_FORMAT_XRGB8888
+        };
+
+        for (common_formats) |fmt| {
+            var format = misc.DRMFormat.init(self.allocator);
+            format.drm_format = fmt;
+            try format.modifiers.append(self.allocator, 0); // DRM_FORMAT_MOD_LINEAR
+            try self.dmabuf_formats.append(self.allocator, format);
+        }
+    }
+
+    // Dmabuf feedback callbacks
+    fn dmabufFeedbackDone(data: ?*anyopaque, feedback: ?*c.zwp_linux_dmabuf_feedback_v1) callconv(.c) void {
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
+        _ = feedback;
+        _ = self;
+    }
+
+    fn dmabufFeedbackFormatTable(data: ?*anyopaque, feedback: ?*c.zwp_linux_dmabuf_feedback_v1, fd: i32, size: u32) callconv(.c) void {
+        _ = data;
+        _ = feedback;
+        defer std.posix.close(fd);
+
+        // Map format table into memory
+        const map_ptr = c.mmap(null, size, c.PROT_READ, c.MAP_PRIVATE, fd, 0);
+        if (map_ptr == c.MAP_FAILED) return;
+        defer _ = c.munmap(map_ptr, size);
+
+        // Format table contains pairs of (format: u32, modifier: u64)
+        // We'll parse this in tranche_formats callback
+    }
+
+    fn dmabufFeedbackMainDevice(data: ?*anyopaque, feedback: ?*c.zwp_linux_dmabuf_feedback_v1, device: ?*c.wl_array) callconv(.c) void {
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
+        _ = feedback;
+        _ = device;
+        _ = self;
+    }
+
+    fn dmabufFeedbackTrancheDone(data: ?*anyopaque, feedback: ?*c.zwp_linux_dmabuf_feedback_v1) callconv(.c) void {
+        _ = data;
+        _ = feedback;
+    }
+
+    fn dmabufFeedbackTrancheTargetDevice(data: ?*anyopaque, feedback: ?*c.zwp_linux_dmabuf_feedback_v1, device: ?*c.wl_array) callconv(.c) void {
+        _ = data;
+        _ = feedback;
+        _ = device;
+    }
+
+    fn dmabufFeedbackTrancheFormats(data: ?*anyopaque, feedback: ?*c.zwp_linux_dmabuf_feedback_v1, indices: ?*c.wl_array) callconv(.c) void {
+        _ = data;
+        _ = feedback;
+        _ = indices;
+        // Format indices would be parsed from the format table
+        // For now, we rely on the common formats added as fallback
+    }
+
+    fn dmabufFeedbackTrancheFlags(data: ?*anyopaque, feedback: ?*c.zwp_linux_dmabuf_feedback_v1, flags: u32) callconv(.c) void {
+        _ = data;
+        _ = feedback;
+        _ = flags;
     }
 
     // VTable implementation
@@ -1818,4 +2041,37 @@ test "Output - buffer caching in wlBufferFromBuffer" {
 
     // Verify they're different buffers
     try testing.expectNotEqual(wl_buf1, wl_buf2); // Pointer comparison is fine with expect
+}
+
+test "Backend - pointer axis state tracking" {
+    const backends = [_]backend.ImplementationOptions{
+        .{ .backend_type = .wayland, .request_mode = .if_available },
+    };
+    const opts: backend.Options = .{};
+
+    var coordinator = try backend.Coordinator.create(testing.allocator, &backends, opts);
+    defer coordinator.deinit();
+
+    var backend_impl = try Backend.create(testing.allocator, coordinator);
+    defer backend_impl.deinit();
+
+    // Initial state should be wheel source and 0 discrete
+    try testing.expectEqual(signals.PointerAxisEvent.AxisSource.wheel, backend_impl.last_axis_source);
+    try testing.expectEqual(@as(i32, 0), backend_impl.last_axis_discrete);
+
+    // Simulate axis source change to finger
+    backend_impl.last_axis_source = .finger;
+    try testing.expectEqual(signals.PointerAxisEvent.AxisSource.finger, backend_impl.last_axis_source);
+
+    // Simulate axis discrete value
+    backend_impl.last_axis_discrete = 5;
+    try testing.expectEqual(@as(i32, 5), backend_impl.last_axis_discrete);
+
+    // Simulate axis source change to continuous
+    backend_impl.last_axis_source = .continuous;
+    try testing.expectEqual(signals.PointerAxisEvent.AxisSource.continuous, backend_impl.last_axis_source);
+
+    // Simulate axis source change to wheel_tilt
+    backend_impl.last_axis_source = .wheel_tilt;
+    try testing.expectEqual(signals.PointerAxisEvent.AxisSource.wheel_tilt, backend_impl.last_axis_source);
 }

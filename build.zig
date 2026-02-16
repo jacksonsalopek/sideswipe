@@ -215,6 +215,7 @@ pub fn build(b: *std.Build) void {
         .link_libcpp = false,
         .imports = &.{
             .{ .name = "core", .module = core_mod },
+            .{ .name = "core.cli", .module = core_cli_mod },
             .{ .name = "core.string", .module = core_string_mod },
             .{ .name = "core.math", .module = core_math_mod },
             .{ .name = "ipc", .module = ipc_mod },
@@ -497,6 +498,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "core", .module = core_mod },
+                .{ .name = "core.cli", .module = core_cli_mod },
                 .{ .name = "core.string", .module = core_string_mod },
                 .{ .name = "core.math", .module = core_math_mod },
                 .{ .name = "core.display", .module = core_display_mod },
