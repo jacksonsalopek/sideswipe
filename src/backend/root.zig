@@ -22,6 +22,7 @@ pub const Coordinator = backend_impl.Coordinator;
 pub const Type = backend_impl.Type;
 pub const RequestMode = backend_impl.RequestMode;
 pub const LogLevel = backend_impl.LogLevel;
+pub const LogFunction = backend_impl.LogFunction;
 pub const ImplementationOptions = backend_impl.ImplementationOptions;
 pub const Options = backend_impl.Options;
 pub const PollFd = backend_impl.PollFd;

@@ -32,6 +32,9 @@ pub const LogLevel = enum(u32) {
     critical = 4,
 };
 
+/// Backend log function signature
+pub const LogFunction = *const fn (level: LogLevel, message: []const u8) void;
+
 /// Backend implementation options
 pub const ImplementationOptions = struct {
     backend_type: Type = .wayland,
@@ -40,7 +43,7 @@ pub const ImplementationOptions = struct {
 
 /// Backend options
 pub const Options = struct {
-    log_function: ?*const fn (level: LogLevel, message: []const u8) void = null,
+    log_function: ?LogFunction = null,
 };
 
 /// Poll file descriptor callback
@@ -114,6 +117,8 @@ pub const Coordinator = struct {
     session: ?*session.Type = null,
     ready: bool = false,
     idle_fd: i32 = -1,
+    cached_poll_fds: []PollFd = &[_]PollFd{},
+    poll_fds_dirty: bool = true,
 
     const Self = @This();
 
@@ -157,49 +162,56 @@ pub const Coordinator = struct {
 
     /// Instantiate backend implementations from stored options
     fn instantiateBackends(self: *Self) !void {
-        const wayland_module = @import("wayland.zig");
-
         for (self.implementation_options) |opt| {
-            const impl_result = switch (opt.backend_type) {
-                .wayland => blk: {
-                    self.log(.debug, "Attempting to create Wayland backend");
-                    const backend_ptr = wayland_module.Backend.create(self.allocator, self) catch |err| {
-                        self.log(.warning, "Failed to create Wayland backend");
-                        break :blk err;
-                    };
-                    break :blk backend_ptr.iface();
-                },
-                .drm => blk: {
-                    self.log(.debug, "DRM backend not yet implemented");
-                    break :blk error.BackendNotImplemented;
-                },
-                .headless => blk: {
-                    self.log(.debug, "Headless backend not yet implemented");
-                    break :blk error.BackendNotImplemented;
-                },
-                .null => blk: {
-                    self.log(.debug, "Null backend - skipping");
-                    break :blk error.BackendNotImplemented;
-                },
-            };
-
-            if (impl_result) |impl| {
-                try self.implementations.append(self.allocator, impl);
-                self.log(.debug, "Successfully created backend");
-            } else |err| {
-                // Handle error based on request mode
+            self.tryCreateBackend(opt) catch |err| {
                 if (opt.request_mode == .mandatory) {
                     self.log(.critical, "Mandatory backend failed to create");
                     return err;
                 }
-                // For if_available and fallback, just log and continue
+                // For if_available and fallback, continue
                 self.log(.debug, "Optional backend not available, continuing");
-            }
+            };
         }
 
         if (self.implementations.items.len == 0) {
             self.log(.warning, "No backends were successfully created");
         }
+    }
+
+    /// Try to create a single backend implementation
+    fn tryCreateBackend(self: *Self, opt: ImplementationOptions) !void {
+        const impl = try self.createBackendByType(opt.backend_type);
+        try self.implementations.append(self.allocator, impl);
+        self.poll_fds_dirty = true;
+        self.log(.debug, "Successfully created backend");
+    }
+
+    /// Create backend implementation by type
+    fn createBackendByType(self: *Self, backend_type: Type) !Implementation {
+        const wayland_module = @import("wayland.zig");
+
+        return switch (backend_type) {
+            .wayland => blk: {
+                self.log(.debug, "Attempting to create Wayland backend");
+                const backend_ptr = wayland_module.Backend.create(self.allocator, self) catch {
+                    self.log(.warning, "Failed to create Wayland backend");
+                    return error.BackendNotImplemented;
+                };
+                break :blk backend_ptr.iface();
+            },
+            .drm => {
+                self.log(.debug, "DRM backend not yet implemented");
+                return error.BackendNotImplemented;
+            },
+            .headless => {
+                self.log(.debug, "Headless backend not yet implemented");
+                return error.BackendNotImplemented;
+            },
+            .null => {
+                self.log(.debug, "Null backend - skipping");
+                return error.BackendNotImplemented;
+            },
+        };
     }
 
     pub fn deinit(self: *Self) void {
@@ -220,6 +232,10 @@ pub const Coordinator = struct {
             std.posix.close(self.idle_fd);
         }
 
+        if (self.cached_poll_fds.len > 0) {
+            self.allocator.free(self.cached_poll_fds);
+        }
+
         self.allocator.destroy(self);
     }
 
@@ -227,68 +243,96 @@ pub const Coordinator = struct {
     pub fn start(self: *Self) !bool {
         self.log(.debug, "Starting the backend!");
 
-        var started: usize = 0;
-
-        for (self.implementations.items) |impl| {
-            const ok = impl.start();
-
-            if (!ok) {
-                self.log(.err, "Backend could not start, enabling fallbacks");
-
-                // Check if this backend is mandatory
-                const backend_type = impl.backendType();
-                for (self.implementation_options) |opt| {
-                    if (opt.backend_type == backend_type and opt.request_mode == .mandatory) {
-                        self.log(.critical, "Mandatory backend failed to start, cannot continue!");
-                        return false;
-                    }
-                }
-            } else {
-                started += 1;
-            }
-        }
-
-        if (self.implementations.items.len == 0 or started == 0) {
+        const started = try self.startImplementations();
+        if (started == 0) {
             self.log(.critical, "No backend could be opened");
             return false;
         }
 
-        // Create primary allocator and renderer from DRM FD
+        try self.initializeRendererAndAllocator();
+
+        self.ready = true;
+        self.notifyReady();
+        self.poll_fds_dirty = true;
+
+        return true;
+    }
+
+    /// Start all backend implementations and return count of started backends
+    fn startImplementations(self: *Self) !usize {
+        var started: usize = 0;
+
         for (self.implementations.items) |impl| {
-            const fd = impl.drmFd();
-            if (fd >= 0) {
-                const reopened_fd = self.reopenDrmNode(fd, true);
-                if (reopened_fd >= 0) {
-                    // Initialize renderer with DRM FD
-                    self.primary_renderer = renderer.Type.create(
-                        self.allocator,
-                        null, // Backend pointer (opaque)
-                        reopened_fd,
-                    ) catch |err| {
-                        self.log(.err, "Failed to initialize renderer");
-                        std.log.err("Renderer initialization failed: {}", .{err});
-                        std.posix.close(reopened_fd);
-                        continue;
-                    };
+            if (impl.start()) {
+                started += 1;
+                continue;
+            }
 
-                    // Create GBM allocator with reopened FD
-                    const gbm_alloc = gbm.Allocator.create(self.allocator, reopened_fd) catch |err| {
-                        self.log(.err, "Failed to create GBM allocator");
-                        std.log.err("GBM allocator creation failed: {}", .{err});
-                        // Continue without allocator - renderer is still available
-                        break;
-                    };
-                    self.primary_allocator = gbm_alloc.asInterface();
-                    self.log(.debug, "GBM allocator initialized");
+            // Backend failed to start
+            self.log(.err, "Backend could not start, enabling fallbacks");
 
-                    break;
-                }
+            if (self.isMandatoryBackend(impl.backendType())) {
+                self.log(.critical, "Mandatory backend failed to start, cannot continue!");
+                return error.MandatoryBackendFailed;
             }
         }
 
-        self.ready = true;
+        return started;
+    }
 
-        // Call onReady for all implementations
+    /// Check if a backend type is configured as mandatory
+    fn isMandatoryBackend(self: *Self, backend_type: Type) bool {
+        for (self.implementation_options) |opt| {
+            if (opt.backend_type == backend_type and opt.request_mode == .mandatory) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Initialize primary renderer and allocator from available DRM FDs
+    fn initializeRendererAndAllocator(self: *Self) !void {
+        for (self.implementations.items) |impl| {
+            const fd = impl.drmFd();
+            if (fd < 0) continue;
+
+            const reopened_fd = self.reopenDrmNode(fd, true);
+            if (reopened_fd < 0) continue;
+
+            self.tryInitializeRenderer(reopened_fd) catch |err| {
+                std.log.err("Renderer initialization failed: {}", .{err});
+                std.posix.close(reopened_fd);
+                continue;
+            };
+
+            self.tryInitializeAllocator(reopened_fd) catch |err| {
+                std.log.err("GBM allocator creation failed: {}", .{err});
+                // Renderer is still available, continue
+            };
+
+            break;
+        }
+    }
+
+    /// Try to initialize renderer with given DRM FD
+    fn tryInitializeRenderer(self: *Self, drm_fd: i32) !void {
+        self.primary_renderer = try renderer.Type.create(
+            self.allocator,
+            null, // Backend pointer (opaque)
+            drm_fd,
+        );
+        self.log(.debug, "Renderer initialized");
+    }
+
+    /// Try to initialize GBM allocator with given DRM FD
+    fn tryInitializeAllocator(self: *Self, drm_fd: i32) !void {
+        const gbm_alloc = try gbm.Allocator.create(self.allocator, drm_fd);
+        self.primary_allocator = gbm_alloc.asInterface();
+        self.log(.debug, "GBM allocator initialized");
+    }
+
+    /// Notify all backends and session that system is ready
+    fn notifyReady(self: *Self) void {
         for (self.implementations.items) |impl| {
             impl.onReady();
         }
@@ -296,41 +340,74 @@ pub const Coordinator = struct {
         if (self.session) |sess| {
             sess.onReady();
         }
-
-        return true;
     }
 
-    /// Get all poll file descriptors from implementations and session
-    pub fn getPollFds(self: *Self) ![]PollFd {
+    /// Rebuild the cached poll FDs from all sources
+    fn rebuildPollFds(self: *Self) !void {
+        self.freePollFdsCache();
+
         var result = std.ArrayList(PollFd){};
         errdefer result.deinit(self.allocator);
 
-        // Get poll FDs from all implementations
+        try self.collectImplementationFds(&result);
+        try self.collectSessionFds(&result);
+        try self.collectIdleFd(&result);
+
+        self.cached_poll_fds = try result.toOwnedSlice(self.allocator);
+        self.poll_fds_dirty = false;
+    }
+
+    /// Free cached poll FDs
+    fn freePollFdsCache(self: *Self) void {
+        if (self.cached_poll_fds.len > 0) {
+            self.allocator.free(self.cached_poll_fds);
+            self.cached_poll_fds = &[_]PollFd{};
+        }
+    }
+
+    /// Collect poll FDs from all backend implementations
+    fn collectImplementationFds(self: *Self, result: *std.ArrayList(PollFd)) !void {
         for (self.implementations.items) |impl| {
             const fds = impl.pollFds();
             for (fds) |fd| {
                 try result.append(self.allocator, fd);
             }
         }
+    }
 
-        // Get poll FDs from session (convert session.PollFd to backend.PollFd)
-        if (self.session) |sess| {
-            const fds = try sess.pollFds(self.allocator);
-            defer self.allocator.free(fds);
-            for (fds) |fd| {
-                try result.append(self.allocator, .{
-                    .fd = fd.fd,
-                    .callback = null, // Session PollFd doesn't have callback
-                });
-            }
+    /// Collect poll FDs from session
+    fn collectSessionFds(self: *Self, result: *std.ArrayList(PollFd)) !void {
+        const sess = self.session orelse return;
+
+        const fds = try sess.pollFds(self.allocator);
+        defer self.allocator.free(fds);
+
+        for (fds) |fd| {
+            try result.append(self.allocator, .{
+                .fd = fd.fd,
+                .callback = null, // Session PollFd doesn't have callback
+            });
         }
+    }
 
-        // Add idle FD if available
+    /// Add idle FD to poll FD collection
+    fn collectIdleFd(self: *Self, result: *std.ArrayList(PollFd)) !void {
         if (self.idle_fd >= 0) {
             try result.append(self.allocator, .{ .fd = self.idle_fd, .callback = null });
         }
+    }
 
-        return result.toOwnedSlice(self.allocator);
+    /// Get all poll file descriptors from implementations and session
+    pub fn getPollFds(self: *Self) ![]const PollFd {
+        if (self.poll_fds_dirty) {
+            try self.rebuildPollFds();
+        }
+        return self.cached_poll_fds;
+    }
+
+    /// Mark poll FDs cache as dirty to force rebuild on next access
+    pub fn invalidatePollFds(self: *Self) void {
+        self.poll_fds_dirty = true;
     }
 
     /// Get the primary DRM file descriptor
@@ -393,81 +470,106 @@ pub const Coordinator = struct {
             @cInclude("fcntl.h");
         });
 
-        // Check if we're the DRM master
         if (drm.drmIsMaster(drm_fd) != 0) {
             self.log(.debug, "Is DRM master, falling back to device open");
         }
 
-        // Get device name
-        var name: ?[*:0]u8 = null;
-        if (allow_render_node) {
-            name = drm.drmGetRenderDeviceNameFromFd(drm_fd);
-        }
-
-        if (name == null) {
-            // Get primary node name
-            name = drm.drmGetDeviceNameFromFd2(drm_fd);
-            if (name == null) {
-                self.log(.err, "drmGetDeviceNameFromFd2 failed");
-                return -1;
-            }
-        }
-        defer std.c.free(name);
-
-        // Open the device
-        const new_fd = std.posix.open(
-            std.mem.span(name.?),
-            .{ .ACCMODE = .RDWR, .CLOEXEC = true },
-            0,
-        ) catch {
-            self.log(.err, "Failed to open DRM node");
+        const device_name = self.getDrmDeviceName(drm_fd, allow_render_node) orelse {
+            self.log(.err, "Failed to get DRM device name");
             return -1;
         };
+        defer std.c.free(device_name);
 
-        // Authenticate if using DRM primary node and we're master
-        if (drm.drmIsMaster(drm_fd) != 0 and
-            drm.drmGetNodeTypeFromFd(new_fd) == drm.DRM_NODE_PRIMARY)
-        {
-            var magic: drm.drm_magic_t = 0;
+        const new_fd = self.openDrmDevice(device_name) orelse return -1;
 
-            const get_result = drm.drmGetMagic(new_fd, &magic);
-            if (get_result < 0) {
-                self.log(.err, "drmGetMagic failed");
+        if (self.needsAuthentication(drm_fd, new_fd)) {
+            self.authenticateDrmFd(drm_fd, new_fd) catch {
                 std.posix.close(new_fd);
                 return -1;
-            }
-
-            const auth_result = drm.drmAuthMagic(drm_fd, magic);
-            if (auth_result < 0) {
-                self.log(.err, "drmAuthMagic failed");
-                std.posix.close(new_fd);
-                return -1;
-            }
+            };
         }
 
         return new_fd;
     }
+
+    /// Get DRM device name, preferring render node if allowed
+    fn getDrmDeviceName(self: *Self, drm_fd: i32, allow_render_node: bool) ?[*:0]u8 {
+        const drm = @cImport({
+            @cInclude("xf86drm.h");
+        });
+
+        if (allow_render_node) {
+            if (drm.drmGetRenderDeviceNameFromFd(drm_fd)) |name| {
+                return name;
+            }
+        }
+
+        const name = drm.drmGetDeviceNameFromFd2(drm_fd);
+        if (name == null) {
+            self.log(.err, "drmGetDeviceNameFromFd2 failed");
+        }
+        return name;
+    }
+
+    /// Open DRM device by name
+    fn openDrmDevice(self: *Self, device_name: [*:0]u8) ?i32 {
+        const fd = std.posix.open(
+            std.mem.span(device_name),
+            .{ .ACCMODE = .RDWR, .CLOEXEC = true },
+            0,
+        ) catch {
+            self.log(.err, "Failed to open DRM node");
+            return null;
+        };
+        return fd;
+    }
+
+    /// Check if DRM FD needs authentication
+    fn needsAuthentication(self: *Self, orig_fd: i32, new_fd: i32) bool {
+        _ = self;
+        const drm = @cImport({
+            @cInclude("xf86drm.h");
+        });
+
+        return drm.drmIsMaster(orig_fd) != 0 and
+            drm.drmGetNodeTypeFromFd(new_fd) == drm.DRM_NODE_PRIMARY;
+    }
+
+    /// Authenticate DRM file descriptor
+    fn authenticateDrmFd(self: *Self, master_fd: i32, client_fd: i32) !void {
+        const drm = @cImport({
+            @cInclude("xf86drm.h");
+        });
+
+        var magic: drm.drm_magic_t = 0;
+
+        if (drm.drmGetMagic(client_fd, &magic) < 0) {
+            self.log(.err, "drmGetMagic failed");
+            return error.DrmGetMagicFailed;
+        }
+
+        if (drm.drmAuthMagic(master_fd, magic) < 0) {
+            self.log(.err, "drmAuthMagic failed");
+            return error.DrmAuthMagicFailed;
+        }
+    }
 };
+
+const testing = core.testing;
 
 // Tests
 test "Backend - ImplementationOptions defaults" {
-    const testing = core.testing;
-
     const opts: ImplementationOptions = .{};
     try testing.expectEqual(Type.wayland, opts.backend_type);
     try testing.expectEqual(RequestMode.if_available, opts.request_mode);
 }
 
 test "Backend - Options initialization" {
-    const testing = core.testing;
-
     const opts: Options = .{};
     try testing.expectNull(opts.log_function);
 }
 
 test "Backend - Type enum values" {
-    const testing = core.testing;
-
     try testing.expectEqual(@as(u32, 0), @intFromEnum(Type.wayland));
     try testing.expectEqual(@as(u32, 1), @intFromEnum(Type.drm));
     try testing.expectEqual(@as(u32, 2), @intFromEnum(Type.headless));
@@ -475,16 +577,12 @@ test "Backend - Type enum values" {
 }
 
 test "Backend - RequestMode enum values" {
-    const testing = core.testing;
-
     try testing.expectEqual(@as(u32, 0), @intFromEnum(RequestMode.mandatory));
     try testing.expectEqual(@as(u32, 1), @intFromEnum(RequestMode.if_available));
     try testing.expectEqual(@as(u32, 2), @intFromEnum(RequestMode.fallback));
 }
 
 test "Backend - LogLevel enum values" {
-    const testing = core.testing;
-
     try testing.expectEqual(@as(u32, 0), @intFromEnum(LogLevel.trace));
     try testing.expectEqual(@as(u32, 1), @intFromEnum(LogLevel.debug));
     try testing.expectEqual(@as(u32, 2), @intFromEnum(LogLevel.warning));
@@ -493,8 +591,6 @@ test "Backend - LogLevel enum values" {
 }
 
 test "Coordinator - create with no backends fails" {
-    const testing = core.testing;
-
     const backends = [_]ImplementationOptions{};
     const opts: Options = .{};
 
@@ -503,8 +599,6 @@ test "Coordinator - create with no backends fails" {
 }
 
 test "Coordinator - create and destroy" {
-    const testing = core.testing;
-
     const backends = [_]ImplementationOptions{
         .{ .backend_type = .headless, .request_mode = .if_available },
     };
@@ -519,8 +613,6 @@ test "Coordinator - create and destroy" {
 }
 
 test "Coordinator - drmFd returns -1 when no implementations" {
-    const testing = core.testing;
-
     const backends = [_]ImplementationOptions{
         .{ .backend_type = .null, .request_mode = .if_available },
     };
@@ -533,8 +625,6 @@ test "Coordinator - drmFd returns -1 when no implementations" {
 }
 
 test "Coordinator - hasSession initially false" {
-    const testing = core.testing;
-
     const backends = [_]ImplementationOptions{
         .{ .backend_type = .drm, .request_mode = .if_available },
     };
@@ -547,8 +637,6 @@ test "Coordinator - hasSession initially false" {
 }
 
 test "Coordinator - start with mandatory backend failure" {
-    const testing = core.testing;
-
     const backends = [_]ImplementationOptions{
         .{ .backend_type = .drm, .request_mode = .mandatory },
     };
@@ -560,8 +648,6 @@ test "Coordinator - start with mandatory backend failure" {
 }
 
 test "Coordinator - fallback backend activation" {
-    const testing = core.testing;
-
     const backends = [_]ImplementationOptions{
         .{ .backend_type = .headless, .request_mode = .fallback },
     };
@@ -575,8 +661,6 @@ test "Coordinator - fallback backend activation" {
 }
 
 test "Coordinator - getPollFds aggregates all sources" {
-    const testing = core.testing;
-
     const backends = [_]ImplementationOptions{
         .{ .backend_type = .null, .request_mode = .if_available },
     };
@@ -586,15 +670,13 @@ test "Coordinator - getPollFds aggregates all sources" {
     defer coordinator.deinit();
 
     const fds = try coordinator.getPollFds();
-    defer testing.allocator.free(fds);
+    // Note: fds is a cached slice managed by coordinator, don't free it
 
     // Should at least have idle fd if initialized
     try testing.expect(fds.len >= 0);
 }
 
 test "Coordinator - multiple backend types simultaneously" {
-    const testing = core.testing;
-
     const backends = [_]ImplementationOptions{
         .{ .backend_type = .drm, .request_mode = .if_available },
         .{ .backend_type = .headless, .request_mode = .if_available },
@@ -609,8 +691,6 @@ test "Coordinator - multiple backend types simultaneously" {
 }
 
 test "Coordinator - instantiates wayland backend when WAYLAND_DISPLAY set" {
-    const testing = core.testing;
-
     // Skip this test if WAYLAND_DISPLAY is not set
     const wayland_display = std.posix.getenv("WAYLAND_DISPLAY");
     if (wayland_display == null) {
@@ -631,8 +711,6 @@ test "Coordinator - instantiates wayland backend when WAYLAND_DISPLAY set" {
 }
 
 test "Coordinator - handles unimplemented backends gracefully" {
-    const testing = core.testing;
-
     const backends = [_]ImplementationOptions{
         .{ .backend_type = .drm, .request_mode = .if_available },
         .{ .backend_type = .headless, .request_mode = .if_available },
@@ -648,8 +726,6 @@ test "Coordinator - handles unimplemented backends gracefully" {
 }
 
 test "Coordinator - mandatory backend failure propagates error" {
-    const testing = core.testing;
-
     const backends = [_]ImplementationOptions{
         .{ .backend_type = .drm, .request_mode = .mandatory },
     };
@@ -657,4 +733,35 @@ test "Coordinator - mandatory backend failure propagates error" {
 
     const result = Coordinator.create(testing.allocator, &backends, opts);
     try testing.expectError(error.BackendNotImplemented, result);
+}
+
+test "Coordinator - poll FDs cache invalidation" {
+    const backends = [_]ImplementationOptions{
+        .{ .backend_type = .null, .request_mode = .if_available },
+    };
+    const opts: Options = .{};
+
+    var coordinator = try Coordinator.create(testing.allocator, &backends, opts);
+    defer coordinator.deinit();
+
+    // Initial state should be dirty
+    try testing.expect(coordinator.poll_fds_dirty);
+
+    // First call should rebuild cache
+    const fds1 = try coordinator.getPollFds();
+    try testing.expectFalse(coordinator.poll_fds_dirty);
+    try testing.expect(fds1.len > 0); // Should have at least idle fd
+
+    // Second call should return cached result
+    const fds2 = try coordinator.getPollFds();
+    try testing.expectFalse(coordinator.poll_fds_dirty);
+    try testing.expectEqual(fds1.ptr, fds2.ptr); // Same slice
+
+    // Invalidate and verify dirty flag is set
+    coordinator.invalidatePollFds();
+    try testing.expect(coordinator.poll_fds_dirty);
+
+    // Next call should rebuild
+    _ = try coordinator.getPollFds();
+    try testing.expectFalse(coordinator.poll_fds_dirty);
 }

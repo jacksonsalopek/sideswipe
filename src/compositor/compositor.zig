@@ -78,7 +78,7 @@ pub const Compositor = struct {
     fn connectWaylandBackendOutputs(self: *Self, impl: backend.Implementation) Error!void {
         self.logger.debug("Discovering outputs from Wayland backend", .{});
 
-        const backend_ptr = impl.base.ptr orelse return;
+        const backend_ptr = impl.base.ptr;
 
         // Cast to Wayland Backend
         const wayland_backend = @import("backend").wayland.Backend;

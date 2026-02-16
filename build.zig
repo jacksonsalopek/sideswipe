@@ -346,34 +346,6 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    // Comparison benchmark against C libdisplay-info
-    const display_compare_mod = b.addModule("display_compare", .{
-        .root_source_file = b.path("src/core/display/root.zig"),
-        .target = target,
-        .link_libc = true,
-    });
-
-    const compare_c_exe = b.addExecutable(.{
-        .name = "compare_c",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/core/display/compare_c.zig"),
-            .target = target,
-            .optimize = .ReleaseFast,
-            .imports = &.{
-                .{ .name = "display", .module = display_compare_mod },
-                .{ .name = "core.cli", .module = core_cli_mod },
-            },
-        }),
-    });
-    compare_c_exe.linkLibC();
-    compare_c_exe.linkSystemLibrary("libdisplay-info");
-    compare_c_exe.step.dependOn(generate_pnp);
-    b.installArtifact(compare_c_exe);
-
-    const run_compare = b.step("compare-c", "Benchmark Zig vs C libdisplay-info");
-    const compare_cmd = b.addRunArtifact(compare_c_exe);
-    run_compare.dependOn(&compare_cmd.step);
-
     // Test suite
     const test_step = b.step("test", "Run tests");
 
@@ -677,4 +649,48 @@ pub fn build(b: *std.Build) void {
         const run_file_tests = b.addRunArtifact(file_tests);
         test_file_step.dependOn(&run_file_tests.step);
     }
+
+    // Main benchmark executable (runs all benchmarks)
+    const benchmark_exe = b.addExecutable(.{
+        .name = "benchmarks",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/benchmarks/root.zig"),
+            .target = target,
+            .optimize = .ReleaseFast, // Use optimized builds for realistic measurements
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "core", .module = core_mod },
+                .{ .name = "core.cli", .module = core_cli_mod },
+                .{ .name = "core.display", .module = core_display_mod },
+                .{ .name = "backend", .module = backend_mod },
+            },
+        }),
+    });
+    benchmark_exe.addIncludePath(b.path("protocols"));
+    benchmark_exe.addObject(xdg_shell_c);
+    benchmark_exe.addObject(dmabuf_c);
+    benchmark_exe.step.dependOn(generate_protocols);
+    benchmark_exe.step.dependOn(generate_pnp);
+    benchmark_exe.step.dependOn(generate_vic);
+    benchmark_exe.linkSystemLibrary("libdrm");
+    benchmark_exe.linkSystemLibrary("libinput");
+    benchmark_exe.linkSystemLibrary("pixman-1");
+    benchmark_exe.linkSystemLibrary("gbm");
+    benchmark_exe.linkSystemLibrary("EGL");
+    benchmark_exe.linkSystemLibrary("GLESv2");
+    benchmark_exe.linkSystemLibrary("libudev");
+    benchmark_exe.linkSystemLibrary("libseat");
+    benchmark_exe.linkSystemLibrary("wayland-client");
+    benchmark_exe.linkSystemLibrary("wayland-cursor");
+    // Try to link libdisplay-info for comparison benchmark (optional)
+    benchmark_exe.linkSystemLibrary("libdisplay-info");
+    benchmark_exe.linkLibC();
+
+    // Run benchmarks (pass arguments for specific benchmark selection)
+    const benchmark_step = b.step("benchmark", "Run benchmarks (use -- --name <name> for specific benchmark)");
+    const run_benchmark = b.addRunArtifact(benchmark_exe);
+    if (b.args) |args| {
+        run_benchmark.addArgs(args);
+    }
+    benchmark_step.dependOn(&run_benchmark.step);
 }
