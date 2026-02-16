@@ -39,6 +39,66 @@ fn setupSignalHandlers() !void {
     std.posix.sigaction(std.posix.SIG.TERM, &sa, null);
 }
 
+/// Attempts to initialize a backend coordinator with Wayland backend.
+/// Returns null on failure and logs appropriate messages.
+fn tryInitializeBackend(allocator: std.mem.Allocator, comp: *compositor.Compositor, logger: *cli.Logger) ?*backend.Coordinator {
+    logger.info("Initializing backend (nested Wayland mode)...", .{});
+
+    const backend_opts = [_]backend.ImplementationOptions{
+        .{ .backend_type = .wayland, .request_mode = .if_available },
+    };
+
+    const log_fn = createBackendLogger();
+
+    const coord = backend.Coordinator.create(allocator, &backend_opts, .{
+        .log_function = log_fn,
+    }) catch |err| {
+        logger.warn("Failed to create backend coordinator: {}", .{err});
+        logger.info("Continuing in display-server-only mode", .{});
+        return null;
+    };
+
+    const started = coord.start() catch |err| {
+        logger.warn("Failed to start backend: {}", .{err});
+        logger.info("Continuing in display-server-only mode", .{});
+        coord.deinit();
+        return null;
+    };
+
+    if (!started) {
+        logger.warn("Backend failed to start", .{});
+        logger.info("Continuing in display-server-only mode", .{});
+        coord.deinit();
+        return null;
+    }
+
+    comp.attachBackend(coord) catch |err| {
+        logger.warn("Failed to attach backend: {}", .{err});
+        logger.info("Continuing in display-server-only mode", .{});
+        coord.deinit();
+        return null;
+    };
+
+    logger.info("Backend initialized successfully", .{});
+    return coord;
+}
+
+fn createBackendLogger() backend.LogFunction {
+    const log_fn = struct {
+        fn logBackend(level: backend.LogLevel, message: []const u8) void {
+            const log_level: cli.LogLevel = switch (level) {
+                .trace => .trace,
+                .debug => .debug,
+                .warning => .warn,
+                .err => .err,
+                .critical => .err,
+            };
+            std.debug.print("[backend:{s}] {s}\n", .{ @tagName(log_level), message });
+        }
+    }.logBackend;
+    return log_fn;
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -129,56 +189,7 @@ pub fn main() !void {
     defer if (coord) |c| c.deinit();
 
     if (enable_backend) {
-        logger.info("Initializing backend (nested Wayland mode)...", .{});
-
-        const backend_opts = [_]backend.ImplementationOptions{
-            .{ .backend_type = .wayland, .request_mode = .if_available },
-        };
-
-        // Create backend coordinator with logging
-        const log_fn = struct {
-            fn logBackend(level: backend.LogLevel, message: []const u8) void {
-                const log_level: cli.LogLevel = switch (level) {
-                    .trace => .trace,
-                    .debug => .debug,
-                    .warning => .warn,
-                    .err => .err,
-                    .critical => .err,
-                };
-                // Note: This is a simplified logger call - ideally we'd use the actual logger instance
-                std.debug.print("[backend:{s}] {s}\n", .{ @tagName(log_level), message });
-            }
-        }.logBackend;
-
-        if (backend.Coordinator.create(allocator, &backend_opts, .{
-            .log_function = log_fn,
-        })) |c| {
-            // Try to start the backend
-            if (c.start()) |started| {
-                if (started) {
-                    comp.attachBackend(c) catch |err| {
-                        logger.warn("Failed to attach backend: {}", .{err});
-                        logger.info("Continuing in display-server-only mode", .{});
-                        c.deinit();
-                        coord = null;
-                        return;
-                    };
-                    coord = c;
-                    logger.info("Backend initialized successfully", .{});
-                } else {
-                    logger.warn("Backend failed to start", .{});
-                    logger.info("Continuing in display-server-only mode", .{});
-                    c.deinit();
-                }
-            } else |err| {
-                logger.warn("Failed to start backend: {}", .{err});
-                logger.info("Continuing in display-server-only mode", .{});
-                c.deinit();
-            }
-        } else |err| {
-            logger.warn("Failed to create backend coordinator: {}", .{err});
-            logger.info("Continuing in display-server-only mode", .{});
-        }
+        coord = tryInitializeBackend(allocator, comp, &logger);
     } else {
         logger.info("Backend disabled - running in display-server-only mode", .{});
         logger.info("Use --backend flag to enable nested Wayland mode", .{});

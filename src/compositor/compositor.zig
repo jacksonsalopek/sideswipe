@@ -69,31 +69,30 @@ pub const Compositor = struct {
         
         // Create compositor outputs from backend implementations
         for (coord.implementations.items) |impl| {
-            // For Wayland backend, we need to create outputs
             if (impl.backendType() == .wayland) {
-                self.logger.debug("Discovering outputs from Wayland backend", .{});
-                // The Wayland backend creates outputs internally
-                // We need to access them through the backend pointer
-                
-                // Get the backend pointer (this is a bit of a hack)
-                const backend_ptr: ?*anyopaque = impl.base.ptr;
-                if (backend_ptr) |ptr| {
-                    // Cast to Wayland Backend
-                    const wayland_backend = @import("backend").wayland.Backend;
-                    const wl_backend: *wayland_backend = @ptrCast(@alignCast(ptr));
-                    
-                    // For each output in the backend, create a compositor output
-                    for (wl_backend.outputs.items) |wl_output| {
-                        var backend_output = wl_output.iface();
-                        const comp_output = try self.createOutput(&backend_output, wl_output.name);
-                        
-                        // Register frame callback
-                        wl_output.setFrameCallback(outputFrameCallback, comp_output);
-                        
-                        self.logger.info("Connected compositor output to backend output: {s}", .{wl_output.name});
-                    }
-                }
+                try self.connectWaylandBackendOutputs(impl);
             }
+        }
+    }
+
+    fn connectWaylandBackendOutputs(self: *Self, impl: backend.Implementation) Error!void {
+        self.logger.debug("Discovering outputs from Wayland backend", .{});
+
+        const backend_ptr = impl.base.ptr orelse return;
+
+        // Cast to Wayland Backend
+        const wayland_backend = @import("backend").wayland.Backend;
+        const wl_backend: *wayland_backend = @ptrCast(@alignCast(backend_ptr));
+        
+        // For each output in the backend, create a compositor output
+        for (wl_backend.outputs.items) |wl_output| {
+            var backend_output = wl_output.iface();
+            const comp_output = try self.createOutput(&backend_output, wl_output.name);
+            
+            // Register frame callback
+            wl_output.setFrameCallback(outputFrameCallback, comp_output);
+            
+            self.logger.info("Connected compositor output to backend output: {s}", .{wl_output.name});
         }
     }
 

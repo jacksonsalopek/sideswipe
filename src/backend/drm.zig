@@ -104,49 +104,57 @@ pub const Plane = struct {
         }
 
         // Load plane properties
-        const props = c.drmModeObjectGetProperties(fd, plane_id, c.DRM_MODE_OBJECT_PLANE);
-        if (props) |p| {
-            defer c.drmModeFreeObjectProperties(p);
-
-            var j: u32 = 0;
-            while (j < p.*.count_props) : (j += 1) {
-                const prop = c.drmModeGetProperty(fd, p.*.props[j]) orelse continue;
-                defer c.drmModeFreeProperty(prop);
-
-                const prop_name = std.mem.sliceTo(&prop.*.name, 0);
-                if (std.mem.eql(u8, prop_name, "type")) {
-                    const value = p.*.prop_values[j];
-                    if (value == c.DRM_PLANE_TYPE_PRIMARY) {
-                        self.type = .primary;
-                    } else if (value == c.DRM_PLANE_TYPE_CURSOR) {
-                        self.type = .cursor;
-                    }
-                    self.props.type_prop = p.*.props[j];
-                } else if (std.mem.eql(u8, prop_name, "FB_ID")) {
-                    self.props.fb_id = p.*.props[j];
-                } else if (std.mem.eql(u8, prop_name, "CRTC_ID")) {
-                    self.props.crtc_id = p.*.props[j];
-                } else if (std.mem.eql(u8, prop_name, "CRTC_X")) {
-                    self.props.crtc_x = p.*.props[j];
-                } else if (std.mem.eql(u8, prop_name, "CRTC_Y")) {
-                    self.props.crtc_y = p.*.props[j];
-                } else if (std.mem.eql(u8, prop_name, "CRTC_W")) {
-                    self.props.crtc_w = p.*.props[j];
-                } else if (std.mem.eql(u8, prop_name, "CRTC_H")) {
-                    self.props.crtc_h = p.*.props[j];
-                } else if (std.mem.eql(u8, prop_name, "SRC_X")) {
-                    self.props.src_x = p.*.props[j];
-                } else if (std.mem.eql(u8, prop_name, "SRC_Y")) {
-                    self.props.src_y = p.*.props[j];
-                } else if (std.mem.eql(u8, prop_name, "SRC_W")) {
-                    self.props.src_w = p.*.props[j];
-                } else if (std.mem.eql(u8, prop_name, "SRC_H")) {
-                    self.props.src_h = p.*.props[j];
-                }
-            }
-        }
+        self.loadProperties(fd);
 
         return self;
+    }
+
+    fn loadProperties(self: *Plane, fd: i32) void {
+        const props = c.drmModeObjectGetProperties(fd, self.id, c.DRM_MODE_OBJECT_PLANE) orelse return;
+        defer c.drmModeFreeObjectProperties(props);
+
+        var j: u32 = 0;
+        while (j < props.*.count_props) : (j += 1) {
+            const prop = c.drmModeGetProperty(fd, props.*.props[j]) orelse continue;
+            defer c.drmModeFreeProperty(prop);
+
+            const prop_name = std.mem.sliceTo(&prop.*.name, 0);
+            const prop_id = props.*.props[j];
+            const prop_value = props.*.prop_values[j];
+
+            self.parsePlaneProperty(prop_name, prop_id, prop_value);
+        }
+    }
+
+    fn parsePlaneProperty(self: *Plane, name: []const u8, prop_id: u32, value: u64) void {
+        if (std.mem.eql(u8, name, "type")) {
+            if (value == c.DRM_PLANE_TYPE_PRIMARY) {
+                self.type = .primary;
+            } else if (value == c.DRM_PLANE_TYPE_CURSOR) {
+                self.type = .cursor;
+            }
+            self.props.type_prop = prop_id;
+        } else if (std.mem.eql(u8, name, "FB_ID")) {
+            self.props.fb_id = prop_id;
+        } else if (std.mem.eql(u8, name, "CRTC_ID")) {
+            self.props.crtc_id = prop_id;
+        } else if (std.mem.eql(u8, name, "CRTC_X")) {
+            self.props.crtc_x = prop_id;
+        } else if (std.mem.eql(u8, name, "CRTC_Y")) {
+            self.props.crtc_y = prop_id;
+        } else if (std.mem.eql(u8, name, "CRTC_W")) {
+            self.props.crtc_w = prop_id;
+        } else if (std.mem.eql(u8, name, "CRTC_H")) {
+            self.props.crtc_h = prop_id;
+        } else if (std.mem.eql(u8, name, "SRC_X")) {
+            self.props.src_x = prop_id;
+        } else if (std.mem.eql(u8, name, "SRC_Y")) {
+            self.props.src_y = prop_id;
+        } else if (std.mem.eql(u8, name, "SRC_W")) {
+            self.props.src_w = prop_id;
+        } else if (std.mem.eql(u8, name, "SRC_H")) {
+            self.props.src_h = prop_id;
+        }
     }
 
     pub fn deinit(self: *Plane) void {
@@ -404,28 +412,11 @@ pub const Framebuffer = struct {
         const num_planes: usize = @intCast(dmabuf_attrs.planes);
 
         // Collect DRM gem handles from file descriptors
-        var i: usize = 0;
-        while (i < num_planes) : (i += 1) {
-            if (dmabuf_attrs.fds[i] < 0) break;
-
-            // Import DMA-BUF FD to get GEM handle
-            const fd = dmabuf_attrs.fds[i];
-            var handle: u32 = 0;
-            const prime_result = c.drmPrimeFDToHandle(be.drm_fd, fd, &handle);
-            if (prime_result != 0) {
-                // Clean up any handles we've already imported
-                var cleanup_idx: usize = 0;
-                while (cleanup_idx < i) : (cleanup_idx += 1) {
-                    if (self.bo_handles[cleanup_idx] != 0) {
-                        var gem_close: c.struct_drm_gem_close = undefined;
-                        gem_close.handle = self.bo_handles[cleanup_idx];
-                        _ = c.drmIoctl(be.drm_fd, c.DRM_IOCTL_GEM_CLOSE, &gem_close);
-                    }
-                }
-                return error.DMABufImportFailed;
-            }
-            self.bo_handles[i] = handle;
-        }
+        self.importDmaBufHandles(be.drm_fd, &dmabuf_attrs, num_planes) catch {
+            self.cleanupBoHandles(be.drm_fd);
+            return error.DMABufImportFailed;
+        };
+        errdefer self.cleanupBoHandles(be.drm_fd);
 
         // Prepare arrays for drmModeAddFB2
         var handles: [4]u32 = .{ 0, 0, 0, 0 };
@@ -433,7 +424,7 @@ pub const Framebuffer = struct {
         var offsets: [4]u32 = dmabuf_attrs.offsets;
         var modifiers: [4]u64 = .{ dmabuf_attrs.modifier, dmabuf_attrs.modifier, dmabuf_attrs.modifier, dmabuf_attrs.modifier };
 
-        i = 0;
+        var i: usize = 0;
         while (i < num_planes) : (i += 1) {
             handles[i] = self.bo_handles[i];
         }
@@ -505,12 +496,30 @@ pub const Framebuffer = struct {
             _ = c.drmModeRmFB(self.be.drm_fd, self.id);
         }
 
-        // Close GEM handles
+        self.cleanupBoHandles(self.be.drm_fd);
+    }
+
+    fn importDmaBufHandles(self: *Framebuffer, drm_fd: i32, dmabuf_attrs: *const Buffer.DMABufAttributes, num_planes: usize) !void {
+        var i: usize = 0;
+        while (i < num_planes) : (i += 1) {
+            if (dmabuf_attrs.fds[i] < 0) break;
+
+            const fd = dmabuf_attrs.fds[i];
+            var handle: u32 = 0;
+            const prime_result = c.drmPrimeFDToHandle(drm_fd, fd, &handle);
+            if (prime_result != 0) {
+                return error.DMABufImportFailed;
+            }
+            self.bo_handles[i] = handle;
+        }
+    }
+
+    fn cleanupBoHandles(self: *Framebuffer, drm_fd: i32) void {
         for (self.bo_handles) |handle| {
             if (handle != 0) {
                 var gem_close: c.struct_drm_gem_close = undefined;
                 gem_close.handle = handle;
-                _ = c.drmIoctl(self.be.drm_fd, c.DRM_IOCTL_GEM_CLOSE, &gem_close);
+                _ = c.drmIoctl(drm_fd, c.DRM_IOCTL_GEM_CLOSE, &gem_close);
             }
         }
     }
