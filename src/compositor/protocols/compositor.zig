@@ -59,14 +59,14 @@ fn compositorCreateSurface(
         c.wl_resource_get_version(resource),
         id,
     ) orelse {
-        comp.destroySurface(surface);
+        comp.destroySurface(surface, "creation failed: no memory for wl_surface resource");
         c.wl_resource_post_no_memory(resource);
         return;
     };
 
     // Attach surface data
     const surface_data = comp.allocator.create(SurfaceData) catch {
-        comp.destroySurface(surface);
+        comp.destroySurface(surface, "creation failed: no memory for surface data");
         c.wl_resource_destroy(surface_resource);
         c.wl_resource_post_no_memory(resource);
         return;
@@ -138,9 +138,7 @@ fn surfaceDestroy(resource: ?*c.wl_resource) callconv(.c) void {
     const comp = surface.compositor;
     const allocator = comp.allocator;
 
-    comp.logger.debug("Destroyed surface {d}", .{surface.id});
-
-    comp.destroySurface(surface);
+    comp.destroySurface(surface, "client destroyed wl_surface");
     allocator.destroy(data);
 }
 

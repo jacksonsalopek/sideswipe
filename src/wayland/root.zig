@@ -7,6 +7,7 @@ pub const display = @import("display.zig");
 pub const event_loop = @import("event_loop.zig");
 pub const global = @import("global.zig");
 pub const server = @import("server.zig");
+pub const test_setup = @import("test_setup.zig");
 
 // Convenience re-exports
 pub const Client = client.Client;

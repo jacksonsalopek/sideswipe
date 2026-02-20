@@ -94,6 +94,10 @@ const testing = @import("core").testing;
 
 test "Server: init with auto socket" {
     const allocator = testing.allocator;
+    const test_setup = @import("test_setup.zig");
+
+    var runtime = try test_setup.RuntimeDir.setup(allocator);
+    defer runtime.cleanup();
 
     var server = try Server.init(allocator, null);
     defer server.deinit();
@@ -104,6 +108,10 @@ test "Server: init with auto socket" {
 
 test "Server: init with custom socket" {
     const allocator = testing.allocator;
+    const test_setup = @import("test_setup.zig");
+
+    var runtime = try test_setup.RuntimeDir.setup(allocator);
+    defer runtime.cleanup();
 
     // Use a unique socket name to avoid conflicts
     const socket_name = "test-socket-12345";
@@ -116,6 +124,10 @@ test "Server: init with custom socket" {
 
 test "Server: dispatch with timeout" {
     const allocator = testing.allocator;
+    const test_setup = @import("test_setup.zig");
+
+    var runtime = try test_setup.RuntimeDir.setup(allocator);
+    defer runtime.cleanup();
 
     var server = try Server.init(allocator, null);
     defer server.deinit();

@@ -33,6 +33,8 @@ pub const Buffer = struct {
     backend: *Backend,
     pending_release: bool = false,
     allocator: std.mem.Allocator,
+    shm_pool: ?*c.wl_shm_pool = null,
+    shm_fd: i32 = -1,
 
     const Self = @This();
 
@@ -46,43 +48,111 @@ pub const Buffer = struct {
             .allocator = allocator,
         };
 
-        // Create wl_buffer from dmabuf
-        if (be.wayland_state.dmabuf) |dmabuf| {
-            const params = c.zwp_linux_dmabuf_v1_create_params(dmabuf);
-            if (params == null) {
-                return error.FailedToCreateDmabufParams;
-            }
-
-            const attrs = buf.dmabuf();
-            for (0..@as(usize, @intCast(attrs.planes))) |i| {
-                c.zwp_linux_buffer_params_v1_add(
-                    params,
-                    attrs.fds[i],
-                    @intCast(i),
-                    attrs.offsets[i],
-                    attrs.strides[i],
-                    @intCast(attrs.modifier >> 32),
-                    @intCast(attrs.modifier & 0xFFFFFFFF),
-                );
-            }
-
-            self.wl_buffer = c.zwp_linux_buffer_params_v1_create_immed(
-                params,
-                @intFromFloat(attrs.size.getX()),
-                @intFromFloat(attrs.size.getY()),
-                attrs.format,
-                0,
-            );
-
-            c.zwp_linux_buffer_params_v1_destroy(params);
+        const buf_type = buf.bufferType();
+        if (buf_type == .dmabuf) {
+            try self.createFromDmabuf();
+        } else if (buf_type == .shm) {
+            try self.createFromShm();
         }
 
         return self;
     }
 
+    fn createFromDmabuf(self: *Self) !void {
+        const dmabuf = self.backend.wayland_state.dmabuf orelse return error.NoDmabufSupport;
+
+        const params = c.zwp_linux_dmabuf_v1_create_params(dmabuf);
+        if (params == null) {
+            return error.FailedToCreateDmabufParams;
+        }
+
+        const attrs = self.buffer.dmabuf();
+        for (0..@as(usize, @intCast(attrs.planes))) |i| {
+            c.zwp_linux_buffer_params_v1_add(
+                params,
+                attrs.fds[i],
+                @intCast(i),
+                attrs.offsets[i],
+                attrs.strides[i],
+                @intCast(attrs.modifier >> 32),
+                @intCast(attrs.modifier & 0xFFFFFFFF),
+            );
+        }
+
+        self.wl_buffer = c.zwp_linux_buffer_params_v1_create_immed(
+            params,
+            @intFromFloat(attrs.size.getX()),
+            @intFromFloat(attrs.size.getY()),
+            attrs.format,
+            0,
+        );
+
+        c.zwp_linux_buffer_params_v1_destroy(params);
+    }
+
+    fn createFromShm(self: *Self) !void {
+        const shm = self.backend.wayland_state.shm orelse return error.NoShmSupport;
+
+        const attrs = self.buffer.shm();
+        if (!attrs.success) {
+            return error.InvalidShmAttrs;
+        }
+
+        const width = @as(i32, @intFromFloat(attrs.size.getX()));
+        const height = @as(i32, @intFromFloat(attrs.size.getY()));
+        const stride = attrs.stride;
+        const size = height * stride;
+
+        const fd = try createAnonymousFile(@intCast(size));
+        errdefer std.posix.close(fd);
+
+        const data_result = self.buffer.beginDataPtr(0);
+        defer self.buffer.endDataPtr();
+
+        if (data_result.ptr == null) {
+            return error.NoDataPtr;
+        }
+
+        const src_data = data_result.ptr.?[0..data_result.size];
+        
+        const mapped = std.posix.mmap(
+            null,
+            @intCast(size),
+            std.posix.PROT.WRITE,
+            .{ .TYPE = .SHARED },
+            fd,
+            0,
+        ) catch return error.MmapFailed;
+        defer std.posix.munmap(mapped);
+
+        @memcpy(mapped[0..@intCast(size)], src_data[0..@intCast(size)]);
+
+        self.shm_pool = c.wl_shm_create_pool(shm, fd, size);
+        self.shm_fd = fd;
+
+        if (self.shm_pool == null) {
+            return error.FailedToCreateShmPool;
+        }
+
+        self.wl_buffer = c.wl_shm_pool_create_buffer(
+            self.shm_pool,
+            0,
+            width,
+            height,
+            stride,
+            attrs.format,
+        );
+    }
+
     pub fn deinit(self: *Self) void {
         if (self.wl_buffer) |wl_buf| {
             c.wl_buffer_destroy(wl_buf);
+        }
+        if (self.shm_pool) |pool| {
+            c.wl_shm_pool_destroy(pool);
+        }
+        if (self.shm_fd >= 0) {
+            std.posix.close(self.shm_fd);
         }
         self.allocator.destroy(self);
     }
@@ -91,6 +161,25 @@ pub const Buffer = struct {
         return self.wl_buffer != null;
     }
 };
+
+/// Creates an anonymous file for SHM buffer
+fn createAnonymousFile(size: usize) !i32 {
+    const name = "sideswipe-shm";
+    
+    const fd = std.posix.memfd_createZ(name, 0) catch |err| switch (err) {
+        error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded => return err,
+        else => {
+            const tmp_fd = c.shm_open(name, c.O_RDWR | c.O_CREAT | c.O_EXCL, 0o600);
+            if (tmp_fd < 0) return error.ShmOpenFailed;
+            _ = c.shm_unlink(name);
+            return tmp_fd;
+        },
+    };
+
+    try std.posix.ftruncate(fd, size);
+    return fd;
+}
 
 /// Wayland output implementation
 pub const Output = struct {
@@ -142,33 +231,13 @@ pub const Output = struct {
         if (be.wayland_state.compositor) |compositor| {
             self.surface = c.wl_compositor_create_surface(compositor);
             if (self.surface == null) {
+                cli.log.err("Failed to create wl_surface for output {s}", .{name});
                 return error.FailedToCreateSurface;
             }
         }
 
         // Create XDG surface
-        if (be.wayland_state.xdg_wm_base) |xdg| {
-            if (self.surface) |surf| {
-                self.xdg_surface = c.xdg_wm_base_get_xdg_surface(xdg, surf);
-                if (self.xdg_surface) |xdg_surf| {
-                    const xdg_surface_listener = c.xdg_surface_listener{
-                        .configure = xdgSurfaceHandleConfigure,
-                    };
-                    _ = c.xdg_surface_add_listener(xdg_surf, &xdg_surface_listener, self);
-
-                    self.xdg_toplevel = c.xdg_surface_get_toplevel(xdg_surf);
-                    if (self.xdg_toplevel) |toplevel| {
-                        const toplevel_listener = c.xdg_toplevel_listener{
-                            .configure = xdgToplevelHandleConfigure,
-                            .close = xdgToplevelHandleClose,
-                        };
-                        _ = c.xdg_toplevel_add_listener(toplevel, &toplevel_listener, self);
-                        c.xdg_toplevel_set_title(toplevel, self.name.ptr);
-                        c.wl_surface_commit(surf);
-                    }
-                }
-            }
-        }
+        self.initXdgSurface(be);
 
         // Create cursor surface
         if (be.wayland_state.compositor) |compositor| {
@@ -176,6 +245,37 @@ pub const Output = struct {
         }
 
         return self;
+    }
+
+    fn initXdgSurface(self: *Self, be: *Backend) void {
+        const xdg = be.wayland_state.xdg_wm_base orelse return;
+        const surf = self.surface orelse return;
+
+        self.xdg_surface = c.xdg_wm_base_get_xdg_surface(xdg, surf);
+        const xdg_surf = self.xdg_surface orelse return;
+
+        const xdg_surface_listener = c.xdg_surface_listener{
+            .configure = xdgSurfaceHandleConfigure,
+        };
+        _ = c.xdg_surface_add_listener(xdg_surf, &xdg_surface_listener, self);
+
+        self.initXdgToplevel(surf);
+    }
+
+    fn initXdgToplevel(self: *Self, surf: *c.wl_surface) void {
+        const xdg_surf = self.xdg_surface orelse return;
+
+        self.xdg_toplevel = c.xdg_surface_get_toplevel(xdg_surf);
+        const toplevel = self.xdg_toplevel orelse return;
+
+        const toplevel_listener = c.xdg_toplevel_listener{
+            .configure = xdgToplevelHandleConfigure,
+            .close = xdgToplevelHandleClose,
+        };
+        _ = c.xdg_toplevel_add_listener(toplevel, &toplevel_listener, self);
+        c.xdg_toplevel_set_title(toplevel, self.name.ptr);
+        c.wl_surface_commit(surf);
+        cli.log.info("Wayland output window created: {s}", .{self.name});
     }
 
     pub fn deinit(self: *Self) void {
@@ -219,16 +319,7 @@ pub const Output = struct {
         const surf = self.surface.?;
 
         // Attach buffer if committed
-        if (self.state.committed.buffer) {
-            if (self.state.buffer) |buf| {
-                const wl_buffer = self.wlBufferFromBuffer(buf) catch return false;
-                if (wl_buffer.good()) {
-                    c.wl_surface_attach(surf, wl_buffer.wl_buffer, 0, 0);
-                    c.wl_surface_damage_buffer(surf, 0, 0, std.math.maxInt(i32), std.math.maxInt(i32));
-                    self.ready_for_frame_callback = true;
-                }
-            }
-        }
+        if (!self.attachBufferIfCommitted(surf)) return false;
 
         c.wl_surface_commit(surf);
         self.state.onCommit();
@@ -237,6 +328,25 @@ pub const Output = struct {
         if (self.ready_for_frame_callback) {
             self.sendFrameAndSetCallback();
         }
+
+        return true;
+    }
+
+    fn attachBufferIfCommitted(self: *Self, surf: *c.wl_surface) bool {
+        if (!self.state.committed.buffer) return true;
+
+        const buf = self.state.buffer orelse return true;
+
+        const wl_buffer = self.wlBufferFromBuffer(buf) catch |err| {
+            cli.log.err("Failed to create wl_buffer for output {s}: {}", .{ self.name, err });
+            return false;
+        };
+
+        if (!wl_buffer.good()) return true;
+
+        c.wl_surface_attach(surf, wl_buffer.wl_buffer, 0, 0);
+        c.wl_surface_damage_buffer(surf, 0, 0, std.math.maxInt(i32), std.math.maxInt(i32));
+        self.ready_for_frame_callback = true;
 
         return true;
     }
@@ -360,18 +470,33 @@ pub const Output = struct {
 
     pub fn scheduleFrame(self: *Self, reason: output.ScheduleReason) void {
         _ = reason;
+        
         self.needs_frame = true;
 
-        if (self.frame_scheduled) return;
+        if (self.frame_scheduled) {
+            return;
+        }
 
         self.frame_scheduled = true;
 
         if (self.frame_callback != null) {
             self.frame_scheduled_while_waiting = true;
-        } else {
-            // Schedule idle callback
-            self.backend.idle_callbacks.append(self.allocator, self) catch return;
+            return;
         }
+        
+        // No pending frame callback - trigger immediately if available
+        const callback_fn = self.frame_event_callback orelse {
+            cli.log.warn("No frame callback registered for output {s}", .{self.name});
+            return;
+        };
+        
+        const userdata = self.frame_event_userdata orelse {
+            cli.log.err("Frame callback has null userdata for output {s}", .{self.name});
+            return;
+        };
+        
+        // Trigger frame event to compositor
+        callback_fn(userdata);
     }
 
     pub fn getGammaSize(self: *Self) usize {
@@ -466,9 +591,15 @@ pub const Output = struct {
 
     // XDG surface callbacks
     fn xdgSurfaceHandleConfigure(data: ?*anyopaque, xdg_surface: ?*c.xdg_surface, serial: u32) callconv(.c) void {
-        _ = data;
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
+        
         if (xdg_surface) |surf| {
             c.xdg_surface_ack_configure(surf, serial);
+        }
+        
+        // Initial configure - surface is now ready to accept commits
+        if (self.surface) |s| {
+            c.wl_surface_commit(s);
         }
     }
 
@@ -689,6 +820,7 @@ pub const Backend = struct {
         seat: ?*c.wl_seat = null,
         compositor: ?*c.wl_compositor = null,
         xdg_wm_base: ?*c.xdg_wm_base = null,
+        shm: ?*c.wl_shm = null,
         dmabuf: ?*c.zwp_linux_dmabuf_v1 = null,
         dmabuf_feedback: ?*c.zwp_linux_dmabuf_feedback_v1 = null,
         dmabuf_failed: bool = false,
@@ -753,6 +885,10 @@ pub const Backend = struct {
             c.zwp_linux_dmabuf_v1_destroy(dmabuf);
         }
 
+        if (self.wayland_state.shm) |shm| {
+            c.wl_shm_destroy(shm);
+        }
+
         if (self.wayland_state.xdg_wm_base) |xdg| {
             c.xdg_wm_base_destroy(xdg);
         }
@@ -802,6 +938,9 @@ pub const Backend = struct {
             self.wayland_state.xdg_wm_base = @ptrCast(c.wl_registry_bind(reg, name, &c.xdg_wm_base_interface, @min(version, 2)));
             self.initShell();
             cli.log.debug("Bound xdg_wm_base", .{});
+        } else if (std.mem.eql(u8, interface_name, "wl_shm")) {
+            self.wayland_state.shm = @ptrCast(c.wl_registry_bind(reg, name, &c.wl_shm_interface, @min(version, 1)));
+            cli.log.debug("Bound wl_shm", .{});
         } else if (std.mem.eql(u8, interface_name, "zwp_linux_dmabuf_v1")) {
             self.wayland_state.dmabuf = @ptrCast(c.wl_registry_bind(reg, name, &c.zwp_linux_dmabuf_v1_interface, @min(version, 4)));
             _ = self.initDmabuf() catch {
@@ -877,8 +1016,10 @@ pub const Backend = struct {
     }
 
     pub fn onReady(self: *Self) void {
-        _ = self;
-        // Called when backend is ready
+        // Create a default output window
+        self.createOutput(null) catch |err| {
+            cli.log.err("Failed to create Wayland output: {}", .{err});
+        };
     }
 
     pub fn createOutput(self: *Self, name: ?[]const u8) !void {
@@ -899,31 +1040,8 @@ pub const Backend = struct {
 
         // Handle pointer capability
         if (capabilities & c.WL_SEAT_CAPABILITY_POINTER != 0) {
-            if (self.pointers.items.len == 0) {
-                const wl_pointer = c.wl_seat_get_pointer(seat_ptr);
-                if (wl_pointer) |ptr| {
-                    const pointer = Pointer.create(self.allocator, ptr, self) catch return;
-                    self.pointers.append(self.allocator, pointer) catch {
-                        pointer.deinit();
-                        return;
-                    };
-
-                    const listener = c.wl_pointer_listener{
-                        .enter = pointerHandleEnter,
-                        .leave = pointerHandleLeave,
-                        .motion = pointerHandleMotion,
-                        .button = pointerHandleButton,
-                        .axis = pointerHandleAxis,
-                        .frame = pointerHandleFrame,
-                        .axis_source = pointerHandleAxisSource,
-                        .axis_stop = pointerHandleAxisStop,
-                        .axis_discrete = pointerHandleAxisDiscrete,
-                    };
-                    _ = c.wl_pointer_add_listener(ptr, &listener, self);
-                }
-            }
+            self.initPointerCapability(seat_ptr);
         } else {
-            // Pointer capability removed
             for (self.pointers.items) |pointer| {
                 pointer.deinit();
             }
@@ -932,33 +1050,60 @@ pub const Backend = struct {
 
         // Handle keyboard capability
         if (capabilities & c.WL_SEAT_CAPABILITY_KEYBOARD != 0) {
-            if (self.keyboards.items.len == 0) {
-                const wl_keyboard = c.wl_seat_get_keyboard(seat_ptr);
-                if (wl_keyboard) |kbd| {
-                    const keyboard = Keyboard.create(self.allocator, kbd, self) catch return;
-                    self.keyboards.append(self.allocator, keyboard) catch {
-                        keyboard.deinit();
-                        return;
-                    };
-
-                    const listener = c.wl_keyboard_listener{
-                        .keymap = keyboardHandleKeymap,
-                        .enter = keyboardHandleEnter,
-                        .leave = keyboardHandleLeave,
-                        .key = keyboardHandleKey,
-                        .modifiers = keyboardHandleModifiers,
-                        .repeat_info = keyboardHandleRepeatInfo,
-                    };
-                    _ = c.wl_keyboard_add_listener(kbd, &listener, self);
-                }
-            }
+            self.initKeyboardCapability(seat_ptr);
         } else {
-            // Keyboard capability removed
             for (self.keyboards.items) |keyboard| {
                 keyboard.deinit();
             }
             self.keyboards.clearRetainingCapacity();
         }
+    }
+
+    fn initPointerCapability(self: *Self, seat_ptr: *c.wl_seat) void {
+        if (self.pointers.items.len > 0) return;
+
+        const wl_pointer = c.wl_seat_get_pointer(seat_ptr) orelse return;
+
+        const pointer = Pointer.create(self.allocator, wl_pointer, self) catch return;
+        self.pointers.append(self.allocator, pointer) catch {
+            pointer.deinit();
+            return;
+        };
+
+        const listener = c.wl_pointer_listener{
+            .enter = pointerHandleEnter,
+            .leave = pointerHandleLeave,
+            .motion = pointerHandleMotion,
+            .button = pointerHandleButton,
+            .axis = pointerHandleAxis,
+            .frame = pointerHandleFrame,
+            .axis_source = pointerHandleAxisSource,
+            .axis_stop = pointerHandleAxisStop,
+            .axis_discrete = pointerHandleAxisDiscrete,
+        };
+        _ = c.wl_pointer_add_listener(wl_pointer, &listener, self);
+    }
+
+    fn initKeyboardCapability(self: *Self, seat_ptr: *c.wl_seat) void {
+        if (self.keyboards.items.len > 0) return;
+
+        const wl_keyboard = c.wl_seat_get_keyboard(seat_ptr) orelse return;
+
+        const keyboard = Keyboard.create(self.allocator, wl_keyboard, self) catch return;
+        self.keyboards.append(self.allocator, keyboard) catch {
+            keyboard.deinit();
+            return;
+        };
+
+        const listener = c.wl_keyboard_listener{
+            .keymap = keyboardHandleKeymap,
+            .enter = keyboardHandleEnter,
+            .leave = keyboardHandleLeave,
+            .key = keyboardHandleKey,
+            .modifiers = keyboardHandleModifiers,
+            .repeat_info = keyboardHandleRepeatInfo,
+        };
+        _ = c.wl_keyboard_add_listener(wl_keyboard, &listener, self);
     }
 
     fn seatHandleName(data: ?*anyopaque, seat: ?*c.wl_seat, name: [*c]const u8) callconv(.c) void {

@@ -117,6 +117,10 @@ test "Display: create and destroy" {
 
 test "Display: add socket auto" {
     const allocator = testing.allocator;
+    const test_setup = @import("test_setup.zig");
+
+    var runtime = try test_setup.RuntimeDir.setup(allocator);
+    defer runtime.cleanup();
 
     const display = try Display.create();
     var d = display;

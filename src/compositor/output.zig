@@ -17,7 +17,7 @@ const FrameCallback = @import("surface.zig").FrameCallback;
 pub const Type = struct {
     allocator: std.mem.Allocator,
     compositor: *Compositor,
-    backend_output: *backend.output.IOutput,
+    backend_output: backend.output.IOutput,
     name: []const u8,
     needs_frame: bool = false,
     frame_pending: bool = false,
@@ -33,7 +33,7 @@ pub const Type = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         compositor: *Compositor,
-        backend_output: *backend.output.IOutput,
+        backend_output: backend.output.IOutput,
         name: []const u8,
     ) Error!*Self {
         const self = try allocator.create(Self);
@@ -77,16 +77,14 @@ pub const Type = struct {
         self.frame_pending = false;
         self.needs_frame = false;
 
-        // Get renderer from backend coordinator
+        // Get backend coordinator
         const coord = self.compositor.coordinator orelse {
             self.compositor.logger.err("No backend coordinator available for rendering", .{});
             return error.BackendError;
         };
 
-        const renderer = coord.primary_renderer orelse {
-            self.compositor.logger.err("No renderer available", .{});
-            return error.BackendError;
-        };
+        // Renderer is optional for zero-copy passthrough (e.g., nested Wayland)
+        const renderer = coord.primary_renderer;
 
         // Count mapped surfaces with buffers
         var surface_count: usize = 0;
@@ -111,7 +109,7 @@ pub const Type = struct {
                 continue;
             }
 
-            // Convert wl_resource buffer to backend.buffer.Interface
+            // Import client buffer as backend buffer interface
             const buffer_resource = surface.current.buffer.buffer orelse continue;
             const buffer_iface = self.importBuffer(buffer_resource) catch |err| {
                 self.compositor.logger.warn(
@@ -121,13 +119,22 @@ pub const Type = struct {
                 continue;
             };
 
-            // For now, we just verify the buffer is valid
-            // In a full implementation, we would:
-            // 1. Get/create a swapchain buffer from backend output
-            // 2. Use renderer.blit() to copy surface buffer to output buffer
-            // 3. Commit the output with the new buffer
-            _ = buffer_iface;
-            _ = renderer;
+            if (renderer) |rend| {
+                // Multi-GPU or format conversion - use renderer to blit
+                self.compositor.logger.trace("Using renderer to blit surface {d}", .{surface.id});
+                _ = rend; // TODO: Implement swapchain + blit path
+                // This would: get swapchain buffer, rend.blit(client_buffer, swapchain_buffer), commit
+                self.compositor.logger.warn("Renderer blit not yet implemented, falling back to passthrough", .{});
+            }
+            
+            // Zero-copy passthrough for nested Wayland
+            // Pass client buffer directly to backend output
+            try self.setBackendBuffer(buffer_iface);
+            
+            if (!self.backend_output.commit()) {
+                self.compositor.logger.err("Backend output commit failed", .{});
+                return error.BackendError;
+            }
 
             self.compositor.logger.trace("Rendered surface {d}", .{surface.id});
         }
@@ -175,25 +182,288 @@ pub const Type = struct {
         return @truncate(ms);
     }
 
+    /// Sets a buffer in the backend output state for rendering
+    fn setBackendBuffer(self: *Self, buf: backend.buffer.Interface) Error!void {
+        // Access the concrete output implementation through the interface
+        // The base.ptr contains the pointer to the actual Output structure
+        const output_ptr = self.backend_output.base.ptr;
+        
+        // For now, we only support Wayland backend
+        // Cast to Wayland Output and set buffer in state
+        const wayland_backend = @import("backend").wayland;
+        const wl_output: *wayland_backend.Output = @ptrCast(@alignCast(output_ptr));
+        
+        wl_output.state.setBuffer(buf);
+    }
+
     /// Imports a wl_buffer resource as a backend buffer interface
     fn importBuffer(self: *Self, buffer_resource: *c.wl_resource) Error!backend.buffer.Interface {
         // Check if this is a wl_shm_buffer
         const shm_buffer = c.wl_shm_buffer_get(buffer_resource);
-        if (shm_buffer != null) {
-            // For now, we don't support SHM buffers in rendering
-            self.compositor.logger.warn("SHM buffers not yet supported for rendering", .{});
+        if (shm_buffer) |shm| {
+            return self.importShmBuffer(shm);
+        }
+
+        return self.importDmabufBuffer(buffer_resource);
+    }
+
+    fn importShmBuffer(self: *Self, shm_buffer: *c.wl_shm_buffer) Error!backend.buffer.Interface {
+        const width = c.wl_shm_buffer_get_width(shm_buffer);
+        const height = c.wl_shm_buffer_get_height(shm_buffer);
+        const stride = c.wl_shm_buffer_get_stride(shm_buffer);
+        const format = c.wl_shm_buffer_get_format(shm_buffer);
+
+        c.wl_shm_buffer_begin_access(shm_buffer);
+        const data = c.wl_shm_buffer_get_data(shm_buffer);
+        c.wl_shm_buffer_end_access(shm_buffer);
+
+        if (data == null) {
+            self.compositor.logger.warn("SHM buffer has null data pointer", .{});
             return error.BackendError;
         }
 
-        // For DMA-BUF, we would need to:
-        // 1. Get the linux_dmabuf_buffer from the resource
-        // 2. Extract FDs, strides, offsets, format, modifier
-        // 3. Create a backend.buffer.Interface wrapper
-        
-        // This is a placeholder - full implementation needs DMA-BUF support
-        self.compositor.logger.warn("DMA-BUF import not yet fully implemented", .{});
-        return error.BackendError;
+        const wrapper = try self.allocator.create(ShmBufferWrapper);
+        errdefer self.allocator.destroy(wrapper);
+
+        wrapper.* = .{
+            .allocator = self.allocator,
+            .shm_buffer = shm_buffer,
+            .width = width,
+            .height = height,
+            .stride = stride,
+            .format = format,
+        };
+
+        self.compositor.logger.debug(
+            "Imported SHM buffer: {}x{} stride={} format=0x{x}",
+            .{ width, height, stride, format },
+        );
+
+        return backend.buffer.Interface.init(wrapper, &shm_buffer_vtable);
     }
+
+    fn importDmabufBuffer(self: *Self, buffer_resource: *c.wl_resource) Error!backend.buffer.Interface {
+        // Get DMA-BUF data from resource
+        const user_data = c.wl_resource_get_user_data(buffer_resource);
+        if (user_data == null) {
+            self.compositor.logger.warn("Buffer has no user data", .{});
+            return error.BackendError;
+        }
+        
+        // Cast to DmabufBufferData
+        const buffer_data: *linux_dmabuf.DmabufBufferData = @ptrCast(@alignCast(user_data));
+        const params = buffer_data.params_data;
+
+        const wrapper = try self.allocator.create(DmabufBufferWrapper);
+        errdefer self.allocator.destroy(wrapper);
+
+        wrapper.* = .{
+            .allocator = self.allocator,
+            .width = params.width,
+            .height = params.height,
+            .format = params.format,
+            .num_planes = params.num_planes,
+            .plane_data = params.plane_data,
+        };
+
+        return backend.buffer.Interface.init(wrapper, &dmabuf_buffer_vtable);
+    }
+};
+
+const linux_dmabuf = @import("protocols/linux_dmabuf.zig");
+const PlaneAttributes = linux_dmabuf.PlaneAttributes;
+
+/// Wrapper for client DMA-BUF buffers to be used with backend
+const DmabufBufferWrapper = struct {
+    allocator: std.mem.Allocator,
+    width: i32,
+    height: i32,
+    format: u32,
+    num_planes: u32,
+    plane_data: [4]PlaneAttributes,
+
+    fn caps(_: *anyopaque) backend.buffer.Capability {
+        return .{};
+    }
+
+    fn bufferType(_: *anyopaque) backend.buffer.Type {
+        return .dmabuf;
+    }
+
+    fn update(_: *anyopaque, _: *const anyopaque) void {}
+
+    fn isSynchronous(_: *anyopaque) bool {
+        return false;
+    }
+
+    fn good(ptr: *anyopaque) bool {
+        const self: *DmabufBufferWrapper = @ptrCast(@alignCast(ptr));
+        return self.width > 0 and self.height > 0 and self.num_planes > 0;
+    }
+
+    fn dmabuf(ptr: *anyopaque) backend.buffer.DMABUFAttrs {
+        const self: *DmabufBufferWrapper = @ptrCast(@alignCast(ptr));
+        
+        const modifier: u64 = (@as(u64, self.plane_data[0].modifier_hi) << 32) | 
+                              @as(u64, self.plane_data[0].modifier_lo);
+        
+        var attrs: backend.buffer.DMABUFAttrs = .{
+            .success = true,
+            .size = math.Vec2.init(@floatFromInt(self.width), @floatFromInt(self.height)),
+            .format = self.format,
+            .modifier = modifier,
+            .planes = @intCast(self.num_planes),
+        };
+
+        // Copy plane FDs, strides, and offsets
+        for (0..@min(self.num_planes, 4)) |i| {
+            attrs.fds[i] = self.plane_data[i].fd;
+            attrs.strides[i] = self.plane_data[i].stride;
+            attrs.offsets[i] = self.plane_data[i].offset;
+        }
+
+        return attrs;
+    }
+
+    fn shm(_: *anyopaque) backend.buffer.SSHMAttrs {
+        return .{ .success = false };
+    }
+
+    fn beginDataPtr(_: *anyopaque, _: u32) backend.buffer.DataPtrResult {
+        return .{ .ptr = null, .flags = 0, .size = 0 };
+    }
+
+    fn endDataPtr(_: *anyopaque) void {}
+
+    fn sendRelease(_: *anyopaque) void {}
+
+    fn lock(_: *anyopaque) void {}
+
+    fn unlock(_: *anyopaque) void {}
+
+    fn locked(_: *anyopaque) bool {
+        return false;
+    }
+
+    fn deinitBuffer(ptr: *anyopaque) void {
+        const self: *DmabufBufferWrapper = @ptrCast(@alignCast(ptr));
+        self.allocator.destroy(self);
+    }
+};
+
+const dmabuf_buffer_vtable = backend.buffer.Interface.VTableDef{
+    .caps = DmabufBufferWrapper.caps,
+    .type = DmabufBufferWrapper.bufferType,
+    .update = DmabufBufferWrapper.update,
+    .is_synchronous = DmabufBufferWrapper.isSynchronous,
+    .good = DmabufBufferWrapper.good,
+    .dmabuf = DmabufBufferWrapper.dmabuf,
+    .shm = DmabufBufferWrapper.shm,
+    .begin_data_ptr = DmabufBufferWrapper.beginDataPtr,
+    .end_data_ptr = DmabufBufferWrapper.endDataPtr,
+    .send_release = DmabufBufferWrapper.sendRelease,
+    .lock = DmabufBufferWrapper.lock,
+    .unlock = DmabufBufferWrapper.unlock,
+    .locked = DmabufBufferWrapper.locked,
+    .deinit = DmabufBufferWrapper.deinitBuffer,
+};
+
+/// Wrapper for client SHM buffers to be used with backend
+const ShmBufferWrapper = struct {
+    allocator: std.mem.Allocator,
+    shm_buffer: *c.wl_shm_buffer,
+    width: i32,
+    height: i32,
+    stride: i32,
+    format: u32,
+
+    fn caps(_: *anyopaque) backend.buffer.Capability {
+        return .{ .dataptr = true };
+    }
+
+    fn bufferType(_: *anyopaque) backend.buffer.Type {
+        return .shm;
+    }
+
+    fn update(_: *anyopaque, _: *const anyopaque) void {}
+
+    fn isSynchronous(_: *anyopaque) bool {
+        return true;
+    }
+
+    fn good(ptr: *anyopaque) bool {
+        const self: *ShmBufferWrapper = @ptrCast(@alignCast(ptr));
+        return self.width > 0 and self.height > 0;
+    }
+
+    fn dmabuf(_: *anyopaque) backend.buffer.DMABUFAttrs {
+        return .{ .success = false };
+    }
+
+    fn shm(ptr: *anyopaque) backend.buffer.SSHMAttrs {
+        const self: *ShmBufferWrapper = @ptrCast(@alignCast(ptr));
+
+        return .{
+            .success = true,
+            .fd = -1,
+            .format = self.format,
+            .size = math.Vec2.init(@floatFromInt(self.width), @floatFromInt(self.height)),
+            .stride = self.stride,
+            .offset = 0,
+        };
+    }
+
+    fn beginDataPtr(ptr: *anyopaque, _: u32) backend.buffer.DataPtrResult {
+        const self: *ShmBufferWrapper = @ptrCast(@alignCast(ptr));
+        
+        c.wl_shm_buffer_begin_access(self.shm_buffer);
+        const data = c.wl_shm_buffer_get_data(self.shm_buffer);
+        
+        const size = @as(usize, @intCast(self.height * self.stride));
+        
+        return .{
+            .ptr = @ptrCast(data),
+            .flags = 0,
+            .size = size,
+        };
+    }
+
+    fn endDataPtr(ptr: *anyopaque) void {
+        const self: *ShmBufferWrapper = @ptrCast(@alignCast(ptr));
+        c.wl_shm_buffer_end_access(self.shm_buffer);
+    }
+
+    fn sendRelease(_: *anyopaque) void {}
+
+    fn lock(_: *anyopaque) void {}
+
+    fn unlock(_: *anyopaque) void {}
+
+    fn locked(_: *anyopaque) bool {
+        return false;
+    }
+
+    fn deinitBuffer(ptr: *anyopaque) void {
+        const self: *ShmBufferWrapper = @ptrCast(@alignCast(ptr));
+        self.allocator.destroy(self);
+    }
+};
+
+const shm_buffer_vtable = backend.buffer.Interface.VTableDef{
+    .caps = ShmBufferWrapper.caps,
+    .type = ShmBufferWrapper.bufferType,
+    .update = ShmBufferWrapper.update,
+    .is_synchronous = ShmBufferWrapper.isSynchronous,
+    .good = ShmBufferWrapper.good,
+    .dmabuf = ShmBufferWrapper.dmabuf,
+    .shm = ShmBufferWrapper.shm,
+    .begin_data_ptr = ShmBufferWrapper.beginDataPtr,
+    .end_data_ptr = ShmBufferWrapper.endDataPtr,
+    .send_release = ShmBufferWrapper.sendRelease,
+    .lock = ShmBufferWrapper.lock,
+    .unlock = ShmBufferWrapper.unlock,
+    .locked = ShmBufferWrapper.locked,
+    .deinit = ShmBufferWrapper.deinitBuffer,
 };
 
 // Tests
@@ -206,6 +476,10 @@ test "Output - init and deinit" {
     }
 
     const allocator = testing.allocator;
+    const test_setup = @import("wayland").test_setup;
+
+    var runtime = try test_setup.RuntimeDir.setup(allocator);
+    defer runtime.cleanup();
 
     var server = try wayland.Server.init(allocator, null);
     defer server.deinit();
