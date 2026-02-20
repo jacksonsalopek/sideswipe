@@ -59,7 +59,7 @@ pub const Buffer = struct {
     }
 
     fn createFromDmabuf(self: *Self) !void {
-        const dmabuf = self.backend.wayland_state.dmabuf orelse return error.NoDmabufSupport;
+        const dmabuf = self.backend.wayland_state.dmabuf orelse return;
 
         const params = c.zwp_linux_dmabuf_v1_create_params(dmabuf);
         if (params == null) {
@@ -91,7 +91,7 @@ pub const Buffer = struct {
     }
 
     fn createFromShm(self: *Self) !void {
-        const shm = self.backend.wayland_state.shm orelse return error.NoShmSupport;
+        const shm = self.backend.wayland_state.shm orelse return;
 
         const attrs = self.buffer.shm();
         if (!attrs.success) {

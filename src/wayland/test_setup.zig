@@ -10,23 +10,23 @@ extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 pub const RuntimeDir = struct {
-    tmp: ?std.testing.TmpDir,
-    path: ?[]const u8,
-    path_z: ?[:0]const u8,
+    tmp: std.testing.TmpDir,
+    path: []const u8,
+    path_z: [:0]const u8,
     allocator: std.mem.Allocator,
+    saved_runtime_dir: ?[:0]const u8,
 
-    /// Set up XDG_RUNTIME_DIR for tests. If already set, does nothing.
+    /// Set up XDG_RUNTIME_DIR for tests using a temporary directory.
+    /// Always creates a new temp dir and overrides existing XDG_RUNTIME_DIR.
     /// Call cleanup() when done to restore environment.
     pub fn setup(allocator: std.mem.Allocator) !RuntimeDir {
-        if (std.posix.getenv("XDG_RUNTIME_DIR")) |_| {
-            // Already set, no need to create temp dir
-            return RuntimeDir{
-                .tmp = null,
-                .path = null,
-                .path_z = null,
-                .allocator = allocator,
-            };
-        }
+        // Save existing XDG_RUNTIME_DIR to restore later
+        const old_runtime_dir = std.posix.getenv("XDG_RUNTIME_DIR");
+        const saved_path = if (old_runtime_dir) |dir|
+            try allocator.dupeZ(u8, dir)
+        else
+            null;
+        errdefer if (saved_path) |p| allocator.free(p);
 
         var temp = std.testing.tmpDir(.{});
         errdefer temp.cleanup();
@@ -37,7 +37,7 @@ pub const RuntimeDir = struct {
         const path_z = try allocator.dupeZ(u8, path);
         errdefer allocator.free(path_z);
 
-        // Use libc setenv
+        // Use libc setenv to override any existing value
         _ = setenv("XDG_RUNTIME_DIR", path_z.ptr, 1);
 
         return RuntimeDir{
@@ -45,24 +45,29 @@ pub const RuntimeDir = struct {
             .path = path,
             .path_z = path_z,
             .allocator = allocator,
+            .saved_runtime_dir = saved_path,
         };
     }
 
     /// Clean up temporary directory and restore environment.
-    /// Note: Unsets XDG_RUNTIME_DIR first, then cleans up temp dir.
+    /// Note: Restores or unsets XDG_RUNTIME_DIR first, then cleans up temp dir.
     /// This ensures Wayland sockets are closed before directory removal.
     pub fn cleanup(self: *RuntimeDir) void {
-        // Unset env var first to prevent new files being created
-        if (self.tmp != null) {
+        // Restore or unset env var first to prevent new files being created
+        if (self.saved_runtime_dir) |saved| {
+            _ = setenv("XDG_RUNTIME_DIR", saved.ptr, 1);
+            self.allocator.free(saved);
+        } else {
             _ = unsetenv("XDG_RUNTIME_DIR");
         }
         
         // Free allocations
-        if (self.path_z) |path_z| self.allocator.free(path_z);
-        if (self.path) |path| self.allocator.free(path);
+        self.allocator.free(self.path_z);
+        self.allocator.free(self.path);
         
         // Clean up temp directory last
-        if (self.tmp) |*t| t.cleanup();
+        var tmp = self.tmp;
+        tmp.cleanup();
     }
 };
 
