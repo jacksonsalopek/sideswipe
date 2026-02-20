@@ -48,11 +48,7 @@ fn tryInitializeBackend(allocator: std.mem.Allocator, comp: *compositor.Composit
         .{ .backend_type = .wayland, .request_mode = .if_available },
     };
 
-    const log_fn = createBackendLogger();
-
-    const coord = backend.Coordinator.create(allocator, &backend_opts, .{
-        .log_function = log_fn,
-    }) catch |err| {
+    const coord = backend.Coordinator.create(allocator, &backend_opts, .{}) catch |err| {
         logger.warn("Failed to create backend coordinator: {}", .{err});
         logger.info("Continuing in display-server-only mode", .{});
         return null;
@@ -81,22 +77,6 @@ fn tryInitializeBackend(allocator: std.mem.Allocator, comp: *compositor.Composit
 
     logger.info("Backend initialized successfully", .{});
     return coord;
-}
-
-fn createBackendLogger() backend.LogFunction {
-    const log_fn = struct {
-        fn logBackend(level: backend.LogLevel, message: []const u8) void {
-            const log_level: cli.LogLevel = switch (level) {
-                .trace => .trace,
-                .debug => .debug,
-                .warning => .warn,
-                .err => .err,
-                .critical => .err,
-            };
-            std.debug.print("[backend:{s}] {s}\n", .{ @tagName(log_level), message });
-        }
-    }.logBackend;
-    return log_fn;
 }
 
 pub fn main() !void {

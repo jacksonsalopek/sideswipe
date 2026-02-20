@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const core = @import("core");
+const cli = @import("core.cli");
 const cvt = @import("core.display").cvt;
 const math = @import("core.math");
 const Vector2D = math.Vec2;
@@ -579,7 +580,7 @@ pub const Backend = struct {
         // Create backends for each GPU
         for (devices) |device| {
             const be = Self.fromGpu(alloc, device.path, backend_ptr, null) catch |err| {
-                coordinator.log(.warning, "Failed to create DRM be for GPU");
+                cli.log.warn("Failed to create DRM be for GPU", .{});
                 _ = err;
                 continue;
             };
@@ -746,9 +747,8 @@ pub const Backend = struct {
         
         // Scan and initialize connected outputs
         self.scanOutputs() catch |err| {
-            if (self.backend_ptr) |be_ptr| {
-                const coordinator: *backend.Coordinator = @ptrCast(@alignCast(be_ptr));
-                coordinator.log(.err, "Failed to scan DRM outputs");
+            if (self.backend_ptr) |_| {
+                cli.log.err("Failed to scan DRM outputs", .{});
                 _ = err;
             }
         };
@@ -762,28 +762,22 @@ pub const Backend = struct {
             // Only process connected displays
             if (conn.status != .connected) continue;
             
-            // Get coordinator for logging
-            const coordinator: *backend.Coordinator = if (self.backend_ptr) |ptr|
-                @ptrCast(@alignCast(ptr))
-            else
-                continue;
-            
             // Log basic connector info
             var msg_buf: [256]u8 = undefined;
             const msg = std.fmt.bufPrint(&msg_buf, "Found connected output: {s}", .{conn.name}) catch "Output found";
-            coordinator.log(.debug, msg);
+            cli.log.debug("{s}", .{msg});
             
             // Try to get EDID data
             if (conn.props.edid != 0) {
                 const edid_data = self.getConnectorEDID(conn) catch {
-                    coordinator.log(.warning, "Failed to read EDID data");
+                    cli.log.warn("Failed to read EDID data", .{});
                     continue;
                 };
                 defer self.allocator.free(edid_data);
                 
                 // Parse EDID
                 const parsed = edid_parser.fast.parse(edid_data) catch {
-                    coordinator.log(.warning, "Failed to parse EDID data");
+                    cli.log.warn("Failed to parse EDID data", .{});
                     continue;
                 };
                 
@@ -795,7 +789,7 @@ pub const Backend = struct {
                     "Display: {s} (Serial: {d})", 
                     .{manufacturer, serial}
                 ) catch "Display info";
-                coordinator.log(.debug, info_msg);
+                cli.log.debug("{s}", .{info_msg});
                 
                 // Log physical size if available
                 const width_cm = parsed.getScreenWidthCm();
@@ -805,7 +799,7 @@ pub const Backend = struct {
                         "Physical size: {d}x{d} cm",
                         .{width_cm, height_cm}
                     ) catch "Physical size";
-                    coordinator.log(.debug, size_msg);
+                    cli.log.debug("{s}", .{size_msg});
                 }
             }
             
@@ -815,7 +809,7 @@ pub const Backend = struct {
                     "Available modes: {d}",
                     .{conn.modes.items.len}
                 ) catch "Modes available";
-                coordinator.log(.debug, mode_msg);
+                cli.log.debug("{s}", .{mode_msg});
                 
                 // Log preferred mode if any
                 for (conn.modes.items) |mode| {
@@ -828,7 +822,7 @@ pub const Backend = struct {
                                 mode.refresh_rate / 1000,
                             }
                         ) catch "Preferred mode";
-                        coordinator.log(.debug, pref_msg);
+                        cli.log.debug("{s}", .{pref_msg});
                         break;
                     }
                 }
