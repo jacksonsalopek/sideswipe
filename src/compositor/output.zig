@@ -63,23 +63,26 @@ pub const Type = struct {
     /// Schedules a frame to be rendered
     pub fn scheduleFrame(self: *Self) void {
         if (self.frame_pending) {
+            self.compositor.logger.trace("Output {s}: Frame already pending, setting needs_frame flag", .{self.name});
             self.needs_frame = true;
             return;
         }
 
-        self.compositor.logger.trace("Scheduling frame for output {s}", .{self.name});
+        self.compositor.logger.debug("Output {s}: Scheduling frame", .{self.name});
         self.backend_output.scheduleFrame(.unknown);
         self.frame_pending = true;
     }
 
     /// Renders all surfaces to this output
     pub fn render(self: *Self) Error!void {
+        self.compositor.logger.debug("Output {s}: Begin render (frame_pending={}, needs_frame={})", .{ self.name, self.frame_pending, self.needs_frame });
+        
         self.frame_pending = false;
         self.needs_frame = false;
 
         // Get backend coordinator
         const coord = self.compositor.coordinator orelse {
-            self.compositor.logger.err("No backend coordinator available for rendering", .{});
+            self.compositor.logger.err("Output {s}: No backend coordinator available for rendering", .{self.name});
             return error.BackendError;
         };
 
@@ -94,58 +97,76 @@ pub const Type = struct {
             }
         }
 
+        self.compositor.logger.debug("Output {s}: Found {d} mapped surface(s) with buffers (total surfaces: {d})", .{ self.name, surface_count, self.compositor.surfaces.items.len });
+
         if (surface_count == 0) {
-            self.compositor.logger.trace("No surfaces to render", .{});
+            self.compositor.logger.trace("Output {s}: No surfaces to render, sending frame callbacks", .{self.name});
             // Still need to send frame callbacks
             try self.sendFrameCallbacks();
             return;
         }
 
-        self.compositor.logger.debug("Rendering frame with {d} surface(s)", .{surface_count});
+        self.compositor.logger.debug("Output {s}: Rendering frame with {d} surface(s)", .{ self.name, surface_count });
 
         // Render each mapped surface
         for (self.compositor.surfaces.items) |surface| {
-            if (!surface.mapped or surface.current.buffer.buffer == null) {
+            if (!surface.mapped) {
+                self.compositor.logger.trace("Output {s}: Skipping unmapped surface {d}", .{ self.name, surface.id });
                 continue;
             }
+            
+            if (surface.current.buffer.buffer == null) {
+                self.compositor.logger.trace("Output {s}: Skipping surface {d} (no buffer)", .{ self.name, surface.id });
+                continue;
+            }
+
+            self.compositor.logger.debug("Output {s}: Processing surface {d}", .{ self.name, surface.id });
 
             // Import client buffer as backend buffer interface
             const buffer_resource = surface.current.buffer.buffer orelse continue;
             const buffer_iface = self.importBuffer(buffer_resource) catch |err| {
                 self.compositor.logger.warn(
-                    "Failed to import buffer for surface {d}: {}",
-                    .{ surface.id, err },
+                    "Output {s}: Failed to import buffer for surface {d}: {}",
+                    .{ self.name, surface.id, err },
                 );
                 continue;
             };
 
+            self.compositor.logger.debug("Output {s}: Successfully imported buffer for surface {d}", .{ self.name, surface.id });
+
             if (renderer) |rend| {
                 // Multi-GPU or format conversion - use renderer to blit
-                self.compositor.logger.trace("Using renderer to blit surface {d}", .{surface.id});
+                self.compositor.logger.trace("Output {s}: Using renderer to blit surface {d}", .{ self.name, surface.id });
                 _ = rend; // TODO: Implement swapchain + blit path
                 // This would: get swapchain buffer, rend.blit(client_buffer, swapchain_buffer), commit
-                self.compositor.logger.warn("Renderer blit not yet implemented, falling back to passthrough", .{});
+                self.compositor.logger.warn("Output {s}: Renderer blit not yet implemented, falling back to passthrough", .{self.name});
             }
             
             // Zero-copy passthrough for nested Wayland
             // Pass client buffer directly to backend output
+            self.compositor.logger.debug("Output {s}: Setting backend buffer for surface {d}", .{ self.name, surface.id });
             try self.setBackendBuffer(buffer_iface);
             
+            self.compositor.logger.debug("Output {s}: Committing to backend for surface {d}", .{ self.name, surface.id });
             if (!self.backend_output.commit()) {
-                self.compositor.logger.err("Backend output commit failed", .{});
+                self.compositor.logger.err("Output {s}: Backend commit failed for surface {d}", .{ self.name, surface.id });
                 return error.BackendError;
             }
 
-            self.compositor.logger.trace("Rendered surface {d}", .{surface.id});
+            self.compositor.logger.debug("Output {s}: Successfully rendered surface {d}", .{ self.name, surface.id });
         }
 
         // Send frame callbacks to all surfaces
+        self.compositor.logger.debug("Output {s}: Sending frame callbacks", .{self.name});
         try self.sendFrameCallbacks();
 
         // If another frame was requested during rendering, schedule it
         if (self.needs_frame) {
+            self.compositor.logger.debug("Output {s}: Scheduling another frame (needs_frame was set)", .{self.name});
             self.scheduleFrame();
         }
+        
+        self.compositor.logger.debug("Output {s}: Render complete", .{self.name});
     }
 
     /// Sends frame callbacks to all surfaces
@@ -193,7 +214,9 @@ pub const Type = struct {
         const wayland_backend = @import("backend").wayland;
         const wl_output: *wayland_backend.Output = @ptrCast(@alignCast(output_ptr));
         
+        self.compositor.logger.debug("Output {s}: Before setBuffer - committed.buffer={}", .{ self.name, wl_output.state.committed.buffer });
         wl_output.state.setBuffer(buf);
+        self.compositor.logger.debug("Output {s}: After setBuffer - committed.buffer={}", .{ self.name, wl_output.state.committed.buffer });
     }
 
     /// Imports a wl_buffer resource as a backend buffer interface
@@ -213,12 +236,14 @@ pub const Type = struct {
         const stride = c.wl_shm_buffer_get_stride(shm_buffer);
         const format = c.wl_shm_buffer_get_format(shm_buffer);
 
+        self.compositor.logger.debug("Output {s}: Importing SHM buffer ({}x{} stride={} format=0x{x:0>8})", .{ self.name, width, height, stride, format });
+
         c.wl_shm_buffer_begin_access(shm_buffer);
         const data = c.wl_shm_buffer_get_data(shm_buffer);
         c.wl_shm_buffer_end_access(shm_buffer);
 
         if (data == null) {
-            self.compositor.logger.warn("SHM buffer has null data pointer", .{});
+            self.compositor.logger.warn("Output {s}: SHM buffer has null data pointer", .{self.name});
             return error.BackendError;
         }
 
@@ -234,10 +259,7 @@ pub const Type = struct {
             .format = format,
         };
 
-        self.compositor.logger.debug(
-            "Imported SHM buffer: {}x{} stride={} format=0x{x}",
-            .{ width, height, stride, format },
-        );
+        self.compositor.logger.debug("Output {s}: Successfully imported SHM buffer ({}x{} stride={} format=0x{x:0>8})", .{ self.name, width, height, stride, format });
 
         return backend.buffer.Interface.init(wrapper, &shm_buffer_vtable);
     }
@@ -246,13 +268,21 @@ pub const Type = struct {
         // Get DMA-BUF data from resource
         const user_data = c.wl_resource_get_user_data(buffer_resource);
         if (user_data == null) {
-            self.compositor.logger.warn("Buffer has no user data", .{});
+            self.compositor.logger.warn("Output {s}: Buffer has no user data", .{self.name});
             return error.BackendError;
         }
         
         // Cast to DmabufBufferData
         const buffer_data: *linux_dmabuf.DmabufBufferData = @ptrCast(@alignCast(user_data));
         const params = buffer_data.params_data;
+
+        const modifier: u64 = (@as(u64, params.plane_data[0].modifier_hi) << 32) | 
+                              @as(u64, params.plane_data[0].modifier_lo);
+
+        self.compositor.logger.debug(
+            "Output {s}: Importing DMA-BUF buffer ({}x{} format=0x{x:0>8} modifier=0x{x:0>16} planes={})",
+            .{ self.name, params.width, params.height, params.format, modifier, params.num_planes },
+        );
 
         const wrapper = try self.allocator.create(DmabufBufferWrapper);
         errdefer self.allocator.destroy(wrapper);
@@ -265,6 +295,8 @@ pub const Type = struct {
             .num_planes = params.num_planes,
             .plane_data = params.plane_data,
         };
+
+        self.compositor.logger.debug("Output {s}: Successfully imported DMA-BUF buffer", .{self.name});
 
         return backend.buffer.Interface.init(wrapper, &dmabuf_buffer_vtable);
     }

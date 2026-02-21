@@ -26,6 +26,7 @@ pub const Compositor = struct {
         InitFailed,
         OutOfMemory,
         BackendError,
+        CreateFailed,
     };
 
     /// Creates a new compositor instance
@@ -82,6 +83,15 @@ pub const Compositor = struct {
         const wayland_backend = @import("backend").wayland.Backend;
         const wl_backend: *wayland_backend = @ptrCast(@alignCast(backend_ptr));
 
+        // Register backend with server event loop for automatic dispatch
+        const wayland_mod = @import("wayland");
+        var display = wayland_mod.Display{ .handle = self.server.getDisplay() };
+        const event_loop_handle = try display.getEventLoop();
+        
+        self.logger.debug("About to register backend with event loop (backend_display={})", .{wl_backend.wayland_state.display != null});
+        wl_backend.registerWithEventLoop(@ptrCast(event_loop_handle));
+        self.logger.debug("Finished registering backend with event loop", .{});
+
         if (wl_backend.outputs.items.len == 0) {
             self.logger.warn("No backend outputs available to connect", .{});
             return;
@@ -105,10 +115,12 @@ pub const Compositor = struct {
         const id = self.next_surface_id;
         self.next_surface_id += 1;
 
+        self.logger.debug("Compositor: Creating surface {d}", .{id});
         const surface = try Surface.init(self.allocator, self, id);
         errdefer surface.deinit();
 
         try self.surfaces.append(self.allocator, surface);
+        self.logger.debug("Compositor: Surface {d} registered (total surfaces: {d})", .{ id, self.surfaces.items.len });
         return surface;
     }
 
@@ -144,6 +156,7 @@ pub const Compositor = struct {
 
     /// Schedules a frame on all outputs
     pub fn scheduleFrame(self: *Self) void {
+        self.logger.debug("Compositor: Scheduling frame on {d} output(s)", .{self.outputs.items.len});
         for (self.outputs.items) |output| {
             output.scheduleFrame();
         }
@@ -154,81 +167,88 @@ pub const Compositor = struct {
 fn outputFrameCallback(userdata: ?*anyopaque) void {
     const output: *Output = @ptrCast(@alignCast(userdata orelse return));
 
+    output.compositor.logger.debug("Compositor: Frame callback triggered for output {s}", .{output.name});
+
     // Trigger rendering on this output
     output.render() catch |err| {
-        output.compositor.logger.err("Failed to render frame: {}", .{err});
+        output.compositor.logger.err("Compositor: Failed to render frame on output {s}: {}", .{ output.name, err });
     };
 }
 
 // Tests
 const testing = core.testing;
 
+/// Test fixture for setting up compositor test environment
+const TestFixture = struct {
+    allocator: std.mem.Allocator,
+    runtime: wayland.test_setup.RuntimeDir,
+    server: wayland.Server,
+    logger: cli.Logger,
+    compositor: *Compositor,
+
+    fn setup(allocator: std.mem.Allocator) !TestFixture {
+        var runtime = try wayland.test_setup.RuntimeDir.setup(allocator);
+        errdefer runtime.cleanup();
+
+        var server = try wayland.Server.init(allocator, null);
+        errdefer server.deinit();
+
+        var fixture = TestFixture{
+            .allocator = allocator,
+            .runtime = runtime,
+            .server = server,
+            .logger = cli.Logger.init(allocator),
+            .compositor = undefined,
+        };
+
+        fixture.logger.setLogLevel(.err); // Disable debug/info/warn logging in tests
+        fixture.logger.setEnableStdout(false);
+        errdefer fixture.logger.deinit();
+
+        fixture.compositor = try Compositor.init(allocator, &fixture.server, &fixture.logger);
+        errdefer fixture.compositor.deinit();
+
+        return fixture;
+    }
+
+    fn cleanup(self: *TestFixture) void {
+        self.compositor.deinit();
+        self.logger.deinit();
+        self.server.deinit();
+        self.runtime.cleanup();
+    }
+};
+
 test "Compositor - init and deinit" {
-    const allocator = testing.allocator;
-    const test_setup = @import("wayland").test_setup;
+    var fixture = try TestFixture.setup(testing.allocator);
+    defer fixture.cleanup();
 
-    var runtime = try test_setup.RuntimeDir.setup(allocator);
-    defer runtime.cleanup();
-
-    var server = try wayland.Server.init(allocator, null);
-    defer server.deinit();
-
-    var logger = cli.Logger.init(allocator);
-    defer logger.deinit();
-
-    var compositor = try Compositor.init(allocator, &server, &logger);
-    defer compositor.deinit();
-
-    try testing.expectEqual(@as(u32, 1), compositor.next_surface_id);
-    try testing.expectEqual(@as(usize, 0), compositor.surfaces.items.len);
-    try testing.expectNull(compositor.coordinator);
+    try testing.expectEqual(@as(u32, 1), fixture.compositor.next_surface_id);
+    try testing.expectEqual(@as(usize, 0), fixture.compositor.surfaces.items.len);
+    try testing.expectNull(fixture.compositor.coordinator);
 }
 
-// test "Compositor - create and destroy surface" {
-//     const allocator = testing.allocator;
-//     const test_setup = @import("wayland").test_setup;
+test "Compositor - create and destroy surface" {
+    var fixture = try TestFixture.setup(testing.allocator);
+    defer fixture.cleanup();
 
-//     var runtime = try test_setup.RuntimeDir.setup(allocator);
-//     defer runtime.cleanup();
+    const surface = try fixture.compositor.createSurface();
+    try testing.expectEqual(@as(usize, 1), fixture.compositor.surfaces.items.len);
+    try testing.expectEqual(@as(u32, 1), surface.id);
 
-//     var server = try wayland.Server.init(allocator, null);
-//     defer server.deinit();
-
-//     var logger = cli.Logger.init(allocator);
-//     defer logger.deinit();
-
-//     var compositor = try Compositor.init(allocator, &server, &logger);
-//     defer compositor.deinit();
-
-//     const surface = try compositor.createSurface();
-//     try testing.expectEqual(@as(usize, 1), compositor.surfaces.items.len);
-//     try testing.expectEqual(@as(u32, 1), surface.id);
-
-//     compositor.destroySurface(surface, "test teardown");
-//     try testing.expectEqual(@as(usize, 0), compositor.surfaces.items.len);
-// }
+    fixture.compositor.destroySurface(surface, "test teardown");
+    try testing.expectEqual(@as(usize, 0), fixture.compositor.surfaces.items.len);
+}
 
 test "Compositor - multiple surfaces" {
-    const allocator = testing.allocator;
-    const test_setup = @import("wayland").test_setup;
+    var fixture = try TestFixture.setup(testing.allocator);
+    defer fixture.cleanup();
 
-    var runtime = try test_setup.RuntimeDir.setup(allocator);
-    defer runtime.cleanup();
+    const s1 = try fixture.compositor.createSurface();
+    const s2 = try fixture.compositor.createSurface();
+    const s3 = try fixture.compositor.createSurface();
 
-    var server = try wayland.Server.init(allocator, null);
-    defer server.deinit();
-
-    var logger = cli.Logger.init(allocator);
-    defer logger.deinit();
-
-    var compositor = try Compositor.init(allocator, &server, &logger);
-    defer compositor.deinit();
-
-    const s1 = try compositor.createSurface();
-    const s2 = try compositor.createSurface();
-    const s3 = try compositor.createSurface();
-
-    try testing.expectEqual(@as(usize, 3), compositor.surfaces.items.len);
+    try testing.expectEqual(@as(usize, 3), fixture.compositor.surfaces.items.len);
     try testing.expectEqual(@as(u32, 1), s1.id);
     try testing.expectEqual(@as(u32, 2), s2.id);
     try testing.expectEqual(@as(u32, 3), s3.id);

@@ -17,6 +17,7 @@ const signals = ipc.signals;
 const c = @cImport({
     @cInclude("wayland-client.h");
     @cInclude("wayland-cursor.h");
+    @cInclude("wayland-server.h");
     @cInclude("xdg-shell-client-protocol.h");
     @cInclude("linux-dmabuf-unstable-v1-client-protocol.h");
     @cInclude("xf86drm.h");
@@ -35,6 +36,12 @@ pub const Buffer = struct {
     allocator: std.mem.Allocator,
     shm_pool: ?*c.wl_shm_pool = null,
     shm_fd: i32 = -1,
+    
+    // Buffer properties for cache matching
+    width: i32 = 0,
+    height: i32 = 0,
+    stride: i32 = 0,
+    format: u32 = 0,
 
     const Self = @This();
 
@@ -49,25 +56,65 @@ pub const Buffer = struct {
         };
 
         const buf_type = buf.bufferType();
+        cli.log.debug("Wayland Backend: Creating buffer (type={})", .{buf_type});
+        
         if (buf_type == .dmabuf) {
             try self.createFromDmabuf();
         } else if (buf_type == .shm) {
             try self.createFromShm();
         }
 
+        // Register release callback
+        if (self.wl_buffer) |wl_buf| {
+            const listener = c.wl_buffer_listener{
+                .release = bufferReleaseCallback,
+            };
+            _ = c.wl_buffer_add_listener(wl_buf, &listener, self);
+        }
+
+        if (self.good()) {
+            cli.log.debug("Wayland Backend: Buffer created successfully", .{});
+        } else {
+            cli.log.warn("Wayland Backend: Buffer creation failed (wl_buffer is null)", .{});
+        }
+
         return self;
+    }
+    
+    fn bufferReleaseCallback(data: ?*anyopaque, wl_buf: ?*c.wl_buffer) callconv(.c) void {
+        _ = wl_buf;
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
+        self.pending_release = false;
+        cli.log.trace("Wayland Backend: Buffer @{*} released by parent compositor", .{self.wl_buffer});
     }
 
     fn createFromDmabuf(self: *Self) !void {
-        const dmabuf = self.backend.wayland_state.dmabuf orelse return;
+        const dmabuf = self.backend.wayland_state.dmabuf orelse {
+            cli.log.warn("Wayland Backend: DMA-BUF protocol not available", .{});
+            return;
+        };
+
+        const attrs = self.buffer.dmabuf();
+        const width = @as(i32, @intFromFloat(attrs.size.getX()));
+        const height = @as(i32, @intFromFloat(attrs.size.getY()));
+        
+        cli.log.debug(
+            "Wayland Backend: Creating DMA-BUF ({}x{} format=0x{x:0>8} modifier=0x{x:0>16} planes={})",
+            .{ width, height, attrs.format, attrs.modifier, attrs.planes },
+        );
 
         const params = c.zwp_linux_dmabuf_v1_create_params(dmabuf);
         if (params == null) {
+            cli.log.err("Wayland Backend: Failed to create DMA-BUF params", .{});
             return error.FailedToCreateDmabufParams;
         }
 
-        const attrs = self.buffer.dmabuf();
         for (0..@as(usize, @intCast(attrs.planes))) |i| {
+            cli.log.trace(
+                "Wayland Backend: Adding DMA-BUF plane {d} (fd={d} offset={d} stride={d})",
+                .{ i, attrs.fds[i], attrs.offsets[i], attrs.strides[i] },
+            );
+            
             c.zwp_linux_buffer_params_v1_add(
                 params,
                 attrs.fds[i],
@@ -81,20 +128,30 @@ pub const Buffer = struct {
 
         self.wl_buffer = c.zwp_linux_buffer_params_v1_create_immed(
             params,
-            @intFromFloat(attrs.size.getX()),
-            @intFromFloat(attrs.size.getY()),
+            width,
+            height,
             attrs.format,
             0,
         );
 
         c.zwp_linux_buffer_params_v1_destroy(params);
+        
+        if (self.wl_buffer == null) {
+            cli.log.err("Wayland Backend: create_immed returned null wl_buffer", .{});
+        } else {
+            cli.log.debug("Wayland Backend: DMA-BUF wl_buffer created successfully @{*}", .{self.wl_buffer.?});
+        }
     }
 
     fn createFromShm(self: *Self) !void {
-        const shm = self.backend.wayland_state.shm orelse return;
+        const shm = self.backend.wayland_state.shm orelse {
+            cli.log.warn("Wayland Backend: SHM protocol not available", .{});
+            return;
+        };
 
         const attrs = self.buffer.shm();
         if (!attrs.success) {
+            cli.log.err("Wayland Backend: Invalid SHM attributes", .{});
             return error.InvalidShmAttrs;
         }
 
@@ -102,6 +159,17 @@ pub const Buffer = struct {
         const height = @as(i32, @intFromFloat(attrs.size.getY()));
         const stride = attrs.stride;
         const size = height * stride;
+        
+        // Store buffer properties for cache matching
+        self.width = width;
+        self.height = height;
+        self.stride = stride;
+        self.format = attrs.format;
+
+        cli.log.debug(
+            "Wayland Backend: Creating SHM buffer ({}x{} stride={} format=0x{x:0>8} size={} bytes)",
+            .{ width, height, stride, attrs.format, size },
+        );
 
         const fd = try createAnonymousFile(@intCast(size));
         errdefer std.posix.close(fd);
@@ -110,11 +178,13 @@ pub const Buffer = struct {
         defer self.buffer.endDataPtr();
 
         if (data_result.ptr == null) {
+            cli.log.err("Wayland Backend: Buffer has no data pointer", .{});
             return error.NoDataPtr;
         }
 
         const src_data = data_result.ptr.?[0..data_result.size];
         
+        cli.log.trace("Wayland Backend: Mapping SHM buffer ({} bytes)", .{size});
         const mapped = std.posix.mmap(
             null,
             @intCast(size),
@@ -122,15 +192,20 @@ pub const Buffer = struct {
             .{ .TYPE = .SHARED },
             fd,
             0,
-        ) catch return error.MmapFailed;
+        ) catch {
+            cli.log.err("Wayland Backend: mmap failed", .{});
+            return error.MmapFailed;
+        };
         defer std.posix.munmap(mapped);
 
         @memcpy(mapped[0..@intCast(size)], src_data[0..@intCast(size)]);
+        cli.log.trace("Wayland Backend: Copied {} bytes to SHM buffer", .{size});
 
         self.shm_pool = c.wl_shm_create_pool(shm, fd, size);
         self.shm_fd = fd;
 
         if (self.shm_pool == null) {
+            cli.log.err("Wayland Backend: Failed to create SHM pool", .{});
             return error.FailedToCreateShmPool;
         }
 
@@ -142,6 +217,12 @@ pub const Buffer = struct {
             stride,
             attrs.format,
         );
+        
+        if (self.wl_buffer == null) {
+            cli.log.err("Wayland Backend: create_buffer returned null wl_buffer", .{});
+        } else {
+            cli.log.debug("Wayland Backend: SHM wl_buffer created successfully @{*}", .{self.wl_buffer.?});
+        }
     }
 
     pub fn deinit(self: *Self) void {
@@ -190,8 +271,8 @@ pub const Output = struct {
     needs_frame: bool = false,
     frame_scheduled: bool = false,
     frame_scheduled_while_waiting: bool = false,
-    ready_for_frame_callback: bool = false,
     buffers: std.ArrayList(*Buffer),
+    xdg_configured: bool = false,
 
     // Wayland state
     surface: ?*c.wl_surface = null,
@@ -248,11 +329,20 @@ pub const Output = struct {
     }
 
     fn initXdgSurface(self: *Self, be: *Backend) void {
-        const xdg = be.wayland_state.xdg_wm_base orelse return;
-        const surf = self.surface orelse return;
+        const xdg = be.wayland_state.xdg_wm_base orelse {
+            cli.log.err("xdg_wm_base not available for output {s}", .{self.name});
+            return;
+        };
+        const surf = self.surface orelse {
+            cli.log.err("wl_surface not available for output {s}", .{self.name});
+            return;
+        };
 
         self.xdg_surface = c.xdg_wm_base_get_xdg_surface(xdg, surf);
-        const xdg_surf = self.xdg_surface orelse return;
+        const xdg_surf = self.xdg_surface orelse {
+            cli.log.err("Failed to create xdg_surface for output {s}", .{self.name});
+            return;
+        };
 
         const xdg_surface_listener = c.xdg_surface_listener{
             .configure = xdgSurfaceHandleConfigure,
@@ -263,10 +353,16 @@ pub const Output = struct {
     }
 
     fn initXdgToplevel(self: *Self, surf: *c.wl_surface) void {
-        const xdg_surf = self.xdg_surface orelse return;
+        const xdg_surf = self.xdg_surface orelse {
+            cli.log.err("xdg_surface not available for output {s}", .{self.name});
+            return;
+        };
 
         self.xdg_toplevel = c.xdg_surface_get_toplevel(xdg_surf);
-        const toplevel = self.xdg_toplevel orelse return;
+        const toplevel = self.xdg_toplevel orelse {
+            cli.log.err("Failed to create xdg_toplevel for output {s}", .{self.name});
+            return;
+        };
 
         const toplevel_listener = c.xdg_toplevel_listener{
             .configure = xdgToplevelHandleConfigure,
@@ -314,39 +410,78 @@ pub const Output = struct {
     }
 
     pub fn commit(self: *Self) bool {
-        if (self.surface == null) return false;
+        if (self.surface == null) {
+            cli.log.warn("Output {s}: Cannot commit (no wl_surface)", .{self.name});
+            return false;
+        }
+
+        if (!self.xdg_configured) {
+            cli.log.warn("Output {s}: Cannot commit before XDG surface is configured", .{self.name});
+            return false;
+        }
 
         const surf = self.surface.?;
+        
+        cli.log.debug("Output {s}: Committing to Wayland (buffer_committed={})", .{ self.name, self.state.committed.buffer });
 
         // Attach buffer if committed
-        if (!self.attachBufferIfCommitted(surf)) return false;
+        if (!self.attachBufferIfCommitted(surf)) {
+            cli.log.warn("Output {s}: Failed to attach buffer", .{self.name});
+            return false;
+        }
 
         c.wl_surface_commit(surf);
-        self.state.onCommit();
-
-        // Schedule frame callback
-        if (self.ready_for_frame_callback) {
-            self.sendFrameAndSetCallback();
+        
+        // Always register frame callback after commit to know when parent compositor is ready
+        cli.log.debug("Output {s}: Setting up frame callback after commit", .{self.name});
+        self.sendFrameAndSetCallback();
+        
+        // Flush display to ensure all requests are sent to parent compositor
+        const display = self.backend.wayland_state.display orelse {
+            cli.log.err("Output {s}: No backend display for flushing", .{self.name});
+            return false;
+        };
+        const flush_result = c.wl_display_flush(display);
+        if (flush_result < 0) {
+            const err_code = c.wl_display_get_error(display);
+            cli.log.err("Output {s}: Failed to flush display (result={d}, error={d})", .{ self.name, flush_result, err_code });
+            return false;
         }
+        cli.log.trace("Output {s}: Flushed display ({d} bytes)", .{ self.name, flush_result });
+        
+        self.state.onCommit();
+        cli.log.debug("Output {s}: Wayland surface committed", .{self.name});
 
         return true;
     }
 
     fn attachBufferIfCommitted(self: *Self, surf: *c.wl_surface) bool {
-        if (!self.state.committed.buffer) return true;
+        cli.log.debug("Output {s}: attachBufferIfCommitted - committed.buffer={} buffer_is_null={}", .{ self.name, self.state.committed.buffer, self.state.buffer == null });
+        
+        if (!self.state.committed.buffer) {
+            cli.log.debug("Output {s}: No buffer to attach (not committed)", .{self.name});
+            return true;
+        }
 
-        const buf = self.state.buffer orelse return true;
+        const buf = self.state.buffer orelse {
+            cli.log.debug("Output {s}: No buffer to attach (buffer is null)", .{self.name});
+            return true;
+        };
 
+        cli.log.debug("Output {s}: Creating wl_buffer from backend buffer", .{self.name});
         const wl_buffer = self.wlBufferFromBuffer(buf) catch |err| {
-            cli.log.err("Failed to create wl_buffer for output {s}: {}", .{ self.name, err });
+            cli.log.err("Output {s}: Failed to create wl_buffer: {}", .{ self.name, err });
             return false;
         };
 
-        if (!wl_buffer.good()) return true;
+        if (!wl_buffer.good()) {
+            cli.log.warn("Output {s}: Created wl_buffer is not good", .{self.name});
+            return true;
+        }
 
+        cli.log.debug("Output {s}: Attaching wl_buffer @{*} to surface", .{ self.name, wl_buffer.wl_buffer });
         c.wl_surface_attach(surf, wl_buffer.wl_buffer, 0, 0);
         c.wl_surface_damage_buffer(surf, 0, 0, std.math.maxInt(i32), std.math.maxInt(i32));
-        self.ready_for_frame_callback = true;
 
         return true;
     }
@@ -471,30 +606,35 @@ pub const Output = struct {
     pub fn scheduleFrame(self: *Self, reason: output.ScheduleReason) void {
         _ = reason;
         
+        cli.log.debug("Output {s}: scheduleFrame() (needs_frame={} frame_scheduled={} callback_pending={})", .{ self.name, self.needs_frame, self.frame_scheduled, self.frame_callback != null });
+        
         self.needs_frame = true;
 
         if (self.frame_scheduled) {
+            cli.log.trace("Output {s}: Frame already scheduled", .{self.name});
             return;
         }
 
         self.frame_scheduled = true;
 
         if (self.frame_callback != null) {
+            cli.log.debug("Output {s}: Waiting for frame callback, setting scheduled_while_waiting flag", .{self.name});
             self.frame_scheduled_while_waiting = true;
             return;
         }
         
         // No pending frame callback - trigger immediately if available
         const callback_fn = self.frame_event_callback orelse {
-            cli.log.warn("No frame callback registered for output {s}", .{self.name});
+            cli.log.warn("Output {s}: No frame callback registered", .{self.name});
             return;
         };
         
         const userdata = self.frame_event_userdata orelse {
-            cli.log.err("Frame callback has null userdata for output {s}", .{self.name});
+            cli.log.err("Output {s}: Frame callback has null userdata", .{self.name});
             return;
         };
         
+        cli.log.debug("Output {s}: Triggering immediate frame event to compositor", .{self.name});
         // Trigger frame event to compositor
         callback_fn(userdata);
     }
@@ -515,24 +655,65 @@ pub const Output = struct {
     }
 
     fn wlBufferFromBuffer(self: *Self, buf: buffer.Interface) !*Buffer {
-        // Check if buffer already exists
+        // Get buffer properties for matching
+        const buf_type = buf.bufferType();
+        var width: i32 = 0;
+        var height: i32 = 0;
+        var stride: i32 = 0;
+        var format: u32 = 0;
+        
+        if (buf_type == .shm) {
+            const attrs = buf.shm();
+            width = @intFromFloat(attrs.size.getX());
+            height = @intFromFloat(attrs.size.getY());
+            stride = attrs.stride;
+            format = attrs.format;
+        }
+
+        // Check for reusable buffer with matching properties
         for (self.buffers.items) |wl_buf| {
-            if (wl_buf.buffer.base.ptr == buf.base.ptr) {
+            if (!wl_buf.pending_release and 
+                wl_buf.width == width and 
+                wl_buf.height == height and 
+                wl_buf.stride == stride and 
+                wl_buf.format == format) {
+                cli.log.trace("Output {s}: Reusing released wl_buffer @{*}", .{ self.name, wl_buf.wl_buffer });
+                wl_buf.pending_release = true;
                 return wl_buf;
             }
         }
 
+        // Limit cache size to prevent resource exhaustion
+        const MAX_BUFFERS = 4;
+        if (self.buffers.items.len >= MAX_BUFFERS) {
+            // Find oldest released buffer to remove
+            for (self.buffers.items, 0..) |wl_buf, i| {
+                if (!wl_buf.pending_release) {
+                    cli.log.debug("Output {s}: Removing old buffer from cache (limit={d})", .{ self.name, MAX_BUFFERS });
+                    const removed = self.buffers.swapRemove(i);
+                    removed.deinit();
+                    break;
+                }
+            }
+        }
+
         // Create new buffer
+        cli.log.debug("Output {s}: Creating new wl_buffer (cache size: {d})", .{ self.name, self.buffers.items.len });
         const wl_buffer = try Buffer.create(self.allocator, buf, self.backend);
+        wl_buffer.pending_release = true;
         try self.buffers.append(self.allocator, wl_buffer);
+        cli.log.debug("Output {s}: Created and cached wl_buffer @{*}", .{ self.name, wl_buffer.wl_buffer });
         return wl_buffer;
     }
 
     fn sendFrameAndSetCallback(self: *Self) void {
-        if (self.surface == null) return;
+        if (self.surface == null) {
+            cli.log.warn("Output {s}: Cannot set frame callback (no surface)", .{self.name});
+            return;
+        }
 
+        cli.log.debug("Output {s}: Setting up Wayland frame callback", .{self.name});
         self.frame_scheduled = false;
-        self.ready_for_frame_callback = false;
 
         self.frame_callback = c.wl_surface_frame(self.surface.?);
         if (self.frame_callback) |cb| {
@@ -540,12 +721,16 @@ pub const Output = struct {
                 .done = frameCallbackDone,
             };
             _ = c.wl_callback_add_listener(cb, &listener, self);
+            cli.log.debug("Output {s}: Frame callback registered @{*}", .{ self.name, cb });
+        } else {
+            cli.log.err("Output {s}: wl_surface_frame returned null", .{self.name});
         }
     }
 
     fn frameCallbackDone(data: ?*anyopaque, callback: ?*c.wl_callback, callback_data: u32) callconv(.c) void {
         const self: *Self = @ptrCast(@alignCast(data orelse return));
-        _ = callback_data;
+
+        cli.log.debug("Output {s}: Frame callback done (time={d})", .{ self.name, callback_data });
 
         // Destroy the callback
         if (callback) |cb| {
@@ -555,6 +740,7 @@ pub const Output = struct {
 
         // If a frame was scheduled while waiting, schedule another
         if (self.frame_scheduled_while_waiting) {
+            cli.log.debug("Output {s}: Frame was scheduled while waiting, scheduling another", .{self.name});
             self.frame_scheduled_while_waiting = false;
             self.frame_scheduled = false;
             self.scheduleFrame(.unknown);
@@ -562,7 +748,10 @@ pub const Output = struct {
 
         // Emit frame event to compositor
         if (self.frame_event_callback) |callback_fn| {
+            cli.log.debug("Output {s}: Emitting frame event to compositor", .{self.name});
             callback_fn(self.frame_event_userdata);
+        } else {
+            cli.log.warn("Output {s}: Frame callback done but no compositor callback registered", .{self.name});
         }
     }
 
@@ -593,12 +782,21 @@ pub const Output = struct {
     fn xdgSurfaceHandleConfigure(data: ?*anyopaque, xdg_surface: ?*c.xdg_surface, serial: u32) callconv(.c) void {
         const self: *Self = @ptrCast(@alignCast(data orelse return));
         
+        cli.log.debug("Output {s}: XDG surface configure event (serial={d})", .{ self.name, serial });
+        
         if (xdg_surface) |surf| {
             c.xdg_surface_ack_configure(surf, serial);
         }
         
-        // Initial configure - surface is now ready to accept commits
+        // Mark as configured - surface is now ready to accept buffer commits
+        if (!self.xdg_configured) {
+            self.xdg_configured = true;
+            cli.log.info("Output {s}: XDG surface now configured and ready", .{self.name});
+        }
+        
+        // Initial configure - commit to finalize configuration
         if (self.surface) |s| {
+            cli.log.debug("Output {s}: Committing surface to finalize XDG configuration", .{self.name});
             c.wl_surface_commit(s);
         }
     }
@@ -812,6 +1010,7 @@ pub const Backend = struct {
     last_enter_serial: u32 = 0,
     last_axis_source: signals.PointerAxisEvent.AxisSource = .wheel,
     last_axis_discrete: i32 = 0,
+    event_source: ?*c.wl_event_source = null,
 
     // Wayland state
     wayland_state: struct {
@@ -855,6 +1054,10 @@ pub const Backend = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        if (self.event_source) |source| {
+            _ = c.wl_event_source_remove(source);
+        }
+        
         for (self.outputs.items) |out| {
             out.deinit();
         }
@@ -992,10 +1195,16 @@ pub const Backend = struct {
         const fd = c.wl_display_get_fd(self.wayland_state.display.?);
         self.poll_fds[0] = .{
             .fd = fd,
-            .callback = null,
+            .callback = dispatchCallback,
         };
 
         return true;
+    }
+    
+    /// Callback for poll FD events
+    fn dispatchCallback() void {
+        // Note: This is a workaround since we can't pass self pointer in callback
+        // Events will be dispatched through coordinator polling
     }
 
     pub fn pollFds(self: *Self) []const backend.PollFd {
@@ -1020,6 +1229,117 @@ pub const Backend = struct {
         self.createOutput(null) catch |err| {
             cli.log.err("Failed to create Wayland output: {}", .{err});
         };
+        
+        // Do a full roundtrip to ensure XDG configure event is received and processed
+        const display = self.wayland_state.display orelse return;
+        _ = c.wl_display_roundtrip(display);
+        
+        // Verify output is configured
+        if (self.outputs.items.len > 0) {
+            const out = self.outputs.items[0];
+            if (!out.xdg_configured) {
+                cli.log.warn("Output {s} not configured after roundtrip, attempting another", .{out.name});
+                _ = c.wl_display_roundtrip(display);
+            }
+        }
+    }
+    
+    /// Dispatch pending events from the parent Wayland compositor
+    pub fn dispatchEvents(self: *Self) void {
+        const display = self.wayland_state.display orelse return;
+        
+        // Prepare to read events
+        if (c.wl_display_prepare_read(display) != 0) {
+            // Events are already being read, dispatch pending
+            _ = c.wl_display_dispatch_pending(display);
+            return;
+        }
+        
+        // Flush outgoing requests
+        _ = c.wl_display_flush(display);
+        
+        // Read events from the display FD
+        _ = c.wl_display_read_events(display);
+        
+        // Dispatch all pending events
+        _ = c.wl_display_dispatch_pending(display);
+    }
+    
+    /// Register backend with server event loop for automatic event dispatch
+    pub fn registerWithEventLoop(self: *Self, event_loop_handle: *anyopaque) void {
+        const display = self.wayland_state.display orelse {
+            cli.log.err("Cannot register backend: no display", .{});
+            return;
+        };
+        const fd = c.wl_display_get_fd(display);
+        
+        cli.log.debug("Registering Wayland backend with event loop (fd={d})", .{fd});
+        
+        const loop: *c.wl_event_loop = @ptrCast(@alignCast(event_loop_handle));
+        const source = c.wl_event_loop_add_fd(
+            loop,
+            fd,
+            c.WL_EVENT_READABLE,
+            waylandDisplayCallback,
+            self,
+        ) orelse {
+            cli.log.err("Failed to register Wayland backend with event loop", .{});
+            return;
+        };
+        
+        self.event_source = source;
+        cli.log.info("Registered Wayland backend fd={d} with event loop", .{fd});
+    }
+    
+    /// Event loop callback for Wayland display events
+    fn waylandDisplayCallback(fd: i32, mask: u32, data: ?*anyopaque) callconv(.c) i32 {
+        const self: *Backend = @ptrCast(@alignCast(data orelse return 0));
+        const display = self.wayland_state.display orelse return 0;
+
+        cli.log.trace("Wayland event callback fired (fd={d} mask=0x{x})", .{ fd, mask });
+
+        // Proper event dispatch sequence for Wayland
+        if (mask & c.WL_EVENT_READABLE != 0) {
+            // First dispatch any pending events
+            if (c.wl_display_dispatch_pending(display) < 0) {
+                cli.log.err("Failed to dispatch pending Wayland events", .{});
+                return 0;
+            }
+            
+            // Then read new events from socket
+            if (c.wl_display_prepare_read(display) == 0) {
+                if (c.wl_display_read_events(display) < 0) {
+                    cli.log.err("Failed to read Wayland events", .{});
+                    c.wl_display_cancel_read(display);
+                    return 0;
+                }
+                
+                // Dispatch the newly read events
+                const dispatched = c.wl_display_dispatch_pending(display);
+                if (dispatched < 0) {
+                    cli.log.err("Failed to dispatch Wayland events after read", .{});
+                    return 0;
+                }
+                if (dispatched > 0) {
+                    cli.log.trace("Dispatched {d} Wayland event(s)", .{dispatched});
+                }
+            } else {
+                // prepare_read failed, likely because events are pending
+                // Dispatch them now
+                if (c.wl_display_dispatch_pending(display) < 0) {
+                    cli.log.err("Failed to dispatch events after prepare_read failure", .{});
+                    return 0;
+                }
+            }
+        }
+
+        // Flush outgoing requests
+        if (c.wl_display_flush(display) < 0) {
+            cli.log.err("Failed to flush Wayland display", .{});
+            return 0;
+        }
+        
+        return 1;
     }
 
     pub fn createOutput(self: *Self, name: ?[]const u8) !void {

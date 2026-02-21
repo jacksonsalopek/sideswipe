@@ -29,6 +29,15 @@ pub fn deinitGlobalLogger() void {
     }
 }
 
+/// Configure the global logger settings
+pub fn configureGlobalLogger(level: LogLevel, time_enabled: bool, color_enabled: bool) void {
+    if (global_logger_initialized) {
+        global_logger.setLogLevel(level);
+        global_logger.setTime(time_enabled);
+        global_logger.setEnableColor(color_enabled);
+    }
+}
+
 /// Global log interface
 pub const log = struct {
     pub fn trace(comptime fmt: []const u8, args_: anytype) void {

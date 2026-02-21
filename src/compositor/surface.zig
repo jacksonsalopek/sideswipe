@@ -141,6 +141,7 @@ pub const Surface = struct {
             .children = std.ArrayList(*Surface){},
         };
 
+        compositor.logger.debug("Surface {d}: Created", .{id});
         return self;
     }
 
@@ -174,6 +175,11 @@ pub const Surface = struct {
 
     /// Attaches a buffer to the pending state
     pub fn attach(self: *Self, buffer: ?*c.wl_resource, dx: i32, dy: i32) void {
+        if (buffer) |buf| {
+            self.compositor.logger.debug("Surface {d}: Attached buffer @{*} (dx={d}, dy={d})", .{ self.id, buf, dx, dy });
+        } else {
+            self.compositor.logger.debug("Surface {d}: Detached buffer", .{self.id});
+        }
         self.pending.buffer.buffer = buffer;
         self.pending.buffer.dx = dx;
         self.pending.buffer.dy = dy;
@@ -187,6 +193,7 @@ pub const Surface = struct {
             .width = @floatFromInt(width),
             .height = @floatFromInt(height),
         };
+        self.compositor.logger.trace("Surface {d}: Added surface damage ({d},{d} {d}x{d})", .{ self.id, x, y, width, height });
         try self.pending.damage.addSurfaceDamage(self.allocator, box);
     }
 
@@ -198,11 +205,13 @@ pub const Surface = struct {
             .width = @floatFromInt(width),
             .height = @floatFromInt(height),
         };
+        self.compositor.logger.trace("Surface {d}: Added buffer damage ({d},{d} {d}x{d})", .{ self.id, x, y, width, height });
         try self.pending.damage.addBufferDamage(self.allocator, box);
     }
 
     /// Adds a frame callback to the pending state
     pub fn frame(self: *Self, callback: *FrameCallback) Error!void {
+        self.compositor.logger.trace("Surface {d}: Added frame callback @{*}", .{ self.id, callback.resource });
         try self.pending.frame_callbacks.append(self.allocator, callback);
     }
 
@@ -218,6 +227,22 @@ pub const Surface = struct {
 
     /// Commits the pending state to current state
     pub fn commit(self: *Self) void {
+        const had_buffer = self.current.buffer.buffer != null;
+        const has_buffer = self.pending.buffer.buffer != null;
+        const has_callbacks = self.pending.frame_callbacks.items.len > 0;
+        
+        self.compositor.logger.debug(
+            "Surface {d}: Commit (buffer: {s} -> {s}, callbacks: {d}, damage: surf={d} buf={d})",
+            .{
+                self.id,
+                if (had_buffer) "yes" else "no",
+                if (has_buffer) "yes" else "no",
+                self.pending.frame_callbacks.items.len,
+                self.pending.damage.surface_damage.items.len,
+                self.pending.damage.buffer_damage.items.len,
+            },
+        );
+
         // Apply buffer state
         self.current.buffer = self.pending.buffer;
         self.pending.buffer.reset();
@@ -248,13 +273,18 @@ pub const Surface = struct {
         // Update mapped state based on buffer attachment
         if (self.current.buffer.buffer != null and !self.mapped) {
             self.mapped = true;
+            self.compositor.logger.debug("Surface {d}: Mapped", .{self.id});
         } else if (self.current.buffer.buffer == null and self.mapped) {
             self.mapped = false;
+            self.compositor.logger.debug("Surface {d}: Unmapped", .{self.id});
         }
 
         // Schedule frame on compositor if we have a buffer and callbacks
         if (self.current.buffer.buffer != null and self.current.frame_callbacks.items.len > 0) {
+            self.compositor.logger.trace("Surface {d}: Scheduling frame ({d} callbacks)", .{ self.id, self.current.frame_callbacks.items.len });
             self.compositor.scheduleFrame();
+        } else if (has_callbacks and self.current.buffer.buffer == null) {
+            self.compositor.logger.warn("Surface {d}: Has frame callbacks but no buffer", .{self.id});
         }
 
         // Commit subsurfaces if in synchronized mode
@@ -300,20 +330,55 @@ pub const Surface = struct {
 // Tests
 const testing = core.testing;
 
+/// Test fixture for setting up compositor test environment
+const TestFixture = struct {
+    allocator: std.mem.Allocator,
+    runtime: @import("wayland").test_setup.RuntimeDir,
+    server: @import("wayland").Server,
+    logger: @import("core.cli").Logger,
+    compositor: *Compositor,
+
+    fn setup(allocator: std.mem.Allocator) !TestFixture {
+        const wayland = @import("wayland");
+        const cli = @import("core.cli");
+
+        var runtime = try wayland.test_setup.RuntimeDir.setup(allocator);
+        errdefer runtime.cleanup();
+
+        var server = try wayland.Server.init(allocator, null);
+        errdefer server.deinit();
+
+        var fixture = TestFixture{
+            .allocator = allocator,
+            .runtime = runtime,
+            .server = server,
+            .logger = cli.Logger.init(allocator),
+            .compositor = undefined,
+        };
+
+        fixture.logger.setLogLevel(.err); // Disable debug/info/warn logging in tests
+        fixture.logger.setEnableStdout(false);
+        errdefer fixture.logger.deinit();
+
+        fixture.compositor = try Compositor.init(allocator, &fixture.server, &fixture.logger);
+        errdefer fixture.compositor.deinit();
+
+        return fixture;
+    }
+
+    fn cleanup(self: *TestFixture) void {
+        self.compositor.deinit();
+        self.logger.deinit();
+        self.server.deinit();
+        self.runtime.cleanup();
+    }
+};
+
 test "Surface - init and deinit" {
-    const allocator = testing.allocator;
+    var fixture = try TestFixture.setup(testing.allocator);
+    defer fixture.cleanup();
 
-    var server = @import("wayland").Server.init(allocator, null) catch return;
-    defer server.deinit();
-
-    const cli = @import("core.cli");
-    var logger = cli.Logger.init(allocator);
-    defer logger.deinit();
-
-    var compositor = try Compositor.init(allocator, &server, &logger);
-    defer compositor.deinit();
-
-    var surface = try Surface.init(allocator, compositor, 1);
+    var surface = try Surface.init(testing.allocator, fixture.compositor, 1);
     defer surface.deinit();
 
     try testing.expectEqual(@as(u32, 1), surface.id);
@@ -322,19 +387,10 @@ test "Surface - init and deinit" {
 }
 
 test "Surface - attach and commit" {
-    const allocator = testing.allocator;
+    var fixture = try TestFixture.setup(testing.allocator);
+    defer fixture.cleanup();
 
-    var server = @import("wayland").Server.init(allocator, null) catch return;
-    defer server.deinit();
-
-    const cli = @import("core.cli");
-    var logger = cli.Logger.init(allocator);
-    defer logger.deinit();
-
-    var compositor = try Compositor.init(allocator, &server, &logger);
-    defer compositor.deinit();
-
-    var surface = try Surface.init(allocator, compositor, 1);
+    var surface = try Surface.init(testing.allocator, fixture.compositor, 1);
     defer surface.deinit();
 
     // Create a dummy buffer resource (in real usage this would be a wl_resource from client)
@@ -351,19 +407,10 @@ test "Surface - attach and commit" {
 }
 
 test "Surface - damage tracking" {
-    const allocator = testing.allocator;
+    var fixture = try TestFixture.setup(testing.allocator);
+    defer fixture.cleanup();
 
-    var server = @import("wayland").Server.init(allocator, null) catch return;
-    defer server.deinit();
-
-    const cli = @import("core.cli");
-    var logger = cli.Logger.init(allocator);
-    defer logger.deinit();
-
-    var compositor = try Compositor.init(allocator, &server, &logger);
-    defer compositor.deinit();
-
-    var surface = try Surface.init(allocator, compositor, 1);
+    var surface = try Surface.init(testing.allocator, fixture.compositor, 1);
     defer surface.deinit();
 
     try surface.damage(10, 20, 100, 200);
@@ -377,19 +424,10 @@ test "Surface - damage tracking" {
 }
 
 test "Surface - role management" {
-    const allocator = testing.allocator;
+    var fixture = try TestFixture.setup(testing.allocator);
+    defer fixture.cleanup();
 
-    var server = @import("wayland").Server.init(allocator, null) catch return;
-    defer server.deinit();
-
-    const cli = @import("core.cli");
-    var logger = cli.Logger.init(allocator);
-    defer logger.deinit();
-
-    var compositor = try Compositor.init(allocator, &server, &logger);
-    defer compositor.deinit();
-
-    var surface = try Surface.init(allocator, compositor, 1);
+    var surface = try Surface.init(testing.allocator, fixture.compositor, 1);
     defer surface.deinit();
 
     try surface.setRole(.xdg_toplevel, null);
@@ -405,22 +443,13 @@ test "Surface - role management" {
 }
 
 test "Surface - parent/child relationships" {
-    const allocator = testing.allocator;
+    var fixture = try TestFixture.setup(testing.allocator);
+    defer fixture.cleanup();
 
-    var server = @import("wayland").Server.init(allocator, null) catch return;
-    defer server.deinit();
-
-    const cli = @import("core.cli");
-    var logger = cli.Logger.init(allocator);
-    defer logger.deinit();
-
-    var compositor = try Compositor.init(allocator, &server, &logger);
-    defer compositor.deinit();
-
-    var parent = try Surface.init(allocator, compositor, 1);
+    var parent = try Surface.init(testing.allocator, fixture.compositor, 1);
     defer parent.deinit();
 
-    var child = try Surface.init(allocator, compositor, 2);
+    var child = try Surface.init(testing.allocator, fixture.compositor, 2);
     defer child.deinit();
 
     try parent.addChild(child);

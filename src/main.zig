@@ -122,10 +122,17 @@ pub fn main() !void {
 
     // Configure logger based on arguments
     const verbose = parser.getBool("verbose") orelse false;
+    const log_level: cli.LogLevel = if (verbose) .trace else .info;
+    
     logger.setTime(true);
     logger.setEnableColor(true);
     logger.setEnableRolling(true);
-    logger.setLogLevel(if (verbose) .trace else .info);
+    logger.setLogLevel(log_level);
+    
+    // Initialize and configure global logger for backend/other modules
+    cli.initGlobalLogger(allocator);
+    defer cli.deinitGlobalLogger();
+    cli.configureGlobalLogger(log_level, true, true);
 
     logger.info("Welcome to Sideswipe!", .{});
 

@@ -529,6 +529,7 @@ pub fn build(b: *std.Build) void {
     backend_tests.linkSystemLibrary("libudev");
     backend_tests.linkSystemLibrary("libseat");
     backend_tests.linkSystemLibrary("wayland-client");
+    backend_tests.linkSystemLibrary("wayland-server");
     backend_tests.linkSystemLibrary("wayland-cursor");
     // libdisplay-info no longer needed - using native Zig implementation
     // backend_tests.linkSystemLibrary("libdisplay-info");
