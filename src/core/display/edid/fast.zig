@@ -117,12 +117,12 @@ pub const Edid = struct {
     /// descriptors (pixel_clock = 0) return null.
     pub fn getDetailedTimings(self: Edid) [4]?timing.Detailed {
         var timings: [4]?timing.Detailed = [_]?timing.Detailed{null} ** 4;
-        
+
         for (&self.base.detailed_timing_descriptors, 0..) |*desc_bytes, i| {
             const desc: *align(1) const timing.DetailedRaw = @ptrCast(desc_bytes);
             timings[i] = timing.parseDetailedTiming(desc);
         }
-        
+
         return timings;
     }
 
@@ -137,12 +137,12 @@ pub const Edid = struct {
     /// Returns an array of standard timings. Unused slots return null.
     pub fn getStandardTimings(self: Edid) [8]?timing.Standard {
         var std_timings: [8]?timing.Standard = [_]?timing.Standard{null} ** 8;
-        
+
         for (&self.base.standard_timings, 0..) |*std_bytes, i| {
             const bytes: *align(1) const [2]u8 = @ptrCast(std_bytes);
             std_timings[i] = timing.parseStandardTiming(bytes);
         }
-        
+
         return std_timings;
     }
 
@@ -156,18 +156,18 @@ pub const Edid = struct {
     /// Scans the 4 descriptor slots and returns any display descriptors found.
     pub fn getDisplayDescriptors(self: Edid) [4]?timing.DisplayDescriptor {
         var descriptors: [4]?timing.DisplayDescriptor = [_]?timing.DisplayDescriptor{null} ** 4;
-        
+
         for (&self.base.detailed_timing_descriptors, 0..) |*desc_bytes, i| {
             descriptors[i] = timing.parseDisplayDescriptor(desc_bytes);
         }
-        
+
         return descriptors;
     }
 
     /// Get the monitor product name, if available
     pub fn getProductName(self: Edid) ?[]const u8 {
         const descriptors = self.getDisplayDescriptors();
-        
+
         for (descriptors) |maybe_desc| {
             if (maybe_desc) |desc| {
                 if (desc.tag == .product_name) {
@@ -175,14 +175,14 @@ pub const Edid = struct {
                 }
             }
         }
-        
+
         return null;
     }
 
     /// Get the monitor serial number string, if available
     pub fn getSerialString(self: Edid) ?[]const u8 {
         const descriptors = self.getDisplayDescriptors();
-        
+
         for (descriptors) |maybe_desc| {
             if (maybe_desc) |desc| {
                 if (desc.tag == .product_serial) {
@@ -190,7 +190,7 @@ pub const Edid = struct {
                 }
             }
         }
-        
+
         return null;
     }
 
@@ -311,7 +311,7 @@ test "fast EDID parse" {
     try testing.expectEqual(@as(u8, 4), edid.getRevision());
     try testing.expectEqualStrings("DEL", &edid.getManufacturerId());
     try testing.expectEqual(@as(u16, 0xA0C7), edid.getProductCode());
-    
+
     // Test PNP ID lookup
     const mfg_name = edid.getManufacturerName();
     try testing.expect(mfg_name != null);

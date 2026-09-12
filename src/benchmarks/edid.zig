@@ -107,14 +107,14 @@ fn benchmarkStandard(
     samples: []u64,
 ) !void {
     for (samples) |*sample| {
-        const start = std.time.nanoTimestamp();
+        const start = std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds();
 
         for (0..iterations) |_| {
             var parsed = try display.edid.standard.parse(allocator, data);
             parsed.deinit();
         }
 
-        const end = std.time.nanoTimestamp();
+        const end = std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds();
         sample.* = @intCast(end - start);
     }
 }
@@ -126,14 +126,14 @@ fn benchmarkFast(
     samples: []u64,
 ) !void {
     for (samples) |*sample| {
-        const start = std.time.nanoTimestamp();
+        const start = std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds();
 
         for (0..iterations) |_| {
             const fast = try display.edid.fast.parse(data);
             _ = fast;
         }
 
-        const end = std.time.nanoTimestamp();
+        const end = std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds();
         sample.* = @intCast(end - start);
     }
 }

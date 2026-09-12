@@ -292,7 +292,7 @@ test "Color - OkLab round-trip" {
     const original = Color.fromSRGB(.{ .r = 0.5, .g = 0.7, .b = 0.3 });
     const lab = original.toOkLab();
     const back = Color.fromOkLab(lab);
-    
+
     try testing.expectApproxEqAbs(original.r, back.r, 0.001);
     try testing.expectApproxEqAbs(original.g, back.g, 0.001);
     try testing.expectApproxEqAbs(original.b, back.b, 0.001);
@@ -314,10 +314,10 @@ test "Matrix3 - inversion" {
             .{ 5, 6, 0 },
         },
     };
-    
+
     const inv = m.invert();
     const result = m.mul(inv);
-    
+
     // Result should be approximately identity
     try testing.expectApproxEqAbs(@as(f64, 1), result.m[0][0], 0.0001);
     try testing.expectApproxEqAbs(@as(f64, 1), result.m[1][1], 0.0001);
@@ -328,7 +328,7 @@ test "Matrix3 - inversion" {
 test "xy2xyz - conversion" {
     const xy = XY{ .x = 0.3127, .y = 0.3290 }; // D65 white point
     const xyz = xy2xyz(xy);
-    
+
     try testing.expectApproxEqAbs(@as(f64, 0.9505), xyz.x, 0.001);
     try testing.expectEqual(@as(f64, 1.0), xyz.y);
     try testing.expectApproxEqAbs(@as(f64, 1.0890), xyz.z, 0.001);
@@ -341,9 +341,9 @@ test "Primaries - sRGB to XYZ" {
         .blue = .{ .x = 0.15, .y = 0.06 },
         .white = .{ .x = 0.3127, .y = 0.3290 }, // D65
     };
-    
+
     const xyz_matrix = srgb.toXYZ();
-    
+
     // Verify matrix is not all zeros
     var sum: f64 = 0;
     for (0..3) |i| {

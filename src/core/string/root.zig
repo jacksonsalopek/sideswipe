@@ -18,7 +18,7 @@ pub const String = struct {
 
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
-            .data = std.ArrayList(u8){},
+            .data = std.ArrayList(u8).empty,
             .allocator = allocator,
         };
     }
@@ -96,12 +96,12 @@ pub fn trim(str: string) string {
 
 /// Trim whitespace from left
 pub fn trimLeft(str: string) string {
-    return std.mem.trimLeft(u8, str, &std.ascii.whitespace);
+    return std.mem.trimStart(u8, str, &std.ascii.whitespace);
 }
 
 /// Trim whitespace from right
 pub fn trimRight(str: string) string {
-    return std.mem.trimRight(u8, str, &std.ascii.whitespace);
+    return std.mem.trimEnd(u8, str, &std.ascii.whitespace);
 }
 
 /// Duplicate a string (caller owns returned memory)
@@ -174,7 +174,7 @@ pub fn join(allocator: std.mem.Allocator, strings: []const string, separator: st
 pub fn replace(allocator: std.mem.Allocator, str: string, from: string, to: string) !string {
     if (from.len == 0) return try allocator.dupe(u8, str);
 
-    var result = std.ArrayList(u8){};
+    var result = std.ArrayList(u8).empty;
     errdefer result.deinit(allocator);
 
     var pos: usize = 0;
@@ -237,7 +237,7 @@ pub fn isNumber(str: string, allow_float: bool) bool {
 pub fn replaceInString(allocator: std.mem.Allocator, str: string, from: string, to: string) !string {
     if (str.len == 0 or from.len == 0) return try allocator.dupe(u8, str);
 
-    var result = std.ArrayList(u8){};
+    var result = std.ArrayList(u8).empty;
     errdefer result.deinit(allocator);
 
     var pos: usize = 0;

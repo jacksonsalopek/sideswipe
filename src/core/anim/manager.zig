@@ -10,8 +10,8 @@ pub const AnimationManager = struct {
 
     pub fn init(allocator: std.mem.Allocator) AnimationManager {
         return .{
-            .variables = .{},
-            .tick_callbacks = .{},
+            .variables = .empty,
+            .tick_callbacks = .empty,
             .allocator = allocator,
             .alive = true,
         };
@@ -90,15 +90,15 @@ pub const AnimationManager = struct {
     /// Safe to call even if variables are added/removed during callbacks
     pub fn tick(self: *AnimationManager) void {
         std.debug.assert(self.alive);
-        
+
         // SAFETY: We need to handle list modifications during callbacks
         // Strategy: Snapshot the variables to tick before starting
         const to_tick = self.allocator.dupe(*anyopaque, self.variables.items) catch return;
         defer self.allocator.free(to_tick);
-        
+
         const callbacks_snapshot = self.allocator.dupe(*const fn (*anyopaque) void, self.tick_callbacks.items) catch return;
         defer self.allocator.free(callbacks_snapshot);
-        
+
         // Tick all variables from snapshot
         // Even if they get unregistered during tick, the snapshot keeps them valid
         for (to_tick, callbacks_snapshot) |variable, callback| {
@@ -110,7 +110,7 @@ pub const AnimationManager = struct {
                     break;
                 }
             }
-            
+
             if (still_registered) {
                 callback(variable);
             }
@@ -190,8 +190,8 @@ test "AnimationManager basic" {
     anim2.setValue(100.0);
 
     // Simulate time
-    anim1.animation_data.started_time = std.time.milliTimestamp() - 50;
-    anim2.animation_data.started_time = std.time.milliTimestamp() - 50;
+    anim1.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
+    anim2.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
 
     manager.tick();
 
@@ -320,12 +320,12 @@ test "AnimationManager with callbacks" {
     try std.testing.expect(begin_called);
 
     // Simulate animation
-    anim.animation_data.started_time = std.time.milliTimestamp() - 50;
+    anim.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
     manager.tick();
     try std.testing.expect(update_count > 0);
 
     // Complete animation
-    anim.animation_data.started_time = std.time.milliTimestamp() - 100;
+    anim.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 100;
     manager.tick();
 
     try std.testing.expect(end_called);
@@ -425,7 +425,7 @@ test "AnimationManager safe tick with modifications" {
     const config = AnimationConfig.init();
     var anim1 = AnimatedVariable(f32).init(0.0, config);
     var anim2 = AnimatedVariable(f32).init(0.0, config);
-    
+
     anim1.setDuration(100);
     anim2.setDuration(100);
 
@@ -438,7 +438,7 @@ test "AnimationManager safe tick with modifications" {
         var flag: *bool = undefined;
         var mgr: *AnimationManager = undefined;
         var a2: *AnimatedVariable(f32) = undefined;
-        
+
         fn onUpdate(a: *AnimatedVariable(f32)) void {
             _ = a;
             if (!flag.*) {
@@ -453,13 +453,13 @@ test "AnimationManager safe tick with modifications" {
     Ctx.a2 = &anim2;
 
     anim1.setUpdateCallback(Ctx.onUpdate);
-    
+
     anim1.setValue(100.0);
-    anim1.animation_data.started_time = std.time.milliTimestamp() - 50;
-    
+    anim1.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
+
     // This tick should safely handle the modification
     manager.tick();
-    
+
     try std.testing.expect(callback_ran);
     try std.testing.expectEqual(@as(usize, 1), manager.variables.items.len);
 }
@@ -478,7 +478,7 @@ test "AnimationManager - variable unregisters itself in callback" {
         var mgr: *AnimationManager = undefined;
         var self_anim: *AnimatedVariable(f32) = undefined;
         var callback_ran: bool = false;
-        
+
         fn onUpdate(a: *AnimatedVariable(f32)) void {
             if (!callback_ran) {
                 callback_ran = true;
@@ -491,14 +491,14 @@ test "AnimationManager - variable unregisters itself in callback" {
     Ctx.mgr = &manager;
     Ctx.self_anim = &anim;
     Ctx.callback_ran = false;
-    
+
     anim.setUpdateCallback(Ctx.onUpdate);
     anim.setValue(100.0);
-    anim.animation_data.started_time = std.time.milliTimestamp() - 50;
-    
+    anim.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
+
     // Tick should handle self-unregistration safely
     manager.tick();
-    
+
     try std.testing.expect(Ctx.callback_ran);
     try std.testing.expectEqual(@as(usize, 0), manager.variables.items.len);
 }
@@ -510,7 +510,7 @@ test "AnimationManager - callback registers new variable" {
     const config = AnimationConfig.init();
     var anim1 = AnimatedVariable(f32).init(0.0, config);
     var anim2 = AnimatedVariable(f32).init(0.0, config);
-    
+
     anim1.setDuration(100);
     anim2.setDuration(100);
 
@@ -520,7 +520,7 @@ test "AnimationManager - callback registers new variable" {
         var mgr: *AnimationManager = undefined;
         var new_anim: *AnimatedVariable(f32) = undefined;
         var registered: bool = false;
-        
+
         fn onUpdate(a: *AnimatedVariable(f32)) void {
             _ = a;
             if (!registered) {
@@ -533,17 +533,17 @@ test "AnimationManager - callback registers new variable" {
     Ctx.mgr = &manager;
     Ctx.new_anim = &anim2;
     Ctx.registered = false;
-    
+
     anim1.setUpdateCallback(Ctx.onUpdate);
     anim1.setValue(100.0);
-    anim1.animation_data.started_time = std.time.milliTimestamp() - 50;
-    
+    anim1.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
+
     // First tick - registers new variable
     manager.tick();
-    
+
     try std.testing.expect(Ctx.registered);
     try std.testing.expectEqual(@as(usize, 2), manager.variables.items.len);
-    
+
     // New variable should NOT have been ticked on same tick
     try std.testing.expect(!anim2.isBeingAnimated());
 }
@@ -556,7 +556,7 @@ test "AnimationManager - removeFinishedVariables from callback" {
     var anim1 = AnimatedVariable(f32).init(0.0, config);
     var anim2 = AnimatedVariable(f32).init(0.0, config);
     var anim3 = AnimatedVariable(f32).init(0.0, config);
-    
+
     anim1.setDuration(100);
     anim2.setDuration(100);
     anim3.setDuration(100);
@@ -568,7 +568,7 @@ test "AnimationManager - removeFinishedVariables from callback" {
     const Ctx = struct {
         var mgr: *AnimationManager = undefined;
         var a2: *AnimatedVariable(f32) = undefined;
-        
+
         fn onUpdate(a: *AnimatedVariable(f32)) void {
             _ = a;
             // Finish another variable and call cleanup
@@ -578,20 +578,20 @@ test "AnimationManager - removeFinishedVariables from callback" {
     };
     Ctx.mgr = &manager;
     Ctx.a2 = &anim2;
-    
+
     anim1.setUpdateCallback(Ctx.onUpdate);
-    
+
     anim1.setValue(100.0);
     anim2.setValue(100.0);
     anim3.setValue(100.0);
-    
-    anim1.animation_data.started_time = std.time.milliTimestamp() - 50;
-    anim2.animation_data.started_time = std.time.milliTimestamp() - 50;
-    anim3.animation_data.started_time = std.time.milliTimestamp() - 50;
-    
+
+    anim1.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
+    anim2.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
+    anim3.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
+
     // Tick should handle removeFinishedVariables being called during iteration
     manager.tick();
-    
+
     // anim2 should have been removed
     try std.testing.expect(manager.variables.items.len < 3);
 }
@@ -601,7 +601,7 @@ test "AnimationManager - stress test with 100 concurrent animations" {
     defer manager.deinit();
 
     const config = AnimationConfig.init();
-    
+
     // Create 100 animations
     var animations: [100]AnimatedVariable(f32) = undefined;
     for (&animations, 0..) |*anim, i| {
@@ -616,7 +616,7 @@ test "AnimationManager - stress test with 100 concurrent animations" {
     }
 
     // Simulate multiple ticks
-    const start_time = std.time.milliTimestamp();
+    const start_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds();
     var tick_count: usize = 0;
     while (tick_count < 5) : (tick_count += 1) {
         // Update all start times to simulate passage of time
@@ -625,7 +625,7 @@ test "AnimationManager - stress test with 100 concurrent animations" {
                 anim.animation_data.started_time = start_time - @as(i64, @intCast(tick_count * 20));
             }
         }
-        
+
         manager.tick();
     }
 
@@ -641,7 +641,7 @@ test "AnimationManager - callback chain reaction" {
     var anim1 = AnimatedVariable(f32).init(0.0, config);
     var anim2 = AnimatedVariable(f32).init(0.0, config);
     var anim3 = AnimatedVariable(f32).init(0.0, config);
-    
+
     anim1.setDuration(100);
     anim2.setDuration(100);
     anim3.setDuration(100);
@@ -655,21 +655,21 @@ test "AnimationManager - callback chain reaction" {
         var counter: *u32 = undefined;
         var a2: *AnimatedVariable(f32) = undefined;
         var a3: *AnimatedVariable(f32) = undefined;
-        
+
         fn onEnd1(a: *AnimatedVariable(f32)) void {
             _ = a;
             counter.* += 1;
             // Trigger second animation
             a2.setValue(200.0);
         }
-        
+
         fn onEnd2(a: *AnimatedVariable(f32)) void {
             _ = a;
             counter.* += 10;
             // Trigger third animation
             a3.setValue(300.0);
         }
-        
+
         fn onEnd3(a: *AnimatedVariable(f32)) void {
             _ = a;
             counter.* += 100;
@@ -678,7 +678,7 @@ test "AnimationManager - callback chain reaction" {
     Ctx.counter = &chain_count;
     Ctx.a2 = &anim2;
     Ctx.a3 = &anim3;
-    
+
     anim1.setCallbackOnEnd(Ctx.onEnd1, false);
     anim2.setCallbackOnEnd(Ctx.onEnd2, false);
     anim3.setCallbackOnEnd(Ctx.onEnd3, false);
@@ -686,10 +686,10 @@ test "AnimationManager - callback chain reaction" {
 
     // Start first animation
     anim1.setValue(100.0);
-    anim1.animation_data.started_time = std.time.milliTimestamp() - 100;
-    
+    anim1.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 100;
+
     manager.tick();
-    
+
     // First callback fired, second animation started
     try std.testing.expectEqual(@as(u32, 1), chain_count);
     try std.testing.expect(anim2.isBeingAnimated());
@@ -703,7 +703,7 @@ test "AnimationManager - multiple variables unregister during same tick" {
     var anim1 = AnimatedVariable(f32).init(0.0, config);
     var anim2 = AnimatedVariable(f32).init(0.0, config);
     var anim3 = AnimatedVariable(f32).init(0.0, config);
-    
+
     anim1.setDuration(100);
     anim2.setDuration(100);
     anim3.setDuration(100);
@@ -716,12 +716,12 @@ test "AnimationManager - multiple variables unregister during same tick" {
         var mgr: *AnimationManager = undefined;
         var a1: *AnimatedVariable(f32) = undefined;
         var a2: *AnimatedVariable(f32) = undefined;
-        
+
         fn onUpdate1(a: *AnimatedVariable(f32)) void {
             _ = a;
             mgr.unregisterVariable(f32, a1);
         }
-        
+
         fn onUpdate2(a: *AnimatedVariable(f32)) void {
             _ = a;
             mgr.unregisterVariable(f32, a2);
@@ -730,28 +730,28 @@ test "AnimationManager - multiple variables unregister during same tick" {
     Ctx.mgr = &manager;
     Ctx.a1 = &anim1;
     Ctx.a2 = &anim2;
-    
+
     anim1.setUpdateCallback(Ctx.onUpdate1);
     anim2.setUpdateCallback(Ctx.onUpdate2);
-    
+
     anim1.setValue(100.0);
     anim2.setValue(100.0);
     anim3.setValue(100.0);
-    
-    anim1.animation_data.started_time = std.time.milliTimestamp() - 50;
-    anim2.animation_data.started_time = std.time.milliTimestamp() - 50;
-    anim3.animation_data.started_time = std.time.milliTimestamp() - 50;
-    
+
+    anim1.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
+    anim2.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
+    anim3.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
+
     // Tick with multiple unregistrations
     manager.tick();
-    
+
     // Only anim3 should remain
     try std.testing.expectEqual(@as(usize, 1), manager.variables.items.len);
 }
 
 test "AnimationManager - callback attempts to destroy manager" {
     var manager = AnimationManager.init(std.testing.allocator);
-    
+
     const config = AnimationConfig.init();
     var anim = AnimatedVariable(f32).init(0.0, config);
     anim.setDuration(100);
@@ -762,7 +762,7 @@ test "AnimationManager - callback attempts to destroy manager" {
     const Ctx = struct {
         var flag: *bool = undefined;
         var mgr: *AnimationManager = undefined;
-        
+
         fn onUpdate(a: *AnimatedVariable(f32)) void {
             _ = a;
             if (!flag.*) {
@@ -774,17 +774,17 @@ test "AnimationManager - callback attempts to destroy manager" {
     };
     Ctx.flag = &attempted_destroy;
     Ctx.mgr = &manager;
-    
+
     anim.setUpdateCallback(Ctx.onUpdate);
     anim.setValue(100.0);
-    anim.animation_data.started_time = std.time.milliTimestamp() - 50;
-    
+    anim.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
+
     // This will destroy the manager during tick
     manager.tick();
-    
+
     try std.testing.expect(attempted_destroy);
     try std.testing.expect(!manager.alive);
-    
+
     // Variable should detect dead manager
     try std.testing.expect(anim.isAnimationManagerDead());
 }
@@ -796,7 +796,7 @@ test "AnimationManager - register during tick then tick again" {
     const config = AnimationConfig.init();
     var anim1 = AnimatedVariable(f32).init(0.0, config);
     var anim2 = AnimatedVariable(f32).init(0.0, config);
-    
+
     anim1.setDuration(100);
     anim2.setDuration(100);
 
@@ -808,7 +808,7 @@ test "AnimationManager - register during tick then tick again" {
         var new_anim: *AnimatedVariable(f32) = undefined;
         var registered: bool = false;
         var anim2_tick_flag: *bool = undefined;
-        
+
         fn onUpdate1(a: *AnimatedVariable(f32)) void {
             _ = a;
             if (!registered) {
@@ -817,7 +817,7 @@ test "AnimationManager - register during tick then tick again" {
                 new_anim.setValue(200.0);
             }
         }
-        
+
         fn onUpdate2(a: *AnimatedVariable(f32)) void {
             _ = a;
             anim2_tick_flag.* = true;
@@ -827,19 +827,19 @@ test "AnimationManager - register during tick then tick again" {
     Ctx.new_anim = &anim2;
     Ctx.registered = false;
     Ctx.anim2_tick_flag = &anim2_ticked;
-    
+
     anim1.setUpdateCallback(Ctx.onUpdate1);
     anim2.setUpdateCallback(Ctx.onUpdate2);
-    
+
     anim1.setValue(100.0);
-    anim1.animation_data.started_time = std.time.milliTimestamp() - 50;
-    
+    anim1.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
+
     // First tick - registers anim2 but shouldn't tick it
     manager.tick();
     try std.testing.expect(!anim2_ticked);
-    
+
     // Second tick - should tick anim2
-    anim2.animation_data.started_time = std.time.milliTimestamp() - 50;
+    anim2.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
     manager.tick();
     try std.testing.expect(anim2_ticked);
 }
@@ -852,7 +852,7 @@ test "AnimationManager - all variables finish simultaneously" {
     var anim1 = AnimatedVariable(f32).init(0.0, config);
     var anim2 = AnimatedVariable(f32).init(0.0, config);
     var anim3 = AnimatedVariable(f32).init(0.0, config);
-    
+
     anim1.setDuration(100);
     anim2.setDuration(100);
     anim3.setDuration(100);
@@ -870,25 +870,25 @@ test "AnimationManager - all variables finish simultaneously" {
         }
     };
     Ctx.counter = &end_count;
-    
+
     anim1.setCallbackOnEnd(Ctx.onEnd, false);
     anim2.setCallbackOnEnd(Ctx.onEnd, false);
     anim3.setCallbackOnEnd(Ctx.onEnd, false);
     end_count = 0;
 
     // Start all with same timing
-    const start_time = std.time.milliTimestamp() - 100;
+    const start_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 100;
     anim1.setValue(100.0);
     anim2.setValue(200.0);
     anim3.setValue(300.0);
-    
+
     anim1.animation_data.started_time = start_time;
     anim2.animation_data.started_time = start_time;
     anim3.animation_data.started_time = start_time;
-    
+
     // Single tick should finish all
     manager.tick();
-    
+
     try std.testing.expectEqual(@as(u32, 3), end_count);
     try std.testing.expect(!anim1.isBeingAnimated());
     try std.testing.expect(!anim2.isBeingAnimated());
@@ -903,7 +903,7 @@ test "AnimationManager - nested callback modifications" {
     var anim1 = AnimatedVariable(f32).init(0.0, config);
     var anim2 = AnimatedVariable(f32).init(0.0, config);
     var anim3 = AnimatedVariable(f32).init(0.0, config);
-    
+
     anim1.setDuration(100);
     anim2.setDuration(100);
     anim3.setDuration(100);
@@ -916,7 +916,7 @@ test "AnimationManager - nested callback modifications" {
         var a2: *AnimatedVariable(f32) = undefined;
         var a3: *AnimatedVariable(f32) = undefined;
         var step: u32 = 0;
-        
+
         fn onUpdate1(a: *AnimatedVariable(f32)) void {
             _ = a;
             if (step == 0) {
@@ -932,18 +932,18 @@ test "AnimationManager - nested callback modifications" {
     Ctx.a2 = &anim2;
     Ctx.a3 = &anim3;
     Ctx.step = 0;
-    
+
     anim1.setUpdateCallback(Ctx.onUpdate1);
-    
+
     anim1.setValue(100.0);
     anim2.setValue(200.0);
-    
-    anim1.animation_data.started_time = std.time.milliTimestamp() - 50;
-    anim2.animation_data.started_time = std.time.milliTimestamp() - 50;
-    
+
+    anim1.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
+    anim2.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
+
     // Tick with nested modifications
     manager.tick();
-    
+
     // Should have anim1 and anim3, not anim2
     try std.testing.expectEqual(@as(usize, 2), manager.variables.items.len);
 }
@@ -956,6 +956,6 @@ test "AnimationManager - empty manager tick" {
     manager.tick();
     manager.tick();
     manager.tick();
-    
+
     try std.testing.expect(manager.alive);
 }

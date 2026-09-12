@@ -6,12 +6,18 @@ const std = @import("std");
 const testing = std.testing;
 
 // libc functions for environment manipulation
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
+fn getEnv(name: [:0]const u8) ?[:0]const u8 {
+    const value = getenv(name.ptr) orelse return null;
+    return std.mem.span(value);
+}
+
 pub const RuntimeDir = struct {
     tmp: std.testing.TmpDir,
-    path: []const u8,
+    path: [:0]const u8,
     path_z: [:0]const u8,
     allocator: std.mem.Allocator,
     saved_runtime_dir: ?[:0]const u8,
@@ -21,7 +27,7 @@ pub const RuntimeDir = struct {
     /// Call cleanup() when done to restore environment.
     pub fn setup(allocator: std.mem.Allocator) !RuntimeDir {
         // Save existing XDG_RUNTIME_DIR to restore later
-        const old_runtime_dir = std.posix.getenv("XDG_RUNTIME_DIR");
+        const old_runtime_dir = getEnv("XDG_RUNTIME_DIR");
         const saved_path = if (old_runtime_dir) |dir|
             try allocator.dupeZ(u8, dir)
         else
@@ -31,7 +37,7 @@ pub const RuntimeDir = struct {
         var temp = std.testing.tmpDir(.{});
         errdefer temp.cleanup();
 
-        const path = try temp.dir.realpathAlloc(allocator, ".");
+        const path = try temp.dir.realPathFileAlloc(testing.io, ".", allocator);
         errdefer allocator.free(path);
 
         const path_z = try allocator.dupeZ(u8, path);
@@ -60,11 +66,11 @@ pub const RuntimeDir = struct {
         } else {
             _ = unsetenv("XDG_RUNTIME_DIR");
         }
-        
+
         // Free allocations
         self.allocator.free(self.path_z);
         self.allocator.free(self.path);
-        
+
         // Clean up temp directory last
         var tmp = self.tmp;
         tmp.cleanup();
@@ -76,6 +82,6 @@ test "RuntimeDir: setup and cleanup" {
     defer runtime.cleanup();
 
     // Should have XDG_RUNTIME_DIR set
-    const xdg_dir = std.posix.getenv("XDG_RUNTIME_DIR");
+    const xdg_dir = getEnv("XDG_RUNTIME_DIR");
     try testing.expect(xdg_dir != null);
 }

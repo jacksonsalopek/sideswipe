@@ -49,16 +49,15 @@ Simple parser with allocations. Use when:
 const std = @import("std");
 const display = @import("core.display");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
     // Load EDID data
-    const edid_data = try std.fs.cwd().readFileAlloc(
-        allocator,
+    const edid_data = try std.Io.Dir.cwd().readFileAlloc(
+        init.io,
         "/sys/class/drm/card0-HDMI-A-1/edid",
-        1024
+        allocator,
+        .limited(1024),
     );
     defer allocator.free(edid_data);
 

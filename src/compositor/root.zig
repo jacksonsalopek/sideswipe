@@ -4,6 +4,17 @@
 pub const compositor = @import("compositor.zig");
 pub const surface = @import("surface.zig");
 pub const output = @import("output.zig");
+pub const scale = @import("scale.zig");
+pub const layout = struct {
+    pub const strip = @import("layout/strip.zig");
+};
+pub const scene = @import("scene/scene.zig");
+pub const ring_geometry = @import("ring_geometry.zig");
+pub const input = struct {
+    pub const focus = @import("input/focus.zig");
+    pub const gesture = @import("input/gesture.zig");
+    pub const seat = @import("input/seat.zig");
+};
 
 // Protocol implementations
 pub const protocols = struct {
@@ -13,6 +24,9 @@ pub const protocols = struct {
     pub const seat = @import("protocols/seat.zig");
     pub const data_device = @import("protocols/data_device.zig");
     pub const linux_dmabuf = @import("protocols/linux_dmabuf.zig");
+    pub const wl_subcompositor = @import("protocols/subcompositor.zig");
+    pub const xdg_activation = @import("protocols/xdg_activation.zig");
+    pub const hidpi = @import("protocols/hidpi.zig");
 };
 
 // Convenience re-exports
@@ -28,4 +42,14 @@ test {
     _ = @import("compositor.zig");
     _ = @import("surface.zig");
     _ = @import("output.zig");
+    _ = @import("input/focus.zig");
+    _ = @import("input/gesture.zig");
+    _ = @import("input/seat.zig");
+    _ = @import("layout/strip.zig");
+    _ = @import("ring_geometry.zig");
+    _ = @import("scene/scene.zig");
+    _ = @import("scale.zig");
+    _ = @import("protocols/compositor.zig");
+    _ = @import("protocols/output.zig");
+    _ = @import("protocols/subcompositor.zig");
 }

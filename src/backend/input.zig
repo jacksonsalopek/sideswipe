@@ -3,34 +3,65 @@ const core = @import("core");
 const string = @import("core.string").string;
 const libinput = @import("libinput.zig");
 
-pub const DeviceType = enum {
-    keyboard,
-    pointer,
-    touch,
-    tablet_tool,
-    tablet_pad,
-    switch_device,
+/// Per-device capability bitset (I1). Multi-capability devices such as
+/// touchpads report several bits; translators are chosen per capability,
+/// never from a single device class.
+pub const Capabilities = packed struct(u8) {
+    keyboard: bool = false,
+    pointer: bool = false,
+    touch: bool = false,
+    tablet_tool: bool = false,
+    tablet_pad: bool = false,
+    gesture: bool = false,
+    switch_device: bool = false,
+    _reserved: bool = false,
 
-    pub fn fromLibinput(device: *libinput.Device) DeviceType {
-        if (libinput.c.libinput_device_has_capability(device, @intFromEnum(libinput.DeviceCapability.keyboard)) != 0) {
-            return .keyboard;
-        }
-        if (libinput.c.libinput_device_has_capability(device, @intFromEnum(libinput.DeviceCapability.pointer)) != 0) {
-            return .pointer;
-        }
-        if (libinput.c.libinput_device_has_capability(device, @intFromEnum(libinput.DeviceCapability.touch)) != 0) {
-            return .touch;
-        }
-        if (libinput.c.libinput_device_has_capability(device, @intFromEnum(libinput.DeviceCapability.tablet_tool)) != 0) {
-            return .tablet_tool;
-        }
-        if (libinput.c.libinput_device_has_capability(device, @intFromEnum(libinput.DeviceCapability.tablet_pad)) != 0) {
-            return .tablet_pad;
-        }
-        if (libinput.c.libinput_device_has_capability(device, @intFromEnum(libinput.DeviceCapability.switch_device)) != 0) {
-            return .switch_device;
-        }
-        return .pointer; // fallback
+    pub fn none() Capabilities {
+        return .{};
+    }
+
+    pub fn all() Capabilities {
+        return .{
+            .keyboard = true,
+            .pointer = true,
+            .touch = true,
+            .tablet_tool = true,
+            .tablet_pad = true,
+            .gesture = true,
+            .switch_device = true,
+        };
+    }
+
+    pub fn fromLibinput(device: *libinput.Device) Capabilities {
+        return .{
+            .keyboard = libinput.hasCapability(device, .keyboard),
+            .pointer = libinput.hasCapability(device, .pointer),
+            .touch = libinput.hasCapability(device, .touch),
+            .tablet_tool = libinput.hasCapability(device, .tablet_tool),
+            .tablet_pad = libinput.hasCapability(device, .tablet_pad),
+            .gesture = libinput.hasCapability(device, .gesture),
+            .switch_device = libinput.hasCapability(device, .switch_device),
+        };
+    }
+
+    pub fn has(self: Capabilities, capability: libinput.DeviceCapability) bool {
+        return switch (capability) {
+            .keyboard => self.keyboard,
+            .pointer => self.pointer,
+            .touch => self.touch,
+            .tablet_tool => self.tablet_tool,
+            .tablet_pad => self.tablet_pad,
+            .gesture => self.gesture,
+            .switch_device => self.switch_device,
+        };
+    }
+
+    pub fn count(self: Capabilities) u32 {
+        return @popCount(@as(u8, @bitCast(self)));
+    }
+
+    pub fn isEmpty(self: Capabilities) bool {
+        return @as(u8, @bitCast(self)) == 0;
     }
 };
 
@@ -39,25 +70,37 @@ pub const Device = struct {
     sysname: string,
     vendor: u32,
     product: u32,
-    device_type: DeviceType,
+    capabilities: Capabilities = .{},
+    has_side_button: bool = false,
+    has_extra_button: bool = false,
     enabled: bool = true,
 
     libinput_device: *libinput.Device,
+    owns_reference: bool = false,
     allocator: std.mem.Allocator,
 
     pub fn fromLibinput(allocator: std.mem.Allocator, device: *libinput.Device) !*Device {
         const dev = try allocator.create(Device);
+        errdefer allocator.destroy(dev);
 
         const name = libinput.c.libinput_device_get_name(device);
         const sysname = libinput.c.libinput_device_get_sysname(device);
+        const name_copy = try allocator.dupe(u8, std.mem.span(name));
+        errdefer allocator.free(name_copy);
+        const sysname_copy = try allocator.dupe(u8, std.mem.span(sysname));
+        errdefer allocator.free(sysname_copy);
 
+        const capabilities = Capabilities.fromLibinput(device);
         dev.* = .{
-            .name = try allocator.dupe(u8, std.mem.span(name)),
-            .sysname = try allocator.dupe(u8, std.mem.span(sysname)),
+            .name = name_copy,
+            .sysname = sysname_copy,
             .vendor = @intCast(libinput.c.libinput_device_get_id_vendor(device)),
             .product = @intCast(libinput.c.libinput_device_get_id_product(device)),
-            .device_type = DeviceType.fromLibinput(device),
+            .capabilities = capabilities,
+            .has_side_button = libinput.c.libinput_device_pointer_has_button(device, 0x113) > 0,
+            .has_extra_button = libinput.c.libinput_device_pointer_has_button(device, 0x114) > 0,
             .libinput_device = device,
+            .owns_reference = true,
             .allocator = allocator,
         };
 
@@ -68,7 +111,7 @@ pub const Device = struct {
     }
 
     pub fn deinit(self: *Device) void {
-        _ = libinput.c.libinput_device_unref(self.libinput_device);
+        if (self.owns_reference) _ = libinput.c.libinput_device_unref(self.libinput_device);
         self.allocator.free(self.name);
         self.allocator.free(self.sysname);
         self.allocator.destroy(self);
@@ -81,6 +124,27 @@ pub const Event = union(enum) {
     pointer_motion_absolute: PointerMotionAbsoluteEvent,
     pointer_button: PointerButtonEvent,
     pointer_axis: PointerAxisEvent,
+    gesture_swipe_begin: GestureSwipe,
+    gesture_swipe_update: GestureSwipe,
+    gesture_swipe_end: GestureSwipe,
+    gesture_pinch_begin: GesturePinch,
+    gesture_pinch_update: GesturePinch,
+    gesture_pinch_end: GesturePinch,
+    gesture_hold_begin: GestureHold,
+    gesture_hold_end: GestureHold,
+    touch_down: Touch,
+    touch_up: TouchUp,
+    touch_motion: Touch,
+    touch_frame: TouchFrame,
+    touch_cancel: TouchUp,
+    tablet_tool_axis: TabletToolAxis,
+    tablet_tool_proximity: TabletToolProximity,
+    tablet_tool_tip: TabletToolTip,
+    tablet_tool_button: TabletToolButton,
+    tablet_pad_button: TabletPadButton,
+    tablet_pad_ring: TabletPadRing,
+    tablet_pad_strip: TabletPadStrip,
+    switch_toggle: Switch,
     device_added: DeviceEvent,
     device_removed: DeviceEvent,
 
@@ -126,6 +190,120 @@ pub const Event = union(enum) {
     pub const DeviceEvent = struct {
         device: *Device,
     };
+
+    pub const GestureSwipe = struct {
+        device: *Device,
+        time_usec: u64,
+        fingers: u32,
+        delta_x: f64,
+        delta_y: f64,
+        cancelled: bool,
+    };
+
+    pub const GesturePinch = struct {
+        device: *Device,
+        time_usec: u64,
+        fingers: u32,
+        delta_x: f64,
+        delta_y: f64,
+        scale: f64,
+        rotation: f64,
+        cancelled: bool,
+    };
+
+    pub const GestureHold = struct {
+        device: *Device,
+        time_usec: u64,
+        fingers: u32,
+        cancelled: bool,
+    };
+
+    pub const Touch = struct {
+        device: *Device,
+        time_usec: u64,
+        slot: i32,
+        /// Normalized 0..1 surface coordinates.
+        x: f64,
+        y: f64,
+    };
+
+    pub const TouchUp = struct {
+        device: *Device,
+        time_usec: u64,
+        slot: i32,
+    };
+
+    pub const TouchFrame = struct {
+        device: *Device,
+        time_usec: u64,
+    };
+
+    pub const TabletToolAxis = struct {
+        device: *Device,
+        time_usec: u64,
+        /// Normalized 0..1 coordinates.
+        x: f64,
+        y: f64,
+        pressure: f64,
+        tilt_x: f64,
+        tilt_y: f64,
+        rotation: f64,
+        distance: f64,
+    };
+
+    pub const TabletToolProximity = struct {
+        device: *Device,
+        time_usec: u64,
+        x: f64,
+        y: f64,
+        state: libinput.TabletToolProximityState,
+    };
+
+    pub const TabletToolTip = struct {
+        device: *Device,
+        time_usec: u64,
+        x: f64,
+        y: f64,
+        state: libinput.TabletToolTipState,
+    };
+
+    pub const TabletToolButton = struct {
+        device: *Device,
+        time_usec: u64,
+        button: u32,
+        state: libinput.ButtonState,
+        seat_button_count: u32,
+    };
+
+    pub const TabletPadButton = struct {
+        device: *Device,
+        time_usec: u64,
+        button: u32,
+        state: libinput.ButtonState,
+    };
+
+    pub const TabletPadRing = struct {
+        device: *Device,
+        time_usec: u64,
+        ring: u32,
+        position: f64,
+        source: libinput.TabletPadRingSource,
+    };
+
+    pub const TabletPadStrip = struct {
+        device: *Device,
+        time_usec: u64,
+        strip: u32,
+        position: f64,
+        source: libinput.TabletPadStripSource,
+    };
+
+    pub const Switch = struct {
+        device: *Device,
+        time_usec: u64,
+        switch_kind: libinput.Switch,
+        state: libinput.SwitchState,
+    };
 };
 
 pub const EventQueue = struct {
@@ -134,7 +312,7 @@ pub const EventQueue = struct {
 
     pub fn init(allocator: std.mem.Allocator) EventQueue {
         return .{
-            .events = .{},
+            .events = .empty,
             .allocator = allocator,
         };
     }
@@ -169,23 +347,42 @@ pub const EventQueue = struct {
 pub const Manager = struct {
     allocator: std.mem.Allocator,
     libinput_context: *libinput.Context,
+    owns_context: bool = true,
     devices: std.AutoHashMap(*libinput.Device, *Device),
+    retired_devices: std.ArrayList(*Device),
     event_queue: EventQueue,
 
+    pub const ContextFactory = *const fn (
+        *const libinput.c.libinput_interface,
+        ?*anyopaque,
+        *anyopaque,
+    ) ?*libinput.Context;
+
     pub fn init(allocator: std.mem.Allocator, udev: *anyopaque, seat_id: string) !Manager {
+        return initWithFactory(allocator, udev, seat_id, createContext);
+    }
+
+    pub fn initWithFactory(
+        allocator: std.mem.Allocator,
+        udev: *anyopaque,
+        seat_id: string,
+        factory: ContextFactory,
+    ) !Manager {
         const interface = libinput.c.libinput_interface{
             .open_restricted = openRestricted,
             .close_restricted = closeRestricted,
         };
 
-        const ctx = libinput.c.libinput_udev_create_context(
+        const ctx = factory(
             &interface,
             null,
-            @ptrCast(udev),
+            udev,
         ) orelse return error.LibinputContextFailed;
 
-        if (libinput.c.libinput_udev_assign_seat(ctx, seat_id.ptr) != 0) {
-            libinput.c.libinput_unref(ctx);
+        const seat_id_z = try allocator.dupeZ(u8, seat_id);
+        defer allocator.free(seat_id_z);
+        if (libinput.c.libinput_udev_assign_seat(ctx, seat_id_z.ptr) != 0) {
+            _ = libinput.c.libinput_unref(ctx);
             return error.SeatAssignFailed;
         }
 
@@ -193,6 +390,18 @@ pub const Manager = struct {
             .allocator = allocator,
             .libinput_context = ctx,
             .devices = std.AutoHashMap(*libinput.Device, *Device).init(allocator),
+            .retired_devices = .empty,
+            .event_queue = EventQueue.init(allocator),
+        };
+    }
+
+    pub fn fromContext(allocator: std.mem.Allocator, context: *libinput.Context) Manager {
+        return .{
+            .allocator = allocator,
+            .libinput_context = context,
+            .owns_context = false,
+            .devices = std.AutoHashMap(*libinput.Device, *Device).init(allocator),
+            .retired_devices = .empty,
             .event_queue = EventQueue.init(allocator),
         };
     }
@@ -202,9 +411,11 @@ pub const Manager = struct {
         while (it.next()) |device| {
             device.*.deinit();
         }
+        for (self.retired_devices.items) |device| device.deinit();
+        self.retired_devices.deinit(self.allocator);
         self.devices.deinit();
         self.event_queue.deinit();
-        libinput.c.libinput_unref(self.libinput_context);
+        if (self.owns_context) _ = libinput.c.libinput_unref(self.libinput_context);
     }
 
     pub fn getFd(self: *Manager) c_int {
@@ -231,25 +442,52 @@ pub const Manager = struct {
             .pointer_motion_absolute => try self.handlePointerMotionAbsolute(event),
             .pointer_button => try self.handlePointerButton(event),
             .pointer_axis => try self.handlePointerAxis(event),
+            .gesture_swipe_begin => try self.pushGestureSwipe(event, .gesture_swipe_begin),
+            .gesture_swipe_update => try self.pushGestureSwipe(event, .gesture_swipe_update),
+            .gesture_swipe_end => try self.pushGestureSwipe(event, .gesture_swipe_end),
+            .gesture_pinch_begin => try self.pushGesturePinch(event, .gesture_pinch_begin),
+            .gesture_pinch_update => try self.pushGesturePinch(event, .gesture_pinch_update),
+            .gesture_pinch_end => try self.pushGesturePinch(event, .gesture_pinch_end),
+            .gesture_hold_begin => try self.pushGestureHold(event, .gesture_hold_begin),
+            .gesture_hold_end => try self.pushGestureHold(event, .gesture_hold_end),
+            .touch_down => try self.handleTouchDown(event),
+            .touch_up => try self.handleTouchUp(event),
+            .touch_motion => try self.handleTouchMotion(event),
+            .touch_frame => try self.handleTouchFrame(event),
+            .touch_cancel => try self.handleTouchCancel(event),
+            .tablet_tool_axis => try self.handleTabletToolAxis(event),
+            .tablet_tool_proximity => try self.handleTabletToolProximity(event),
+            .tablet_tool_tip => try self.handleTabletToolTip(event),
+            .tablet_tool_button => try self.handleTabletToolButton(event),
+            .tablet_pad_button => try self.handleTabletPadButton(event),
+            .tablet_pad_ring => try self.handleTabletPadRing(event),
+            .tablet_pad_strip => try self.handleTabletPadStrip(event),
+            .switch_toggle => try self.handleSwitchToggle(event),
+            .none => {},
             else => {},
         }
     }
 
     fn handleDeviceAdded(self: *Manager, event: *libinput.Event) !void {
-        const device = libinput.c.libinput_event_get_device(event);
+        const device = libinput.c.libinput_event_get_device(event) orelse return;
+        if (self.devices.contains(device)) return;
+        try self.devices.ensureUnusedCapacity(1);
+        try self.event_queue.events.ensureUnusedCapacity(self.allocator, 1);
         const input_device = try Device.fromLibinput(self.allocator, device);
-
-        try self.devices.put(device, input_device);
-        try self.event_queue.push(.{ .device_added = .{ .device = input_device } });
+        self.devices.putAssumeCapacity(device, input_device);
+        self.event_queue.events.appendAssumeCapacity(.{ .device_added = .{ .device = input_device } });
     }
 
     fn handleDeviceRemoved(self: *Manager, event: *libinput.Event) !void {
-        const device = libinput.c.libinput_event_get_device(event);
-
-        if (self.devices.fetchRemove(device)) |kv| {
-            try self.event_queue.push(.{ .device_removed = .{ .device = kv.value } });
-            kv.value.deinit();
-        }
+        const device = libinput.c.libinput_event_get_device(event) orelse return;
+        const input_device = self.devices.get(device) orelse return;
+        try self.retired_devices.ensureUnusedCapacity(self.allocator, 1);
+        try self.event_queue.events.ensureUnusedCapacity(self.allocator, 1);
+        _ = self.devices.remove(device);
+        self.retired_devices.appendAssumeCapacity(input_device);
+        self.event_queue.events.appendAssumeCapacity(.{
+            .device_removed = .{ .device = input_device },
+        });
     }
 
     fn handleKeyboardKey(self: *Manager, event: *libinput.Event) !void {
@@ -316,33 +554,268 @@ pub const Manager = struct {
 
         const axes = [_]libinput.PointerAxis{ .scroll_vertical, .scroll_horizontal };
         for (axes) |axis| {
-            if (libinput.c.libinput_event_pointer_has_axis(pointer_event, @intFromEnum(axis)) == 0) continue;
+            const raw_axis: libinput.c.enum_libinput_pointer_axis = @intCast(@intFromEnum(axis));
+            if (libinput.c.libinput_event_pointer_has_axis(pointer_event, raw_axis) == 0) continue;
 
             try self.event_queue.push(.{
                 .pointer_axis = .{
                     .device = device,
                     .time_usec = libinput.c.libinput_event_pointer_get_time_usec(pointer_event),
                     .axis = axis,
-                    .value = libinput.c.libinput_event_pointer_get_axis_value(pointer_event, @intFromEnum(axis)),
-                    .value_discrete = @intCast(libinput.c.libinput_event_pointer_get_axis_value_discrete(pointer_event, @intFromEnum(axis))),
+                    .value = libinput.c.libinput_event_pointer_get_axis_value(pointer_event, raw_axis),
+                    .value_discrete = @intFromFloat(libinput.c.libinput_event_pointer_get_axis_value_discrete(pointer_event, raw_axis)),
                     .source = @enumFromInt(libinput.c.libinput_event_pointer_get_axis_source(pointer_event)),
                 },
             });
         }
     }
 
-    fn getDeviceForLibinputDevice(self: *Manager, device: *libinput.Device) !*Device {
+    fn pushGestureSwipe(self: *Manager, event: *libinput.Event, tag: std.meta.Tag(Event)) !void {
+        const gesture = libinput.c.libinput_event_get_gesture_event(event);
+        const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
+        const payload = Event.GestureSwipe{
+            .device = device,
+            .time_usec = libinput.c.libinput_event_gesture_get_time_usec(gesture),
+            .fingers = @intCast(libinput.c.libinput_event_gesture_get_finger_count(gesture)),
+            .delta_x = libinput.c.libinput_event_gesture_get_dx(gesture),
+            .delta_y = libinput.c.libinput_event_gesture_get_dy(gesture),
+            .cancelled = libinput.c.libinput_event_gesture_get_cancelled(gesture) != 0,
+        };
+        switch (tag) {
+            .gesture_swipe_begin => try self.event_queue.push(.{ .gesture_swipe_begin = payload }),
+            .gesture_swipe_update => try self.event_queue.push(.{ .gesture_swipe_update = payload }),
+            .gesture_swipe_end => try self.event_queue.push(.{ .gesture_swipe_end = payload }),
+            else => unreachable,
+        }
+    }
+
+    fn pushGesturePinch(self: *Manager, event: *libinput.Event, tag: std.meta.Tag(Event)) !void {
+        const gesture = libinput.c.libinput_event_get_gesture_event(event);
+        const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
+        const payload = Event.GesturePinch{
+            .device = device,
+            .time_usec = libinput.c.libinput_event_gesture_get_time_usec(gesture),
+            .fingers = @intCast(libinput.c.libinput_event_gesture_get_finger_count(gesture)),
+            .delta_x = libinput.c.libinput_event_gesture_get_dx(gesture),
+            .delta_y = libinput.c.libinput_event_gesture_get_dy(gesture),
+            .scale = libinput.c.libinput_event_gesture_get_scale(gesture),
+            .rotation = libinput.c.libinput_event_gesture_get_angle_delta(gesture),
+            .cancelled = libinput.c.libinput_event_gesture_get_cancelled(gesture) != 0,
+        };
+        switch (tag) {
+            .gesture_pinch_begin => try self.event_queue.push(.{ .gesture_pinch_begin = payload }),
+            .gesture_pinch_update => try self.event_queue.push(.{ .gesture_pinch_update = payload }),
+            .gesture_pinch_end => try self.event_queue.push(.{ .gesture_pinch_end = payload }),
+            else => unreachable,
+        }
+    }
+
+    fn pushGestureHold(self: *Manager, event: *libinput.Event, tag: std.meta.Tag(Event)) !void {
+        const gesture = libinput.c.libinput_event_get_gesture_event(event);
+        const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
+        const payload = Event.GestureHold{
+            .device = device,
+            .time_usec = libinput.c.libinput_event_gesture_get_time_usec(gesture),
+            .fingers = @intCast(libinput.c.libinput_event_gesture_get_finger_count(gesture)),
+            .cancelled = libinput.c.libinput_event_gesture_get_cancelled(gesture) != 0,
+        };
+        switch (tag) {
+            .gesture_hold_begin => try self.event_queue.push(.{ .gesture_hold_begin = payload }),
+            .gesture_hold_end => try self.event_queue.push(.{ .gesture_hold_end = payload }),
+            else => unreachable,
+        }
+    }
+
+    fn touchPayload(self: *Manager, event: *libinput.Event) !Event.Touch {
+        const touch = libinput.c.libinput_event_get_touch_event(event);
+        const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
+        return .{
+            .device = device,
+            .time_usec = libinput.c.libinput_event_touch_get_time_usec(touch),
+            .slot = libinput.c.libinput_event_touch_get_seat_slot(touch),
+            .x = libinput.c.libinput_event_touch_get_x_transformed(touch, 1),
+            .y = libinput.c.libinput_event_touch_get_y_transformed(touch, 1),
+        };
+    }
+
+    fn handleTouchDown(self: *Manager, event: *libinput.Event) !void {
+        try self.event_queue.push(.{ .touch_down = try self.touchPayload(event) });
+    }
+
+    fn handleTouchMotion(self: *Manager, event: *libinput.Event) !void {
+        try self.event_queue.push(.{ .touch_motion = try self.touchPayload(event) });
+    }
+
+    fn touchSlotPayload(self: *Manager, event: *libinput.Event) !Event.TouchUp {
+        const touch = libinput.c.libinput_event_get_touch_event(event);
+        const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
+        return .{
+            .device = device,
+            .time_usec = libinput.c.libinput_event_touch_get_time_usec(touch),
+            .slot = libinput.c.libinput_event_touch_get_seat_slot(touch),
+        };
+    }
+
+    fn handleTouchUp(self: *Manager, event: *libinput.Event) !void {
+        try self.event_queue.push(.{ .touch_up = try self.touchSlotPayload(event) });
+    }
+
+    fn handleTouchCancel(self: *Manager, event: *libinput.Event) !void {
+        try self.event_queue.push(.{ .touch_cancel = try self.touchSlotPayload(event) });
+    }
+
+    fn handleTouchFrame(self: *Manager, event: *libinput.Event) !void {
+        const touch = libinput.c.libinput_event_get_touch_event(event);
+        const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
+        try self.event_queue.push(.{
+            .touch_frame = .{
+                .device = device,
+                .time_usec = libinput.c.libinput_event_touch_get_time_usec(touch),
+            },
+        });
+    }
+
+    fn handleTabletToolAxis(self: *Manager, event: *libinput.Event) !void {
+        const tool = libinput.c.libinput_event_get_tablet_tool_event(event);
+        const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
+        try self.event_queue.push(.{
+            .tablet_tool_axis = .{
+                .device = device,
+                .time_usec = libinput.c.libinput_event_tablet_tool_get_time_usec(tool),
+                .x = libinput.c.libinput_event_tablet_tool_get_x_transformed(tool, 1),
+                .y = libinput.c.libinput_event_tablet_tool_get_y_transformed(tool, 1),
+                .pressure = libinput.c.libinput_event_tablet_tool_get_pressure(tool),
+                .tilt_x = libinput.c.libinput_event_tablet_tool_get_tilt_x(tool),
+                .tilt_y = libinput.c.libinput_event_tablet_tool_get_tilt_y(tool),
+                .rotation = libinput.c.libinput_event_tablet_tool_get_rotation(tool),
+                .distance = libinput.c.libinput_event_tablet_tool_get_distance(tool),
+            },
+        });
+    }
+
+    fn handleTabletToolProximity(self: *Manager, event: *libinput.Event) !void {
+        const tool = libinput.c.libinput_event_get_tablet_tool_event(event);
+        const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
+        try self.event_queue.push(.{
+            .tablet_tool_proximity = .{
+                .device = device,
+                .time_usec = libinput.c.libinput_event_tablet_tool_get_time_usec(tool),
+                .x = libinput.c.libinput_event_tablet_tool_get_x_transformed(tool, 1),
+                .y = libinput.c.libinput_event_tablet_tool_get_y_transformed(tool, 1),
+                .state = @enumFromInt(libinput.c.libinput_event_tablet_tool_get_proximity_state(tool)),
+            },
+        });
+    }
+
+    fn handleTabletToolTip(self: *Manager, event: *libinput.Event) !void {
+        const tool = libinput.c.libinput_event_get_tablet_tool_event(event);
+        const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
+        try self.event_queue.push(.{
+            .tablet_tool_tip = .{
+                .device = device,
+                .time_usec = libinput.c.libinput_event_tablet_tool_get_time_usec(tool),
+                .x = libinput.c.libinput_event_tablet_tool_get_x_transformed(tool, 1),
+                .y = libinput.c.libinput_event_tablet_tool_get_y_transformed(tool, 1),
+                .state = @enumFromInt(libinput.c.libinput_event_tablet_tool_get_tip_state(tool)),
+            },
+        });
+    }
+
+    fn handleTabletToolButton(self: *Manager, event: *libinput.Event) !void {
+        const tool = libinput.c.libinput_event_get_tablet_tool_event(event);
+        const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
+        try self.event_queue.push(.{
+            .tablet_tool_button = .{
+                .device = device,
+                .time_usec = libinput.c.libinput_event_tablet_tool_get_time_usec(tool),
+                .button = libinput.c.libinput_event_tablet_tool_get_button(tool),
+                .state = @enumFromInt(libinput.c.libinput_event_tablet_tool_get_button_state(tool)),
+                .seat_button_count = libinput.c.libinput_event_tablet_tool_get_seat_button_count(tool),
+            },
+        });
+    }
+
+    fn handleTabletPadButton(self: *Manager, event: *libinput.Event) !void {
+        const pad = libinput.c.libinput_event_get_tablet_pad_event(event);
+        const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
+        try self.event_queue.push(.{
+            .tablet_pad_button = .{
+                .device = device,
+                .time_usec = libinput.c.libinput_event_tablet_pad_get_time_usec(pad),
+                .button = libinput.c.libinput_event_tablet_pad_get_button_number(pad),
+                .state = @enumFromInt(libinput.c.libinput_event_tablet_pad_get_button_state(pad)),
+            },
+        });
+    }
+
+    fn handleTabletPadRing(self: *Manager, event: *libinput.Event) !void {
+        const pad = libinput.c.libinput_event_get_tablet_pad_event(event);
+        const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
+        try self.event_queue.push(.{
+            .tablet_pad_ring = .{
+                .device = device,
+                .time_usec = libinput.c.libinput_event_tablet_pad_get_time_usec(pad),
+                .ring = libinput.c.libinput_event_tablet_pad_get_ring_number(pad),
+                .position = libinput.c.libinput_event_tablet_pad_get_ring_position(pad),
+                .source = @enumFromInt(libinput.c.libinput_event_tablet_pad_get_ring_source(pad)),
+            },
+        });
+    }
+
+    fn handleTabletPadStrip(self: *Manager, event: *libinput.Event) !void {
+        const pad = libinput.c.libinput_event_get_tablet_pad_event(event);
+        const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
+        try self.event_queue.push(.{
+            .tablet_pad_strip = .{
+                .device = device,
+                .time_usec = libinput.c.libinput_event_tablet_pad_get_time_usec(pad),
+                .strip = libinput.c.libinput_event_tablet_pad_get_strip_number(pad),
+                .position = libinput.c.libinput_event_tablet_pad_get_strip_position(pad),
+                .source = @enumFromInt(libinput.c.libinput_event_tablet_pad_get_strip_source(pad)),
+            },
+        });
+    }
+
+    fn handleSwitchToggle(self: *Manager, event: *libinput.Event) !void {
+        const switch_event = libinput.c.libinput_event_get_switch_event(event);
+        const device = try self.getDeviceForLibinputDevice(libinput.c.libinput_event_get_device(event));
+        try self.event_queue.push(.{
+            .switch_toggle = .{
+                .device = device,
+                .time_usec = libinput.c.libinput_event_switch_get_time_usec(switch_event),
+                .switch_kind = @enumFromInt(libinput.c.libinput_event_switch_get_switch(switch_event)),
+                .state = @enumFromInt(libinput.c.libinput_event_switch_get_switch_state(switch_event)),
+            },
+        });
+    }
+
+    fn getDeviceForLibinputDevice(self: *Manager, optional_device: ?*libinput.Device) !*Device {
+        const device = optional_device orelse return error.DeviceNotFound;
         return self.devices.get(device) orelse error.DeviceNotFound;
     }
 
-    fn openRestricted(path: [*c]const u8, flags: c_int, user_data: ?*anyopaque) callconv(.C) c_int {
-        _ = user_data;
-        return std.posix.open(std.mem.span(path), @bitCast(@as(u32, @intCast(flags))), 0) catch return -1;
+    pub fn finishDispatch(self: *Manager) void {
+        if (self.event_queue.len() != 0) return;
+        for (self.retired_devices.items) |device| device.deinit();
+        self.retired_devices.clearRetainingCapacity();
     }
 
-    fn closeRestricted(fd: c_int, user_data: ?*anyopaque) callconv(.C) void {
+    fn openRestricted(path: [*c]const u8, flags: c_int, user_data: ?*anyopaque) callconv(.c) c_int {
         _ = user_data;
-        std.posix.close(fd);
+        return core.unix.open(std.mem.span(path), @bitCast(@as(u32, @intCast(flags))), 0) catch return -1;
+    }
+
+    fn closeRestricted(fd: c_int, user_data: ?*anyopaque) callconv(.c) void {
+        _ = user_data;
+        core.unix.close(fd);
+    }
+
+    fn createContext(
+        interface: *const libinput.c.libinput_interface,
+        userdata: ?*anyopaque,
+        udev: *anyopaque,
+    ) ?*libinput.Context {
+        return libinput.c.libinput_udev_create_context(interface, userdata, @ptrCast(udev));
     }
 };
 
@@ -359,7 +832,6 @@ test "EventQueue - large queue handling (1000+ events)" {
         .sysname = "mock0",
         .vendor = 0x1234,
         .product = 0x5678,
-        .device_type = .keyboard,
         .enabled = true,
         .libinput_device = undefined,
         .allocator = testing.allocator,
@@ -395,7 +867,6 @@ test "EventQueue - events remain valid after device pointer in queue" {
         .sysname = "mock0",
         .vendor = 0x1234,
         .product = 0x5678,
-        .device_type = .keyboard,
         .enabled = true,
         .libinput_device = undefined,
         .allocator = testing.allocator,
@@ -432,7 +903,6 @@ test "Device - identical vendor/product IDs" {
         .sysname = "device1",
         .vendor = 0x1234,
         .product = 0x5678,
-        .device_type = .keyboard,
         .enabled = true,
         .libinput_device = undefined,
         .allocator = testing.allocator,
@@ -443,7 +913,6 @@ test "Device - identical vendor/product IDs" {
         .sysname = "device2",
         .vendor = 0x1234, // Same vendor
         .product = 0x5678, // Same product
-        .device_type = .pointer,
         .enabled = true,
         .libinput_device = undefined,
         .allocator = testing.allocator,
@@ -467,7 +936,6 @@ test "EventQueue - rapid add/remove simulation" {
         .sysname = "rapid0",
         .vendor = 0xABCD,
         .product = 0xEF01,
-        .device_type = .pointer,
         .enabled = true,
         .libinput_device = undefined,
         .allocator = testing.allocator,
@@ -520,7 +988,6 @@ test "EventQueue - device pointer validity tracking" {
         .sysname = "ref0",
         .vendor = 0x0001,
         .product = 0x0002,
-        .device_type = .keyboard,
         .enabled = true,
         .libinput_device = undefined,
         .allocator = testing.allocator,
@@ -588,7 +1055,6 @@ test "EventQueue - clear and length operations" {
         .sysname = "test0",
         .vendor = 0,
         .product = 0,
-        .device_type = .keyboard,
         .enabled = true,
         .libinput_device = undefined,
         .allocator = testing.allocator,
@@ -606,24 +1072,6 @@ test "EventQueue - clear and length operations" {
     try testing.expectEqual(@as(usize, 0), queue.len());
 }
 
-test "Device - type detection from capabilities" {
-    // Test that DeviceType enum covers all expected types
-    const types = [_]DeviceType{
-        .keyboard,
-        .pointer,
-        .touch,
-        .tablet_tool,
-        .tablet_pad,
-        .switch_device,
-    };
-
-    // All types should be valid enum values
-    for (types) |device_type| {
-        _ = device_type;
-        // If we get here without error, enum is valid
-    }
-}
-
 test "EventQueue - ordering preservation under stress" {
     var queue = EventQueue.init(testing.allocator);
     defer queue.deinit();
@@ -633,7 +1081,6 @@ test "EventQueue - ordering preservation under stress" {
         .sysname = "ordered0",
         .vendor = 0xFFFF,
         .product = 0xFFFF,
-        .device_type = .keyboard,
         .enabled = true,
         .libinput_device = undefined,
         .allocator = testing.allocator,
@@ -671,7 +1118,6 @@ test "EventQueue - mixed event types" {
         .sysname = "kb0",
         .vendor = 0x1,
         .product = 0x1,
-        .device_type = .keyboard,
         .enabled = true,
         .libinput_device = undefined,
         .allocator = testing.allocator,
@@ -682,7 +1128,6 @@ test "EventQueue - mixed event types" {
         .sysname = "ptr0",
         .vendor = 0x2,
         .product = 0x2,
-        .device_type = .pointer,
         .enabled = true,
         .libinput_device = undefined,
         .allocator = testing.allocator,
@@ -736,7 +1181,6 @@ test "Device - disabled state handling" {
         .sysname = "test0",
         .vendor = 0x1234,
         .product = 0x5678,
-        .device_type = .keyboard,
         .enabled = true,
         .libinput_device = undefined,
         .allocator = testing.allocator,
@@ -778,7 +1222,6 @@ test "EventQueue - interleaved device lifecycle events" {
         .sysname = "dev1",
         .vendor = 0x1,
         .product = 0x1,
-        .device_type = .keyboard,
         .enabled = true,
         .libinput_device = undefined,
         .allocator = testing.allocator,
@@ -789,7 +1232,6 @@ test "EventQueue - interleaved device lifecycle events" {
         .sysname = "dev2",
         .vendor = 0x2,
         .product = 0x2,
-        .device_type = .pointer,
         .enabled = true,
         .libinput_device = undefined,
         .allocator = testing.allocator,
@@ -853,32 +1295,6 @@ test "EventQueue - interleaved device lifecycle events" {
     try testing.expect(device2_removed);
 }
 
-test "Device - multiple device types" {
-    const types = [_]DeviceType{
-        .keyboard,
-        .pointer,
-        .touch,
-        .tablet_tool,
-        .tablet_pad,
-        .switch_device,
-    };
-
-    for (types, 0..) |device_type, i| {
-        const device = Device{
-            .name = "Multi Device",
-            .sysname = "multi0",
-            .vendor = @intCast(i),
-            .product = @intCast(i),
-            .device_type = device_type,
-            .enabled = true,
-            .libinput_device = undefined,
-            .allocator = testing.allocator,
-        };
-
-        try testing.expectEqual(device_type, device.device_type);
-    }
-}
-
 test "EventQueue - event timestamp ordering validation" {
     var queue = EventQueue.init(testing.allocator);
     defer queue.deinit();
@@ -888,7 +1304,6 @@ test "EventQueue - event timestamp ordering validation" {
         .sysname = "time0",
         .vendor = 0x9999,
         .product = 0x9999,
-        .device_type = .keyboard,
         .enabled = true,
         .libinput_device = undefined,
         .allocator = testing.allocator,
@@ -1354,7 +1769,6 @@ test "Manager - device hotplug during event processing" {
         .sysname = "initial0",
         .vendor = 0x1234,
         .product = 0x5678,
-        .device_type = .keyboard,
         .enabled = true,
         .libinput_device = undefined,
         .allocator = testing.allocator,
@@ -1365,7 +1779,6 @@ test "Manager - device hotplug during event processing" {
         .sysname = "hotplug0",
         .vendor = 0xABCD,
         .product = 0xEF01,
-        .device_type = .pointer,
         .enabled = true,
         .libinput_device = undefined,
         .allocator = testing.allocator,
@@ -1412,16 +1825,25 @@ test "Manager - device hotplug during event processing" {
 }
 
 test "Manager - recover from libinput context failure" {
-    // This test documents error handling when libinput context creation fails
-    // Since we can't easily create a failing libinput context in a test,
-    // we validate that the appropriate error types exist in the Manager.init error set
-
-    // The Manager.init function should handle these error cases:
-    // - error.LibinputContextFailed: when libinput_udev_create_context fails
-    // - error.SeatAssignFailed: when libinput_udev_assign_seat fails
-
-    // In production code, these errors would be caught and handled appropriately
-    // by the caller (e.g., retrying initialization or falling back to a different backend)
+    const Failure = struct {
+        fn create(
+            _: *const libinput.c.libinput_interface,
+            _: ?*anyopaque,
+            _: *anyopaque,
+        ) ?*libinput.Context {
+            return null;
+        }
+    };
+    var udev_storage: usize = 0;
+    try testing.expectError(
+        error.LibinputContextFailed,
+        Manager.initWithFactory(
+            testing.allocator,
+            @ptrCast(&udev_storage),
+            "seat0",
+            Failure.create,
+        ),
+    );
 }
 
 test "EventQueue - event ordering with multiple device types" {
@@ -1433,7 +1855,7 @@ test "EventQueue - event ordering with multiple device types" {
         .sysname = "kbd0",
         .vendor = 0x1,
         .product = 0x1,
-        .device_type = .keyboard,
+        .capabilities = .{ .keyboard = true },
         .enabled = true,
         .libinput_device = undefined,
         .allocator = testing.allocator,
@@ -1444,7 +1866,7 @@ test "EventQueue - event ordering with multiple device types" {
         .sysname = "mouse0",
         .vendor = 0x2,
         .product = 0x2,
-        .device_type = .pointer,
+        .capabilities = .{ .pointer = true },
         .enabled = true,
         .libinput_device = undefined,
         .allocator = testing.allocator,
@@ -1506,6 +1928,196 @@ test "EventQueue - event ordering with multiple device types" {
     try testing.expectEqual(@as(u64, 1300), e4.keyboard_key.time_usec);
 }
 
+test "Capabilities - bitset semantics" {
+    const empty = Capabilities.none();
+    try testing.expect(empty.isEmpty());
+    try testing.expectEqual(@as(u32, 0), empty.count());
+    try testing.expectFalse(empty.has(.keyboard));
+
+    const full = Capabilities.all();
+    try testing.expectFalse(full.isEmpty());
+    try testing.expectEqual(@as(u32, 7), full.count());
+    try testing.expect(full.has(.keyboard));
+    try testing.expect(full.has(.pointer));
+    try testing.expect(full.has(.touch));
+    try testing.expect(full.has(.tablet_tool));
+    try testing.expect(full.has(.tablet_pad));
+    try testing.expect(full.has(.gesture));
+    try testing.expect(full.has(.switch_device));
+
+    const pad: Capabilities = .{ .pointer = true, .touch = true, .gesture = true };
+    try testing.expectEqual(@as(u32, 3), pad.count());
+    try testing.expect(pad.has(.gesture));
+    try testing.expectFalse(pad.has(.keyboard));
+}
+
+test "Event - gesture touch tablet switch variants queue correctly" {
+    var queue = EventQueue.init(testing.allocator);
+    defer queue.deinit();
+
+    var mock_device = Device{
+        .name = "Combo",
+        .sysname = "combo0",
+        .vendor = 0x1,
+        .product = 0x2,
+        .capabilities = .{ .touch = true, .gesture = true },
+        .enabled = true,
+        .libinput_device = undefined,
+        .allocator = testing.allocator,
+    };
+
+    try queue.push(.{ .gesture_swipe_update = .{
+        .device = &mock_device,
+        .time_usec = 1000,
+        .fingers = 3,
+        .delta_x = 4.0,
+        .delta_y = 0.0,
+        .cancelled = false,
+    } });
+    try queue.push(.{ .gesture_pinch_begin = .{
+        .device = &mock_device,
+        .time_usec = 1100,
+        .fingers = 2,
+        .delta_x = 0.0,
+        .delta_y = 0.0,
+        .scale = 1.0,
+        .rotation = 0.0,
+        .cancelled = false,
+    } });
+    try queue.push(.{ .gesture_hold_end = .{
+        .device = &mock_device,
+        .time_usec = 1200,
+        .fingers = 3,
+        .cancelled = true,
+    } });
+    try queue.push(.{ .touch_down = .{
+        .device = &mock_device,
+        .time_usec = 1300,
+        .slot = 0,
+        .x = 0.5,
+        .y = 0.25,
+    } });
+    try queue.push(.{ .touch_frame = .{ .device = &mock_device, .time_usec = 1400 } });
+    try queue.push(.{ .touch_up = .{ .device = &mock_device, .time_usec = 1500, .slot = 0 } });
+    try queue.push(.{ .tablet_tool_axis = .{
+        .device = &mock_device,
+        .time_usec = 1600,
+        .x = 0.1,
+        .y = 0.2,
+        .pressure = 0.5,
+        .tilt_x = 1.0,
+        .tilt_y = 2.0,
+        .rotation = 3.0,
+        .distance = 0.0,
+    } });
+    try queue.push(.{ .tablet_pad_ring = .{
+        .device = &mock_device,
+        .time_usec = 1700,
+        .ring = 0,
+        .position = 0.75,
+        .source = .finger,
+    } });
+    try queue.push(.{ .switch_toggle = .{
+        .device = &mock_device,
+        .time_usec = 1800,
+        .switch_kind = .lid,
+        .state = .on,
+    } });
+
+    try testing.expectEqual(@as(usize, 9), queue.len());
+
+    const swipe = queue.pop().?;
+    try testing.expectEqual(.gesture_swipe_update, std.meta.activeTag(swipe));
+    try testing.expectEqual(@as(u32, 3), swipe.gesture_swipe_update.fingers);
+    try testing.expectEqual(@as(u64, 1000), swipe.gesture_swipe_update.time_usec);
+
+    const pinch = queue.pop().?;
+    try testing.expectEqual(@as(f64, 1.0), pinch.gesture_pinch_begin.scale);
+
+    const hold = queue.pop().?;
+    try testing.expect(hold.gesture_hold_end.cancelled);
+
+    const down = queue.pop().?;
+    try testing.expectEqual(@as(f64, 0.5), down.touch_down.x);
+
+    const frame = queue.pop().?;
+    try testing.expectEqual(.touch_frame, std.meta.activeTag(frame));
+
+    const up = queue.pop().?;
+    try testing.expectEqual(@as(i32, 0), up.touch_up.slot);
+
+    const axis = queue.pop().?;
+    try testing.expectEqual(@as(f64, 0.5), axis.tablet_tool_axis.pressure);
+
+    const ring = queue.pop().?;
+    try testing.expectEqual(libinput.TabletPadRingSource.finger, ring.tablet_pad_ring.source);
+
+    const switch_event = queue.pop().?;
+    try testing.expectEqual(libinput.Switch.lid, switch_event.switch_toggle.switch_kind);
+    try testing.expectEqual(libinput.SwitchState.on, switch_event.switch_toggle.state);
+
+    try testing.expectNull(queue.pop());
+}
+
+test "Event - every variant preserves libinput timestamp" {
+    var queue = EventQueue.init(testing.allocator);
+    defer queue.deinit();
+
+    var mock_device = Device{
+        .name = "Timestamped",
+        .sysname = "ts0",
+        .vendor = 0x1,
+        .product = 0x1,
+        .enabled = true,
+        .libinput_device = undefined,
+        .allocator = testing.allocator,
+    };
+
+    try queue.push(.{ .gesture_swipe_begin = .{ .device = &mock_device, .time_usec = 42, .fingers = 3, .delta_x = 0, .delta_y = 0, .cancelled = false } });
+    try queue.push(.{ .gesture_swipe_end = .{ .device = &mock_device, .time_usec = 43, .fingers = 3, .delta_x = 1, .delta_y = 1, .cancelled = false } });
+    try queue.push(.{ .gesture_pinch_update = .{ .device = &mock_device, .time_usec = 44, .fingers = 2, .delta_x = 0, .delta_y = 0, .scale = 1.1, .rotation = 5, .cancelled = false } });
+    try queue.push(.{ .gesture_pinch_end = .{ .device = &mock_device, .time_usec = 45, .fingers = 2, .delta_x = 0, .delta_y = 0, .scale = 1.2, .rotation = 6, .cancelled = false } });
+    try queue.push(.{ .gesture_hold_begin = .{ .device = &mock_device, .time_usec = 46, .fingers = 4, .cancelled = false } });
+    try queue.push(.{ .touch_motion = .{ .device = &mock_device, .time_usec = 47, .slot = 1, .x = 0.9, .y = 0.9 } });
+    try queue.push(.{ .touch_cancel = .{ .device = &mock_device, .time_usec = 48, .slot = 1 } });
+    try queue.push(.{ .tablet_tool_proximity = .{ .device = &mock_device, .time_usec = 49, .x = 0, .y = 0, .state = .in } });
+    try queue.push(.{ .tablet_tool_tip = .{ .device = &mock_device, .time_usec = 50, .x = 0, .y = 0, .state = .down } });
+    try queue.push(.{ .tablet_tool_button = .{ .device = &mock_device, .time_usec = 51, .button = 1, .state = .pressed, .seat_button_count = 1 } });
+    try queue.push(.{ .tablet_pad_button = .{ .device = &mock_device, .time_usec = 52, .button = 3, .state = .released } });
+    try queue.push(.{ .tablet_pad_strip = .{ .device = &mock_device, .time_usec = 53, .strip = 1, .position = 0.1, .source = .unknown } });
+
+    var expected: u64 = 42;
+    while (queue.pop()) |event| {
+        const ts: u64 = switch (event) {
+            .gesture_swipe_begin => |e| e.time_usec,
+            .gesture_swipe_update => |e| e.time_usec,
+            .gesture_swipe_end => |e| e.time_usec,
+            .gesture_pinch_begin => |e| e.time_usec,
+            .gesture_pinch_update => |e| e.time_usec,
+            .gesture_pinch_end => |e| e.time_usec,
+            .gesture_hold_begin => |e| e.time_usec,
+            .gesture_hold_end => |e| e.time_usec,
+            .touch_down => |e| e.time_usec,
+            .touch_up => |e| e.time_usec,
+            .touch_motion => |e| e.time_usec,
+            .touch_frame => |e| e.time_usec,
+            .touch_cancel => |e| e.time_usec,
+            .tablet_tool_axis => |e| e.time_usec,
+            .tablet_tool_proximity => |e| e.time_usec,
+            .tablet_tool_tip => |e| e.time_usec,
+            .tablet_tool_button => |e| e.time_usec,
+            .tablet_pad_button => |e| e.time_usec,
+            .tablet_pad_ring => |e| e.time_usec,
+            .tablet_pad_strip => |e| e.time_usec,
+            .switch_toggle => |e| e.time_usec,
+            else => unreachable,
+        };
+        try testing.expectEqual(expected, ts);
+        expected += 1;
+    }
+    try testing.expectEqual(@as(u64, 54), expected);
+}
+
 test "Device - multiple capabilities on single device" {
     // Some devices (like laptop touchpads) have both pointer and touch capabilities
     // This test ensures our device model can handle this
@@ -1515,14 +2127,16 @@ test "Device - multiple capabilities on single device" {
         .sysname = "combo0",
         .vendor = 0x1234,
         .product = 0x5678,
-        .device_type = .pointer, // Primary capability
+        .capabilities = .{ .pointer = true, .touch = true, .gesture = true },
         .enabled = true,
         .libinput_device = undefined,
         .allocator = testing.allocator,
     };
 
     try testing.expectEqualStrings("Touchpad with Pointer", combo_device.name);
-    try testing.expectEqual(DeviceType.pointer, combo_device.device_type);
+    try testing.expect(combo_device.capabilities.has(.pointer));
+    try testing.expect(combo_device.capabilities.has(.touch));
+    try testing.expect(combo_device.capabilities.has(.gesture));
 
     // Device should handle events from its primary capability
     var queue = EventQueue.init(testing.allocator);
@@ -1553,7 +2167,6 @@ test "Manager - seat switching" {
         .sysname = "seat0dev",
         .vendor = 0x1111,
         .product = 0x2222,
-        .device_type = .keyboard,
         .enabled = true,
         .libinput_device = undefined,
         .allocator = testing.allocator,
@@ -1564,7 +2177,6 @@ test "Manager - seat switching" {
         .sysname = "seat1dev",
         .vendor = 0x3333,
         .product = 0x4444,
-        .device_type = .pointer,
         .enabled = true,
         .libinput_device = undefined,
         .allocator = testing.allocator,
@@ -1589,4 +2201,29 @@ test "Manager - seat switching" {
     const e2 = queue.pop().?;
     try testing.expectEqual(.device_added, std.meta.activeTag(e2));
     try testing.expectEqualStrings("Seat1 Device", e2.device_added.device.name);
+}
+
+test "Manager - retired devices are reclaimed after queued events drain" {
+    var context_storage: usize = 0;
+    const context: *libinput.Context = @ptrCast(@alignCast(&context_storage));
+    var manager = Manager.fromContext(testing.allocator, context);
+    defer manager.deinit();
+
+    const device = try testing.allocator.create(Device);
+    device.* = .{
+        .name = try testing.allocator.dupe(u8, "removed"),
+        .sysname = try testing.allocator.dupe(u8, "event0"),
+        .vendor = 1,
+        .product = 2,
+        .libinput_device = undefined,
+        .allocator = testing.allocator,
+    };
+    try manager.retired_devices.append(testing.allocator, device);
+    try manager.event_queue.push(.{ .device_removed = .{ .device = device } });
+
+    manager.finishDispatch();
+    try testing.expectEqual(@as(usize, 1), manager.retired_devices.items.len);
+    _ = manager.event_queue.pop();
+    manager.finishDispatch();
+    try testing.expectEqual(@as(usize, 0), manager.retired_devices.items.len);
 }

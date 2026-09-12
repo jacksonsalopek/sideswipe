@@ -18,7 +18,7 @@ pub const DRMFormat = struct {
     pub fn init(allocator: std.mem.Allocator) DRMFormat {
         _ = allocator;
         return .{
-            .modifiers = std.ArrayList(u64){},
+            .modifiers = std.ArrayList(u64).empty,
         };
     }
 

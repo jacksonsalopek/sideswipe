@@ -103,22 +103,22 @@ pub const DataBlock = struct {
     extended_tag: ?ExtendedTag,
     /// Data payload (not including header bytes)
     data: []const u8,
-    
+
     /// Check if this is an audio block
     pub fn isAudio(self: DataBlock) bool {
         return self.tag == .audio;
     }
-    
+
     /// Check if this is a video block
     pub fn isVideo(self: DataBlock) bool {
         return self.tag == .video;
     }
-    
+
     /// Check if this is vendor-specific
     pub fn isVendorSpecific(self: DataBlock) bool {
         return self.tag == .vendor_specific;
     }
-    
+
     /// Check if this is an extended block with specific tag
     pub fn isExtended(self: DataBlock, ext_tag: ExtendedTag) bool {
         if (self.tag != .extended) return false;
@@ -135,7 +135,7 @@ pub const DataBlockIterator = struct {
     data: []const u8,
     /// Current position in bytes
     pos: usize,
-    
+
     /// Create iterator for data block region
     pub fn init(region: []const u8) DataBlockIterator {
         return DataBlockIterator{
@@ -143,50 +143,50 @@ pub const DataBlockIterator = struct {
             .pos = 0,
         };
     }
-    
+
     /// Get next data block, or null if done
     pub fn next(self: *DataBlockIterator) ?DataBlock {
         if (self.pos >= self.data.len) {
             return null;
         }
-        
+
         // Parse header
         const header_byte = self.data[self.pos];
         const header: DataBlockHeader = @bitCast(header_byte);
-        
+
         self.pos += 1; // Skip header byte
-        
+
         const length = header.length;
         if (length == 0) {
             return null; // Invalid
         }
-        
+
         // Check if we have enough data
         if (self.pos + length > self.data.len) {
             return null; // Truncated
         }
-        
+
         // Extract data payload
         const payload = self.data[self.pos .. self.pos + length];
-        
+
         // Check for extended tag
         var extended_tag: ?ExtendedTag = null;
         var actual_payload = payload;
-        
+
         if (header.tag == .extended and payload.len > 0) {
             extended_tag = @enumFromInt(payload[0]);
             actual_payload = payload[1..]; // Skip extended tag byte
         }
-        
+
         self.pos += length;
-        
+
         return DataBlock{
             .tag = header.tag,
             .extended_tag = extended_tag,
             .data = actual_payload,
         };
     }
-    
+
     /// Reset iterator to beginning
     pub fn reset(self: *DataBlockIterator) void {
         self.pos = 0;
@@ -233,59 +233,59 @@ pub const CtaExtensionBlock = extern struct {
         if (dtd_offset == 0 or dtd_offset < 4) {
             return &[_]u8{}; // No data blocks
         }
-        
+
         const end = @min(dtd_offset - 4, 124);
         return self.data[0..end];
     }
-    
+
     /// Create iterator for data blocks
     pub fn iterateDataBlocks(self: *align(1) const CtaExtensionBlock) DataBlockIterator {
         return DataBlockIterator.init(self.getDataBlockRegion());
     }
-    
+
     /// Get video data blocks (returns first video block found)
     pub fn getVideoBlock(self: *align(1) const CtaExtensionBlock) ?video.BlockView {
         var iter = self.iterateDataBlocks();
-        
+
         while (iter.next()) |block| {
             if (block.isVideo()) {
                 return video.parseBlockView(block.data);
             }
         }
-        
+
         return null;
     }
-    
+
     /// Get audio data block (returns first audio block found)
     pub fn getAudioBlock(self: *align(1) const CtaExtensionBlock) ?audio.BlockView {
         var iter = self.iterateDataBlocks();
-        
+
         while (iter.next()) |block| {
             if (block.isAudio()) {
                 return audio.parseBlockView(block.data);
             }
         }
-        
+
         return null;
     }
-    
+
     /// Get speaker allocation block (returns first found)
     pub fn getSpeakerBlock(self: *align(1) const CtaExtensionBlock) ?speaker.BlockView {
         var iter = self.iterateDataBlocks();
-        
+
         while (iter.next()) |block| {
             if (block.tag == .speaker_allocation) {
                 return speaker.BlockView.parse(block.data);
             }
         }
-        
+
         return null;
     }
-    
+
     /// Get HDMI vendor-specific data block
     pub fn getHdmiVsdb(self: *align(1) const CtaExtensionBlock) ?hdmi.Vsdb {
         var iter = self.iterateDataBlocks();
-        
+
         while (iter.next()) |block| {
             if (block.tag == .vendor_specific) {
                 if (hdmi.Vsdb.parse(block.data)) |vsdb| {
@@ -293,14 +293,14 @@ pub const CtaExtensionBlock = extern struct {
                 }
             }
         }
-        
+
         return null;
     }
-    
+
     /// Get HDMI Forum vendor-specific data block (HDMI 2.0+)
     pub fn getHdmiForumVsdb(self: *align(1) const CtaExtensionBlock) ?hdmi.ForumVsdb {
         var iter = self.iterateDataBlocks();
-        
+
         while (iter.next()) |block| {
             if (block.tag == .vendor_specific) {
                 if (hdmi.ForumVsdb.parse(block.data)) |vsdb| {
@@ -308,72 +308,72 @@ pub const CtaExtensionBlock = extern struct {
                 }
             }
         }
-        
+
         return null;
     }
-    
+
     /// Get HDR static metadata block
     pub fn getHdrStaticMetadata(self: *align(1) const CtaExtensionBlock) ?hdr.StaticMetadata {
         var iter = self.iterateDataBlocks();
-        
+
         while (iter.next()) |block| {
             if (block.isExtended(.hdr_static_metadata)) {
                 return hdr.StaticMetadata.parse(block.data);
             }
         }
-        
+
         return null;
     }
-    
+
     /// Get colorimetry data block
     pub fn getColorimetryBlock(self: *align(1) const CtaExtensionBlock) ?colorimetry.Block {
         var iter = self.iterateDataBlocks();
-        
+
         while (iter.next()) |block| {
             if (block.isExtended(.colorimetry)) {
                 return colorimetry.Block.parse(block.data);
             }
         }
-        
+
         return null;
     }
-    
+
     /// Get video capability data block
     pub fn getVideoCapBlock(self: *align(1) const CtaExtensionBlock) ?video.CapabilityBlock {
         var iter = self.iterateDataBlocks();
-        
+
         while (iter.next()) |block| {
             if (block.isExtended(.video_cap)) {
                 return video.CapabilityBlock.parse(block.data);
             }
         }
-        
+
         return null;
     }
-    
+
     /// Get YCbCr 4:2:0 video data block
     pub fn getYcbcr420VideoBlock(self: *align(1) const CtaExtensionBlock) ?ycbcr420.VideoBlock {
         var iter = self.iterateDataBlocks();
-        
+
         while (iter.next()) |block| {
             if (block.isExtended(.ycbcr420)) {
                 return ycbcr420.VideoBlock.parse(block.data);
             }
         }
-        
+
         return null;
     }
-    
+
     /// Get YCbCr 4:2:0 capability map
     pub fn getYcbcr420CapMap(self: *align(1) const CtaExtensionBlock) ?ycbcr420.CapabilityMap {
         var iter = self.iterateDataBlocks();
-        
+
         while (iter.next()) |block| {
             if (block.isExtended(.ycbcr420_cap_map)) {
                 return ycbcr420.CapabilityMap.parse(block.data);
             }
         }
-        
+
         return null;
     }
 };
@@ -387,17 +387,17 @@ test "CtaExtensionBlock size" {
 test "CTA header parsing" {
     var data: [128]u8 = undefined;
     @memset(&data, 0);
-    
+
     data[0] = 0x02; // CTA tag
     data[1] = 0x03; // Revision 3
     data[2] = 0x20; // DTDs start at byte 0x20
     data[3] = 0b11110001; // it_underscan=1, basic_audio=1, ycc444=1, ycc422=1, native_dtds=1
-    
+
     const cta = CtaExtensionBlock.fromBytes(&data);
-    
+
     try testing.expect(cta.isValidCtaExtension());
     try testing.expectEqual(@as(u8, 3), cta.getRevision());
-    
+
     const flags = cta.getFlags();
     try testing.expect(flags.it_underscan);
     try testing.expect(flags.basic_audio);
@@ -409,15 +409,15 @@ test "CTA header parsing" {
 test "CTA data block region" {
     var data: [128]u8 = undefined;
     @memset(&data, 0);
-    
+
     data[0] = 0x02;
     data[1] = 0x03;
     data[2] = 0x10; // DTDs start at 0x10 (offset from block start)
     data[3] = 0;
-    
+
     const cta = CtaExtensionBlock.fromBytes(&data);
     const region = cta.getDataBlockRegion();
-    
+
     // Data blocks occupy bytes 4 to (dtd_offset-1)
     // dtd_offset=0x10 means bytes 4-15, so 12 bytes
     try testing.expectEqual(@as(usize, 12), region.len);
@@ -429,20 +429,20 @@ test "data block iterator - video block" {
     // Data: 3 VIC codes
     const data = [_]u8{
         0b01000011, // Header: tag=2 (010), length=3 (00011)
-        0x10,       // VIC 16 (1080p60)
-        0x04,       // VIC 4 (720p60)
-        0x1F,       // VIC 31 (1080p50)
+        0x10, // VIC 16 (1080p60)
+        0x04, // VIC 4 (720p60)
+        0x1F, // VIC 31 (1080p50)
     };
-    
+
     var iter = DataBlockIterator.init(&data);
-    
+
     const block = iter.next().?;
     try testing.expectEqual(DataBlockTag.video, block.tag);
     try testing.expectEqual(@as(usize, 3), block.data.len);
     try testing.expectEqual(@as(u8, 0x10), block.data[0]);
     try testing.expectEqual(@as(u8, 0x04), block.data[1]);
     try testing.expectEqual(@as(u8, 0x1F), block.data[2]);
-    
+
     // Should be end
     try testing.expect(iter.next() == null);
 }
@@ -451,13 +451,13 @@ test "data block iterator - audio block" {
     // Audio data block: tag=1, length=3 (one SAD)
     const data = [_]u8{
         0b00100011, // Header: tag=1 (001), length=3 (00011)
-        0x09,       // Format: LPCM (1), max channels: 2
-        0x7F,       // Sample rates: all
-        0x07,       // Bit depths: 16/20/24
+        0x09, // Format: LPCM (1), max channels: 2
+        0x7F, // Sample rates: all
+        0x07, // Bit depths: 16/20/24
     };
-    
+
     var iter = DataBlockIterator.init(&data);
-    
+
     const block = iter.next().?;
     try testing.expect(block.isAudio());
     try testing.expectEqual(@as(usize, 3), block.data.len);
@@ -467,12 +467,12 @@ test "data block iterator - extended block" {
     // Extended data block: tag=7, length=2, extended_tag=5 (colorimetry)
     const data = [_]u8{
         0b11100010, // Header: tag=7 (111), length=2 (00010)
-        0x05,       // Extended tag: colorimetry
-        0x0F,       // Colorimetry data
+        0x05, // Extended tag: colorimetry
+        0x0F, // Colorimetry data
     };
-    
+
     var iter = DataBlockIterator.init(&data);
-    
+
     const block = iter.next().?;
     try testing.expectEqual(DataBlockTag.extended, block.tag);
     try testing.expect(block.extended_tag != null);
@@ -487,21 +487,22 @@ test "data block iterator - multiple blocks" {
         // Block 1: Video, length=2
         0b01000010, 0x10, 0x04,
         // Block 2: Audio, length=3
-        0b00100011, 0x09, 0x7F, 0x07,
+        0b00100011, 0x09, 0x7F,
+        0x07,
     };
-    
+
     var iter = DataBlockIterator.init(&data);
-    
+
     // First block
     const block1 = iter.next().?;
     try testing.expect(block1.isVideo());
     try testing.expectEqual(@as(usize, 2), block1.data.len);
-    
+
     // Second block
     const block2 = iter.next().?;
     try testing.expect(block2.isAudio());
     try testing.expectEqual(@as(usize, 3), block2.data.len);
-    
+
     // End
     try testing.expect(iter.next() == null);
 }
@@ -510,12 +511,12 @@ test "data block iterator - reset" {
     const data = [_]u8{
         0b01000010, 0x10, 0x04,
     };
-    
+
     var iter = DataBlockIterator.init(&data);
-    
+
     _ = iter.next();
     try testing.expect(iter.next() == null);
-    
+
     // Reset and iterate again
     iter.reset();
     const block = iter.next().?;
@@ -525,36 +526,36 @@ test "data block iterator - reset" {
 test "CTA extension block with data blocks" {
     var data: [128]u8 = undefined;
     @memset(&data, 0);
-    
+
     // Header
     data[0] = 0x02; // CTA tag
     data[1] = 0x03; // Revision 3
     data[2] = 0x0C; // DTDs start at byte 0x0C (4 + 8 bytes of data blocks)
     data[3] = 0xE0; // Flags: audio + ycc444 + ycc422
-    
+
     // Data block 1: Video (2 VICs)
     data[4] = 0b01000010; // tag=2, length=2
-    data[5] = 0x10;       // VIC 16
-    data[6] = 0x04;       // VIC 4
-    
+    data[5] = 0x10; // VIC 16
+    data[6] = 0x04; // VIC 4
+
     // Data block 2: Audio (3 bytes)
-    data[7] = 0b00100011;  // tag=1, length=3
+    data[7] = 0b00100011; // tag=1, length=3
     data[8] = 0x09;
     data[9] = 0x7F;
     data[10] = 0x07;
-    
+
     // Checksum at end
     var sum: u8 = 0;
     for (data[0..127]) |byte| sum +%= byte;
     data[127] = 0 -% sum;
-    
+
     const cta = CtaExtensionBlock.fromBytes(&data);
-    
+
     // Iterate through blocks
     var iter = cta.iterateDataBlocks();
     var video_count: usize = 0;
     var audio_count: usize = 0;
-    
+
     while (iter.next()) |block| {
         if (block.isVideo()) {
             video_count += 1;
@@ -564,7 +565,7 @@ test "CTA extension block with data blocks" {
             try testing.expectEqual(@as(usize, 3), block.data.len);
         }
     }
-    
+
     try testing.expectEqual(@as(usize, 1), video_count);
     try testing.expectEqual(@as(usize, 1), audio_count);
 }
@@ -572,26 +573,26 @@ test "CTA extension block with data blocks" {
 test "CTA get video block" {
     var data: [128]u8 = undefined;
     @memset(&data, 0);
-    
+
     data[0] = 0x02;
     data[1] = 0x03;
     data[2] = 0x09; // DTDs start at 0x09
     data[3] = 0;
-    
+
     // Video data block with 3 VICs
     data[4] = 0b01000011; // tag=2, length=3
-    data[5] = 0x10;       // VIC 16 (1080p60)
-    data[6] = 0x84;       // VIC 4 (720p60, native)
-    data[7] = 0x1F;       // VIC 31 (1080p50)
-    
+    data[5] = 0x10; // VIC 16 (1080p60)
+    data[6] = 0x84; // VIC 4 (720p60, native)
+    data[7] = 0x1F; // VIC 31 (1080p50)
+
     const cta = CtaExtensionBlock.fromBytes(&data);
     const video_block = cta.getVideoBlock().?;
-    
+
     try testing.expectEqual(@as(usize, 3), video_block.len());
     try testing.expect(video_block.supportsVic(16));
     try testing.expect(video_block.supportsVic(4));
     try testing.expect(video_block.supportsVic(31));
-    
+
     // Check native indicator
     const svd = video_block.getSvd(1).?;
     try testing.expectEqual(@as(u8, 4), svd.vic);
@@ -601,12 +602,12 @@ test "CTA get video block" {
 test "CTA get audio block" {
     var data: [128]u8 = undefined;
     @memset(&data, 0);
-    
+
     data[0] = 0x02;
     data[1] = 0x03;
     data[2] = 0x0B; // DTDs start at 0x0B
     data[3] = 0x40; // Basic audio flag
-    
+
     // Audio data block with 2 SADs
     data[4] = 0b00100110; // tag=1 (audio), length=6 (2 SADs)
     // SAD 1: LPCM, 2ch, 48kHz, 16/20/24bit
@@ -617,10 +618,10 @@ test "CTA get audio block" {
     data[8] = 0b00010101;
     data[9] = 0b00000100;
     data[10] = 80;
-    
+
     const cta = CtaExtensionBlock.fromBytes(&data);
     const audio_block = cta.getAudioBlock().?;
-    
+
     try testing.expectEqual(@as(usize, 2), audio_block.len());
     try testing.expect(audio_block.supportsFormat(.lpcm));
     try testing.expect(audio_block.supportsFormat(.ac3));
@@ -630,21 +631,21 @@ test "CTA get audio block" {
 test "CTA get speaker block" {
     var data: [128]u8 = undefined;
     @memset(&data, 0);
-    
+
     data[0] = 0x02;
     data[1] = 0x03;
     data[2] = 0x08; // DTDs start at 0x08
     data[3] = 0x40;
-    
+
     // Speaker allocation block: tag=4, length=3
     data[4] = 0b10000011; // tag=4 (speaker_allocation), length=3
-    data[5] = 0x0F;       // FL/FR, LFE, FC, RL/RR (5.1)
+    data[5] = 0x0F; // FL/FR, LFE, FC, RL/RR (5.1)
     data[6] = 0x00;
     data[7] = 0x00;
-    
+
     const cta = CtaExtensionBlock.fromBytes(&data);
     const spk_block = cta.getSpeakerBlock().?;
-    
+
     try testing.expect(spk_block.allocation.is5_1());
     try testing.expectEqual(@as(u8, 6), spk_block.allocation.getChannelCount());
 }
@@ -652,25 +653,25 @@ test "CTA get speaker block" {
 test "CTA get HDMI VSDB" {
     var data: [128]u8 = undefined;
     @memset(&data, 0);
-    
+
     data[0] = 0x02;
     data[1] = 0x03;
     data[2] = 0x0D; // DTDs start at 0x0D
     data[3] = 0x00;
-    
+
     // HDMI vendor-specific block: tag=3, length=8
     data[4] = 0b01101000; // tag=3 (vendor_specific), length=8
-    data[5] = 0x03;       // HDMI OUI byte 0
-    data[6] = 0x0C;       // HDMI OUI byte 1
-    data[7] = 0x00;       // HDMI OUI byte 2
-    data[8] = 0x10;       // Physical address high (1.0.0.0)
-    data[9] = 0x00;       // Physical address low
-    data[10] = 0xB0;      // AI + DC_36bit + DC_30bit
-    data[11] = 170;       // Max TMDS: 170 * 5 = 850 MHz
-    
+    data[5] = 0x03; // HDMI OUI byte 0
+    data[6] = 0x0C; // HDMI OUI byte 1
+    data[7] = 0x00; // HDMI OUI byte 2
+    data[8] = 0x10; // Physical address high (1.0.0.0)
+    data[9] = 0x00; // Physical address low
+    data[10] = 0xB0; // AI + DC_36bit + DC_30bit
+    data[11] = 170; // Max TMDS: 170 * 5 = 850 MHz
+
     const cta = CtaExtensionBlock.fromBytes(&data);
     const hdmi_vsdb = cta.getHdmiVsdb().?;
-    
+
     try testing.expectEqual([4]u8{ 1, 0, 0, 0 }, hdmi_vsdb.physical_address);
     try testing.expect(hdmi_vsdb.supports_ai);
     try testing.expect(hdmi_vsdb.dc_36bit);

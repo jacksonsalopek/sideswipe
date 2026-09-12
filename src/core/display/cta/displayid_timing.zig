@@ -10,11 +10,11 @@ const testing = std.testing;
 /// Contains 6-byte or 7-byte timing descriptors
 pub const Type7Block = struct {
     data: []const u8,
-    
+
     pub fn parse(data: []const u8) Type7Block {
         return Type7Block{ .data = data };
     }
-    
+
     /// Get number of timing descriptors
     pub fn len(self: Type7Block) usize {
         // Type VII uses 6-byte descriptors
@@ -22,15 +22,15 @@ pub const Type7Block = struct {
     }
 };
 
-/// DisplayID Type VIII Video Timing Data Block  
+/// DisplayID Type VIII Video Timing Data Block
 /// Contains timing code format
 pub const Type8Block = struct {
     data: []const u8,
-    
+
     pub fn parse(data: []const u8) Type8Block {
         return Type8Block{ .data = data };
     }
-    
+
     /// Get number of timing codes
     pub fn len(self: Type8Block) usize {
         // Type VIII uses 1-byte codes
@@ -42,11 +42,11 @@ pub const Type8Block = struct {
 /// Contains formula-based timings
 pub const Type10Block = struct {
     data: []const u8,
-    
+
     pub fn parse(data: []const u8) Type10Block {
         return Type10Block{ .data = data };
     }
-    
+
     /// Get number of timing formulas
     pub fn len(self: Type10Block) usize {
         // Type X uses 11-byte descriptors

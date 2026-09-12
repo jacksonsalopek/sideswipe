@@ -9,10 +9,11 @@ const compositor = @import("compositor");
 /// Signal handlers cannot capture context, so we need a global reference.
 var global_server: ?*wayland.Server = null;
 var global_logger: ?*cli.Logger = null;
+const Signal = @TypeOf(std.posix.SIG.INT);
 
 /// Signal handler for SIGINT and SIGTERM.
 /// Terminates the server event loop, allowing cleanup to proceed.
-fn handleSignal(sig: i32) callconv(.c) void {
+fn handleSignal(sig: Signal) callconv(.c) void {
     if (global_logger) |logger| {
         const sig_name: []const u8 = switch (sig) {
             std.posix.SIG.INT => "SIGINT",
@@ -21,7 +22,7 @@ fn handleSignal(sig: i32) callconv(.c) void {
         };
         logger.info("Received {s}, shutting down...", .{sig_name});
     }
-    
+
     if (global_server) |srv| {
         srv.terminate();
     }
@@ -34,34 +35,47 @@ fn setupSignalHandlers() !void {
         .mask = std.mem.zeroes(std.posix.sigset_t),
         .flags = 0,
     };
-    
+
     std.posix.sigaction(std.posix.SIG.INT, &sa, null);
     std.posix.sigaction(std.posix.SIG.TERM, &sa, null);
 }
 
-/// Attempts to initialize a backend coordinator with Wayland backend.
+/// Attempts to initialize selected output and input backends.
 /// Returns null on failure and logs appropriate messages.
-fn tryInitializeBackend(allocator: std.mem.Allocator, comp: *compositor.Compositor, logger: *cli.Logger) ?*backend.Coordinator {
-    logger.info("Initializing backend (nested Wayland mode)...", .{});
+fn tryInitializeBackend(
+    allocator: std.mem.Allocator,
+    comp: *compositor.Compositor,
+    logger: *cli.Logger,
+    nested: bool,
+    physical_input: bool,
+) ?*backend.Coordinator {
+    logger.info("Initializing selected runtime backends...", .{});
 
     const backend_opts = [_]backend.ImplementationOptions{
-        .{ .backend_type = .wayland, .request_mode = .if_available },
+        .{
+            .backend_type = if (nested) .wayland else .null,
+            .request_mode = .if_available,
+        },
     };
 
-    const coord = backend.Coordinator.create(allocator, &backend_opts, .{}) catch |err| {
+    if (nested and physical_input) {
+        logger.info("Ignoring --physical-input in nested Wayland mode", .{});
+    }
+
+    const coord = backend.Coordinator.create(allocator, &backend_opts, .{
+        .physical_input = physical_input and !nested,
+    }) catch |err| {
         logger.warn("Failed to create backend coordinator: {}", .{err});
         logger.info("Continuing in display-server-only mode", .{});
         return null;
     };
 
-    const started = coord.start() catch |err| {
+    const started = coord.start() catch |err| blk: {
         logger.warn("Failed to start backend: {}", .{err});
-        logger.info("Continuing in display-server-only mode", .{});
-        coord.deinit();
-        return null;
+        break :blk false;
     };
 
-    if (!started) {
+    if (!started and !coord.hasSession()) {
         logger.warn("Backend failed to start", .{});
         logger.info("Continuing in display-server-only mode", .{});
         coord.deinit();
@@ -75,26 +89,28 @@ fn tryInitializeBackend(allocator: std.mem.Allocator, comp: *compositor.Composit
         return null;
     };
 
-    logger.info("Backend initialized successfully", .{});
+    logger.info("Selected runtime backends initialized successfully", .{});
     return coord;
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
     // Parse command-line arguments
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var args = std.ArrayList([]const u8).empty;
+    defer args.deinit(allocator);
+    var arg_iterator = std.process.Args.Iterator.init(init.minimal.args);
+    defer arg_iterator.deinit();
+    while (arg_iterator.next()) |arg| try args.append(allocator, arg);
 
-    var parser = cli.args.Parser.init(allocator, args);
+    var parser = cli.args.Parser.init(allocator, args.items);
     defer parser.deinit();
 
     // Register options
     try parser.registerBoolOption("verbose", "v", "Enable verbose output");
     try parser.registerBoolOption("help", "h", "Show help message");
     try parser.registerBoolOption("backend", "b", "Enable backend for nested mode (Wayland)");
+    try parser.registerBoolOption("physical-input", "p", "Enable the physical libinput session");
     try parser.registerStringOption("output", "o", "Output file");
 
     // Try to parse, show help on error
@@ -123,12 +139,12 @@ pub fn main() !void {
     // Configure logger based on arguments
     const verbose = parser.getBool("verbose") orelse false;
     const log_level: cli.LogLevel = if (verbose) .trace else .info;
-    
+
     logger.setTime(true);
     logger.setEnableColor(true);
     logger.setEnableRolling(true);
     logger.setLogLevel(log_level);
-    
+
     // Initialize and configure global logger for backend/other modules
     cli.initGlobalLogger(allocator);
     defer cli.deinitGlobalLogger();
@@ -159,7 +175,6 @@ pub fn main() !void {
     // Initialize compositor
     logger.info("Initializing compositor...", .{});
     var comp = try compositor.Compositor.init(allocator, &server, &logger);
-    defer comp.deinit();
 
     // Register protocol globals
     logger.info("Registering protocol globals...", .{});
@@ -169,15 +184,29 @@ pub fn main() !void {
     try compositor.protocols.seat.register(comp);
     try compositor.protocols.data_device.register(comp);
     try compositor.protocols.linux_dmabuf.register(comp);
-    logger.info("Registered: wl_compositor, xdg_wm_base, wl_output, wl_seat, wl_data_device_manager, zwp_linux_dmabuf_v1", .{});
+    try compositor.protocols.wl_subcompositor.register(comp);
+    try compositor.protocols.xdg_activation.register(comp);
+    try compositor.protocols.hidpi.register(comp);
+    logger.info("Registered core globals including fractional-scale and viewporter", .{});
 
     // Initialize backend if requested
     const enable_backend = parser.getBool("backend") orelse false;
+    const enable_physical_input = parser.getBool("physical-input") orelse false;
     var coord: ?*backend.Coordinator = null;
-    defer if (coord) |c| c.deinit();
+    defer {
+        comp.destroyClients();
+        comp.deinit();
+        if (coord) |c| c.deinit();
+    }
 
-    if (enable_backend) {
-        coord = tryInitializeBackend(allocator, comp, &logger);
+    if (enable_backend or enable_physical_input) {
+        coord = tryInitializeBackend(
+            allocator,
+            comp,
+            &logger,
+            enable_backend,
+            enable_physical_input,
+        );
     } else {
         logger.info("Backend disabled - running in display-server-only mode", .{});
         logger.info("Use --backend flag to enable nested Wayland mode", .{});

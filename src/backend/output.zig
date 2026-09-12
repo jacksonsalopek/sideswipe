@@ -88,8 +88,8 @@ pub const State = struct {
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
             .damage = Region.init(allocator),
-            .gamma_lut = std.ArrayList(u16){},
-            .degamma_lut = std.ArrayList(u16){},
+            .gamma_lut = std.ArrayList(u16).empty,
+            .degamma_lut = std.ArrayList(u16).empty,
             .allocator = allocator,
         };
     }

@@ -35,8 +35,8 @@ pub fn Signal(comptime Args: type) type {
 
         pub fn init(allocator: std.mem.Allocator) Self {
             return .{
-                .listeners = .{},
-                .static_listeners = .{},
+                .listeners = .empty,
+                .static_listeners = .empty,
                 .allocator = allocator,
             };
         }
@@ -500,7 +500,7 @@ test "Signal - listener disconnects multiple others" {
 
     // First emit - listener1 disconnects 2 and 3
     signal.emit({});
-    
+
     // All fire because we snapshot before calling
     try std.testing.expectEqual(@as(i32, 1), State.count1);
     try std.testing.expectEqual(@as(i32, 1), State.count2);
@@ -527,7 +527,7 @@ test "Signal - listener disconnects self and adds new" {
         fn callback1(userdata: ?*anyopaque) void {
             _ = userdata;
             count1 += 1;
-            
+
             if (count1 == 1) {
                 // Disconnect self
                 if (listener1) |*l| {
@@ -566,7 +566,7 @@ test "Signal - stress test with 1000 listeners" {
     var signal = Signal(void).init(std.testing.allocator);
     defer signal.deinit();
 
-    var listeners = std.ArrayList(Listener){};
+    var listeners = std.ArrayList(Listener).empty;
     defer {
         for (listeners.items) |*l| {
             l.deinit();
@@ -651,7 +651,7 @@ test "Signal - static listener modification attempt" {
         fn callback(userdata: ?*anyopaque) void {
             _ = userdata;
             count += 1;
-            
+
             // Static listeners can't be disconnected directly
             // This just increments the counter
         }
@@ -682,7 +682,7 @@ test "Signal - listener adds multiple listeners during emit" {
         fn callback_main(userdata: ?*anyopaque) void {
             _ = userdata;
             count += 1;
-            
+
             if (!added) {
                 added = true;
                 // Add 3 new listeners during emit
@@ -734,7 +734,7 @@ test "Signal - cascade of disconnections" {
                 fn callback(userdata: ?*anyopaque) void {
                     _ = userdata;
                     count += 1;
-                    
+
                     // Each listener disconnects the next one
                     if (index + 1 < 10) {
                         if (listeners[index + 1]) |*l| {
@@ -755,7 +755,7 @@ test "Signal - cascade of disconnections" {
 
     // Emit - each listener disconnects the next
     signal.emit({});
-    
+
     // All should fire because we snapshot
     try std.testing.expectEqual(@as(i32, 10), State.count);
 
@@ -780,7 +780,7 @@ test "Signal - performance with rapid emit cycles" {
     State.count = &counter;
 
     // Register 100 listeners
-    var listeners = std.ArrayList(Listener){};
+    var listeners = std.ArrayList(Listener).empty;
     defer {
         for (listeners.items) |*l| {
             l.deinit();
@@ -815,7 +815,7 @@ test "Signal - listener reconnects during emit" {
         fn callback(userdata: ?*anyopaque) void {
             _ = userdata;
             count += 1;
-            
+
             if (count == 1) {
                 // Disconnect and immediately reconnect
                 if (listener) |*l| {
@@ -852,7 +852,7 @@ test "Signal - mixed static and dynamic modifications" {
         fn dynamic_callback(userdata: ?*anyopaque) void {
             _ = userdata;
             dynamic_count += 1;
-            
+
             // Try to disconnect self
             if (dynamic_listener) |*l| {
                 l.deinit();
@@ -895,7 +895,7 @@ test "Signal - alternating connect/disconnect pattern" {
         fn callback(userdata: ?*anyopaque) void {
             _ = userdata;
             count += 1;
-            
+
             if (should_disconnect) {
                 if (listener) |*l| {
                     l.deinit();
@@ -920,7 +920,7 @@ test "Signal - alternating connect/disconnect pattern" {
     var i: usize = 0;
     while (i < 10) : (i += 1) {
         signal.emit({});
-        
+
         // After disconnect, reconnect for next iteration
         if (State.listener == null and State.should_disconnect) {
             State.listener = try signal.listen(State.callback, null);
@@ -947,7 +947,7 @@ test "Signal - snapshot protects against orderedRemove" {
                     _ = userdata;
                     execution_order[index] = id;
                     index += 1;
-                    
+
                     // Listener 0 disconnects all others
                     if (id == 0) {
                         for (&listeners) |*l| {
@@ -970,7 +970,7 @@ test "Signal - snapshot protects against orderedRemove" {
 
     // Emit - all should execute despite first one disconnecting others
     signal.emit({});
-    
+
     // All 5 should have executed
     try std.testing.expectEqual(@as(usize, 5), State.index);
     try std.testing.expectEqual(@as(i32, 0), State.execution_order[0]);

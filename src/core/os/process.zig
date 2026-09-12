@@ -3,6 +3,48 @@ const posix = std.posix;
 const linux = std.os.linux;
 const string = @import("core.string").string;
 
+const unix = struct {
+    fn close(fd: posix.fd_t) void {
+        std.Io.Threaded.closeFd(fd);
+    }
+
+    fn pipe() ![2]posix.fd_t {
+        return std.Io.Threaded.pipe2(.{});
+    }
+
+    fn fcntl(fd: posix.fd_t, command: c_int, arg: usize) !usize {
+        const result = posix.system.fcntl(fd, command, arg);
+        return switch (posix.errno(result)) {
+            .SUCCESS => result,
+            else => |err| posix.unexpectedErrno(err),
+        };
+    }
+
+    fn read(fd: posix.fd_t, buffer: []u8) !usize {
+        while (true) {
+            const result = posix.system.read(fd, buffer.ptr, buffer.len);
+            switch (posix.errno(result)) {
+                .SUCCESS => return @intCast(result),
+                .INTR => continue,
+                .AGAIN => return error.WouldBlock,
+                else => |err| return posix.unexpectedErrno(err),
+            }
+        }
+    }
+
+    fn write(fd: posix.fd_t, buffer: []const u8) !usize {
+        while (true) {
+            const result = posix.system.write(fd, buffer.ptr, buffer.len);
+            switch (posix.errno(result)) {
+                .SUCCESS => return @intCast(result),
+                .INTR => continue,
+                .AGAIN => return error.WouldBlock,
+                else => |err| return posix.unexpectedErrno(err),
+            }
+        }
+    }
+};
+
 // Import setenv from C
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 
@@ -32,16 +74,16 @@ pub const Process = struct {
 
     /// Create a new process object (doesn't run yet)
     pub fn init(allocator: std.mem.Allocator, binary: string, args: []const string) !Self {
-        var args_list = std.ArrayList(string){};
+        var args_list = std.ArrayList(string).empty;
         try args_list.appendSlice(allocator, args);
 
         return .{
             .binary = binary,
             .args = args_list,
-            .env = std.ArrayList(EnvVar){},
+            .env = std.ArrayList(EnvVar).empty,
             .allocator = allocator,
-            .stdout_data = std.ArrayList(u8){},
-            .stderr_data = std.ArrayList(u8){},
+            .stdout_data = std.ArrayList(u8).empty,
+            .stderr_data = std.ArrayList(u8).empty,
         };
     }
 
@@ -81,24 +123,24 @@ pub const Process = struct {
     /// timeout_ms: Maximum time to wait for process in milliseconds (null = no timeout)
     pub fn runSync(self: *Self, timeout_ms: ?u64) !void {
         // Create pipes for stdout and stderr
-        const stdout_pipe = try posix.pipe();
+        const stdout_pipe = try unix.pipe();
         errdefer {
-            posix.close(stdout_pipe[0]);
-            posix.close(stdout_pipe[1]);
+            unix.close(stdout_pipe[0]);
+            unix.close(stdout_pipe[1]);
         }
 
-        const stderr_pipe = try posix.pipe();
+        const stderr_pipe = try unix.pipe();
         errdefer {
-            posix.close(stderr_pipe[0]);
-            posix.close(stderr_pipe[1]);
+            unix.close(stderr_pipe[0]);
+            unix.close(stderr_pipe[1]);
         }
 
         const pid = try posix.fork();
 
         if (pid == 0) {
             // Child process
-            posix.close(stdout_pipe[0]);
-            posix.close(stderr_pipe[0]);
+            unix.close(stdout_pipe[0]);
+            unix.close(stderr_pipe[0]);
 
             // Redirect stdout and stderr
             _ = posix.dup2(stdout_pipe[1], posix.STDOUT_FILENO) catch posix.exit(1);
@@ -133,17 +175,17 @@ pub const Process = struct {
             posix.exit(1);
         } else {
             // Parent process
-            posix.close(stdout_pipe[1]);
-            posix.close(stderr_pipe[1]);
+            unix.close(stdout_pipe[1]);
+            unix.close(stderr_pipe[1]);
 
             self.child_pid = pid;
 
             // Set pipes to non-blocking
-            const stdout_flags = try posix.fcntl(stdout_pipe[0], posix.F.GETFL, 0);
-            _ = try posix.fcntl(stdout_pipe[0], posix.F.SETFL, stdout_flags | @as(u32, @bitCast(linux.O{ .NONBLOCK = true })));
+            const stdout_flags = try unix.fcntl(stdout_pipe[0], posix.F.GETFL, 0);
+            _ = try unix.fcntl(stdout_pipe[0], posix.F.SETFL, stdout_flags | @as(u32, @bitCast(linux.O{ .NONBLOCK = true })));
 
-            const stderr_flags = try posix.fcntl(stderr_pipe[0], posix.F.GETFL, 0);
-            _ = try posix.fcntl(stderr_pipe[0], posix.F.SETFL, stderr_flags | @as(u32, @bitCast(linux.O{ .NONBLOCK = true })));
+            const stderr_flags = try unix.fcntl(stderr_pipe[0], posix.F.GETFL, 0);
+            _ = try unix.fcntl(stderr_pipe[0], posix.F.SETFL, stderr_flags | @as(u32, @bitCast(linux.O{ .NONBLOCK = true })));
 
             // Poll for output
             var pollfds = [_]posix.pollfd{
@@ -152,13 +194,13 @@ pub const Process = struct {
             };
 
             var buffer: [1024]u8 = undefined;
-            const start_time = if (timeout_ms != null) std.time.milliTimestamp() else 0;
+            const start_time = if (timeout_ms != null) std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() else 0;
 
             while (true) {
                 // Calculate remaining timeout
                 var poll_timeout: i32 = 5000; // Default poll interval
                 if (timeout_ms) |timeout| {
-                    const elapsed = @as(u64, @intCast(std.time.milliTimestamp() - start_time));
+                    const elapsed = @as(u64, @intCast(std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - start_time));
                     if (elapsed >= timeout) {
                         // Timeout exceeded - kill the process
                         if (self.child_pid) |child| {
@@ -194,7 +236,7 @@ pub const Process = struct {
                 // Read stdout
                 if ((pollfds[0].revents & posix.POLL.IN) != 0) {
                     while (true) {
-                        const bytes_read = posix.read(stdout_pipe[0], &buffer) catch |err| {
+                        const bytes_read = unix.read(stdout_pipe[0], &buffer) catch |err| {
                             if (err == error.WouldBlock) break;
                             return err;
                         };
@@ -206,7 +248,7 @@ pub const Process = struct {
                 // Read stderr
                 if ((pollfds[1].revents & posix.POLL.IN) != 0) {
                     while (true) {
-                        const bytes_read = posix.read(stderr_pipe[0], &buffer) catch |err| {
+                        const bytes_read = unix.read(stderr_pipe[0], &buffer) catch |err| {
                             if (err == error.WouldBlock) break;
                             return err;
                         };
@@ -218,19 +260,19 @@ pub const Process = struct {
 
             // Final reads (non-blocking, so it's ok)
             while (true) {
-                const bytes_read = posix.read(stdout_pipe[0], &buffer) catch break;
+                const bytes_read = unix.read(stdout_pipe[0], &buffer) catch break;
                 if (bytes_read == 0) break;
                 try self.stdout_data.appendSlice(self.allocator, buffer[0..bytes_read]);
             }
 
             while (true) {
-                const bytes_read = posix.read(stderr_pipe[0], &buffer) catch break;
+                const bytes_read = unix.read(stderr_pipe[0], &buffer) catch break;
                 if (bytes_read == 0) break;
                 try self.stderr_data.appendSlice(self.allocator, buffer[0..bytes_read]);
             }
 
-            posix.close(stdout_pipe[0]);
-            posix.close(stderr_pipe[0]);
+            unix.close(stdout_pipe[0]);
+            unix.close(stderr_pipe[0]);
 
             // Wait for child and get exit code
             const wait_result = posix.waitpid(pid, 0);
@@ -241,10 +283,10 @@ pub const Process = struct {
     /// Run the process asynchronously (detached, reparented to init)
     pub fn runAsync(self: *Self) !void {
         // Create a pipe for communication
-        const socket = try posix.pipe();
+        const socket = try unix.pipe();
         errdefer {
-            posix.close(socket[0]);
-            posix.close(socket[1]);
+            unix.close(socket[0]);
+            unix.close(socket[1]);
         }
 
         const child = try posix.fork();
@@ -255,8 +297,8 @@ pub const Process = struct {
 
             if (grandchild == 0) {
                 // Grandchild process
-                posix.close(socket[0]);
-                posix.close(socket[1]);
+                unix.close(socket[0]);
+                unix.close(socket[1]);
 
                 // Build argv
                 var argv = self.allocator.alloc(?[*:0]const u8, self.args.items.len + 2) catch posix.exit(1);
@@ -283,15 +325,15 @@ pub const Process = struct {
                 // Redirect file descriptors if specified
                 if (self.stdin_fd) |fd| {
                     _ = posix.dup2(fd, posix.STDIN_FILENO) catch {};
-                    posix.close(fd);
+                    unix.close(fd);
                 }
                 if (self.stdout_fd) |fd| {
                     _ = posix.dup2(fd, posix.STDOUT_FILENO) catch {};
-                    posix.close(fd);
+                    unix.close(fd);
                 }
                 if (self.stderr_fd) |fd| {
                     _ = posix.dup2(fd, posix.STDERR_FILENO) catch {};
-                    posix.close(fd);
+                    unix.close(fd);
                 }
 
                 // Execute
@@ -302,23 +344,23 @@ pub const Process = struct {
             }
 
             // Child (not grandchild) - send grandchild PID to parent
-            posix.close(socket[0]);
+            unix.close(socket[0]);
             const grandchild_bytes = std.mem.asBytes(&grandchild);
-            _ = posix.write(socket[1], grandchild_bytes) catch {
-                posix.close(socket[1]);
+            _ = unix.write(socket[1], grandchild_bytes) catch {
+                unix.close(socket[1]);
                 posix.exit(1);
             };
-            posix.close(socket[1]);
+            unix.close(socket[1]);
             posix.exit(0);
         }
 
         // Parent process
-        posix.close(socket[1]);
+        unix.close(socket[1]);
 
         var grandchild_pid: posix.pid_t = undefined;
         const grandchild_bytes = std.mem.asBytes(&grandchild_pid);
-        const bytes_read = try posix.read(socket[0], grandchild_bytes);
-        posix.close(socket[0]);
+        const bytes_read = try unix.read(socket[0], grandchild_bytes);
+        unix.close(socket[0]);
 
         if (bytes_read != @sizeOf(posix.pid_t)) {
             _ = posix.waitpid(child, 0);

@@ -1,378 +1,173 @@
-//! wl_seat protocol implementation
-//! Handles input devices (keyboard, pointer, touch)
+//! wl_seat global and child resource lifecycle.
 
-const std = @import("std");
 const wayland = @import("wayland");
 const c = wayland.c;
-
 const Compositor = @import("../compositor.zig").Compositor;
+const input = @import("../input/seat.zig");
 
-// wl_seat interface version we support
-const WL_SEAT_VERSION = 7;
+const version = 7;
 
-// Seat capabilities
-const WL_SEAT_CAPABILITY_POINTER = 1;
-const WL_SEAT_CAPABILITY_KEYBOARD = 2;
-const WL_SEAT_CAPABILITY_TOUCH = 4;
-
-// User data structures
-// Note: All user data structs are allocated/freed with compositor.allocator
-
-/// User data attached to wl_seat resources
-const SeatData = struct {
+const Resource = struct {
     compositor: *Compositor,
 };
 
-/// User data attached to wl_pointer resources
-const PointerData = struct {
-    seat_data: *SeatData,
-};
-
-/// User data attached to wl_keyboard resources
-const KeyboardData = struct {
-    seat_data: *SeatData,
-};
-
-/// User data attached to wl_touch resources
-const TouchData = struct {
-    seat_data: *SeatData,
-};
-
-// wl_seat request handlers
-
-fn seatGetPointer(
-    client: ?*c.wl_client,
-    resource: ?*c.wl_resource,
-    id: u32,
-) callconv(.c) void {
-    _ = client;
-
-    const data: *SeatData = @ptrCast(@alignCast(
-        c.wl_resource_get_user_data(resource),
-    ));
-
-    const comp = data.compositor;
-    comp.logger.debug("Client requested wl_pointer", .{});
-
-    // Create wl_pointer resource
+fn getPointer(_: ?*c.wl_client, resource: ?*c.wl_resource, id: u32) callconv(.c) void {
+    const seat_resource = resource orelse return;
+    const data = getData(Resource, seat_resource);
     const pointer_resource = c.wl_resource_create(
-        c.wl_resource_get_client(resource),
+        c.wl_resource_get_client(seat_resource),
         &c.wl_pointer_interface,
-        c.wl_resource_get_version(resource),
+        c.wl_resource_get_version(seat_resource),
         id,
-    ) orelse {
-        c.wl_resource_post_no_memory(resource);
-        return;
-    };
+    ) orelse return c.wl_resource_post_no_memory(seat_resource);
 
-    const pointer_data = comp.allocator.create(PointerData) catch {
+    const pointer = data.compositor.allocator.create(input.PointerResource) catch {
         c.wl_resource_destroy(pointer_resource);
-        c.wl_resource_post_no_memory(resource);
-        return;
+        return c.wl_resource_post_no_memory(seat_resource);
     };
-    pointer_data.* = .{ .seat_data = data };
-
-    c.wl_resource_set_implementation(
-        pointer_resource,
-        @ptrCast(&pointer_implementation),
-        pointer_data,
-        pointerResourceDestroy,
-    );
-
-    // TODO: Store pointer resource for sending events later
+    pointer.* = .{ .seat = &data.compositor.seat, .resource = pointer_resource };
+    data.compositor.seat.addPointer(pointer) catch {
+        data.compositor.allocator.destroy(pointer);
+        c.wl_resource_destroy(pointer_resource);
+        return c.wl_resource_post_no_memory(seat_resource);
+    };
+    c.wl_resource_set_implementation(pointer_resource, @ptrCast(&pointer_impl), pointer, destroyPointer);
 }
 
-fn seatGetKeyboard(
-    client: ?*c.wl_client,
-    resource: ?*c.wl_resource,
-    id: u32,
-) callconv(.c) void {
-    _ = client;
-
-    const data: *SeatData = @ptrCast(@alignCast(
-        c.wl_resource_get_user_data(resource),
-    ));
-
-    const comp = data.compositor;
-    comp.logger.debug("Client requested wl_keyboard", .{});
-
-    // Create wl_keyboard resource
+fn getKeyboard(_: ?*c.wl_client, resource: ?*c.wl_resource, id: u32) callconv(.c) void {
+    const seat_resource = resource orelse return;
+    const data = getData(Resource, seat_resource);
     const keyboard_resource = c.wl_resource_create(
-        c.wl_resource_get_client(resource),
+        c.wl_resource_get_client(seat_resource),
         &c.wl_keyboard_interface,
-        c.wl_resource_get_version(resource),
+        c.wl_resource_get_version(seat_resource),
         id,
-    ) orelse {
-        c.wl_resource_post_no_memory(resource);
-        return;
-    };
+    ) orelse return c.wl_resource_post_no_memory(seat_resource);
 
-    const keyboard_data = comp.allocator.create(KeyboardData) catch {
+    const keyboard = data.compositor.allocator.create(input.KeyboardResource) catch {
         c.wl_resource_destroy(keyboard_resource);
-        c.wl_resource_post_no_memory(resource);
-        return;
+        return c.wl_resource_post_no_memory(seat_resource);
     };
-    keyboard_data.* = .{ .seat_data = data };
-
-    c.wl_resource_set_implementation(
-        keyboard_resource,
-        @ptrCast(&keyboard_implementation),
-        keyboard_data,
-        keyboardResourceDestroy,
-    );
-
-    // Send keymap (empty for now)
-    sendKeymap(keyboard_resource);
-
-    // Send repeat info (version 4+)
-    const version = c.wl_resource_get_version(keyboard_resource);
-    if (version >= 4) {
-        c.wl_keyboard_send_repeat_info(keyboard_resource, 25, 600); // 25 Hz, 600ms delay
-    }
-
-    // TODO: Store keyboard resource for sending events later
+    keyboard.* = .{ .seat = &data.compositor.seat, .resource = keyboard_resource };
+    data.compositor.seat.addKeyboard(keyboard) catch {
+        data.compositor.allocator.destroy(keyboard);
+        c.wl_resource_destroy(keyboard_resource);
+        return c.wl_resource_post_no_memory(seat_resource);
+    };
+    c.wl_resource_set_implementation(keyboard_resource, @ptrCast(&keyboard_impl), keyboard, destroyKeyboard);
+    data.compositor.seat.sendKeymap(keyboard_resource);
+    if (c.wl_resource_get_version(keyboard_resource) >= 4)
+        c.wl_keyboard_send_repeat_info(keyboard_resource, 25, 600);
 }
 
-fn seatGetTouch(
-    client: ?*c.wl_client,
-    resource: ?*c.wl_resource,
-    id: u32,
-) callconv(.c) void {
-    _ = client;
-
-    const data: *SeatData = @ptrCast(@alignCast(
-        c.wl_resource_get_user_data(resource),
-    ));
-
-    const comp = data.compositor;
-    comp.logger.debug("Client requested wl_touch", .{});
-
-    // Create wl_touch resource
+fn getTouch(_: ?*c.wl_client, resource: ?*c.wl_resource, id: u32) callconv(.c) void {
+    const seat_resource = resource orelse return;
+    const data = getData(Resource, seat_resource);
     const touch_resource = c.wl_resource_create(
-        c.wl_resource_get_client(resource),
+        c.wl_resource_get_client(seat_resource),
         &c.wl_touch_interface,
-        c.wl_resource_get_version(resource),
+        c.wl_resource_get_version(seat_resource),
         id,
-    ) orelse {
-        c.wl_resource_post_no_memory(resource);
-        return;
-    };
+    ) orelse return c.wl_resource_post_no_memory(seat_resource);
 
-    const touch_data = comp.allocator.create(TouchData) catch {
+    const touch = data.compositor.allocator.create(input.TouchResource) catch {
         c.wl_resource_destroy(touch_resource);
-        c.wl_resource_post_no_memory(resource);
-        return;
+        return c.wl_resource_post_no_memory(seat_resource);
     };
-    touch_data.* = .{ .seat_data = data };
-
-    c.wl_resource_set_implementation(
-        touch_resource,
-        @ptrCast(&touch_implementation),
-        touch_data,
-        touchResourceDestroy,
-    );
-
-    // TODO: Store touch resource for sending events later
+    touch.* = .{ .seat = &data.compositor.seat, .resource = touch_resource };
+    data.compositor.seat.addTouch(touch) catch {
+        data.compositor.allocator.destroy(touch);
+        c.wl_resource_destroy(touch_resource);
+        return c.wl_resource_post_no_memory(seat_resource);
+    };
+    c.wl_resource_set_implementation(touch_resource, @ptrCast(&touch_impl), touch, destroyTouch);
 }
 
-fn seatRelease(
-    client: ?*c.wl_client,
-    resource: ?*c.wl_resource,
-) callconv(.c) void {
-    _ = client;
+fn release(_: ?*c.wl_client, resource: ?*c.wl_resource) callconv(.c) void {
     c.wl_resource_destroy(resource);
 }
 
-var seat_implementation = [_]?*const anyopaque{
-    @ptrCast(&seatGetPointer),
-    @ptrCast(&seatGetKeyboard),
-    @ptrCast(&seatGetTouch),
-    @ptrCast(&seatRelease),
-};
+fn setCursor(
+    _: ?*c.wl_client,
+    _: ?*c.wl_resource,
+    _: u32,
+    _: ?*c.wl_resource,
+    _: i32,
+    _: i32,
+) callconv(.c) void {}
 
-// wl_pointer request handlers (stubs for now)
-
-fn pointerSetCursor(
-    client: ?*c.wl_client,
-    resource: ?*c.wl_resource,
-    serial: u32,
-    surface: ?*c.wl_resource,
-    hotspot_x: i32,
-    hotspot_y: i32,
-) callconv(.c) void {
-    _ = client;
-    _ = resource;
-    _ = serial;
-    _ = surface;
-    _ = hotspot_x;
-    _ = hotspot_y;
-    // Cursor setting stub
+fn destroyPointer(resource: ?*c.wl_resource) callconv(.c) void {
+    const pointer = getData(input.PointerResource, resource orelse return);
+    pointer.seat.removePointer(pointer);
+    pointer.seat.allocator.destroy(pointer);
 }
 
-fn pointerRelease(
-    client: ?*c.wl_client,
-    resource: ?*c.wl_resource,
-) callconv(.c) void {
-    _ = client;
-    c.wl_resource_destroy(resource);
+fn destroyKeyboard(resource: ?*c.wl_resource) callconv(.c) void {
+    const keyboard = getData(input.KeyboardResource, resource orelse return);
+    keyboard.seat.removeKeyboard(keyboard);
+    keyboard.seat.allocator.destroy(keyboard);
 }
 
-var pointer_implementation = [_]?*const anyopaque{
-    @ptrCast(&pointerSetCursor),
-    @ptrCast(&pointerRelease),
-};
-
-fn pointerResourceDestroy(resource: ?*c.wl_resource) callconv(.c) void {
-    const data: *PointerData = @ptrCast(@alignCast(
-        c.wl_resource_get_user_data(resource),
-    ));
-    data.seat_data.compositor.allocator.destroy(data);
+fn destroyTouch(resource: ?*c.wl_resource) callconv(.c) void {
+    const touch = getData(input.TouchResource, resource orelse return);
+    touch.seat.removeTouch(touch);
+    touch.seat.allocator.destroy(touch);
 }
 
-// wl_keyboard request handlers (stubs for now)
-
-fn keyboardRelease(
-    client: ?*c.wl_client,
-    resource: ?*c.wl_resource,
-) callconv(.c) void {
-    _ = client;
-    c.wl_resource_destroy(resource);
-}
-
-var keyboard_implementation = [_]?*const anyopaque{
-    @ptrCast(&keyboardRelease),
-};
-
-fn keyboardResourceDestroy(resource: ?*c.wl_resource) callconv(.c) void {
-    const data: *KeyboardData = @ptrCast(@alignCast(
-        c.wl_resource_get_user_data(resource),
-    ));
-    data.seat_data.compositor.allocator.destroy(data);
-}
-
-// wl_touch request handlers (stubs for now)
-
-fn touchRelease(
-    client: ?*c.wl_client,
-    resource: ?*c.wl_resource,
-) callconv(.c) void {
-    _ = client;
-    c.wl_resource_destroy(resource);
-}
-
-var touch_implementation = [_]?*const anyopaque{
-    @ptrCast(&touchRelease),
-};
-
-fn touchResourceDestroy(resource: ?*c.wl_resource) callconv(.c) void {
-    const data: *TouchData = @ptrCast(@alignCast(
-        c.wl_resource_get_user_data(resource),
-    ));
-    data.seat_data.compositor.allocator.destroy(data);
-}
-
-// Helper functions
-
-/// Sends an empty keymap to the client
-fn sendKeymap(keyboard_resource: ?*c.wl_resource) void {
-    // Create minimal empty keymap
-    const keymap_str = "xkb_keymap { xkb_keycodes { minimum = 8; maximum = 255; }; };";
-    const keymap_size = keymap_str.len + 1; // +1 for null terminator
-
-    // Create anonymous file for keymap
-    const fd = std.posix.memfd_create("keymap", 0) catch {
-        // Fallback: just send empty keymap
-        c.wl_keyboard_send_keymap(
-            keyboard_resource,
-            c.WL_KEYBOARD_KEYMAP_FORMAT_NO_KEYMAP,
-            -1,
-            0,
-        );
-        return;
-    };
-    defer std.posix.close(fd);
-
-    // Write keymap to fd
-    _ = std.posix.write(fd, keymap_str) catch {
-        c.wl_keyboard_send_keymap(
-            keyboard_resource,
-            c.WL_KEYBOARD_KEYMAP_FORMAT_NO_KEYMAP,
-            -1,
-            0,
-        );
-        return;
-    };
-
-    // Send keymap
-    c.wl_keyboard_send_keymap(
-        keyboard_resource,
-        c.WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1,
-        fd,
-        @intCast(keymap_size),
-    );
-}
-
-// Global bind handler
-
-fn seatBind(
-    client: ?*c.wl_client,
-    data: ?*anyopaque,
-    version: u32,
-    id: u32,
-) callconv(.c) void {
-    const compositor: *Compositor = @ptrCast(@alignCast(data));
-
-    compositor.logger.debug("Client bound to wl_seat (version {d})", .{version});
-
-    const resource = c.wl_resource_create(
-        client,
-        &c.wl_seat_interface,
-        @intCast(@min(version, WL_SEAT_VERSION)),
-        id,
-    ) orelse {
-        c.wl_client_post_no_memory(client);
-        return;
-    };
-
-    const seat_data = compositor.allocator.create(SeatData) catch {
-        c.wl_resource_destroy(resource);
-        c.wl_client_post_no_memory(client);
-        return;
-    };
-    seat_data.* = .{ .compositor = compositor };
-
-    c.wl_resource_set_implementation(
-        resource,
-        @ptrCast(&seat_implementation),
-        seat_data,
-        seatResourceDestroy,
-    );
-
-    // Send capabilities
-    const capabilities = WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD;
-    c.wl_seat_send_capabilities(resource, capabilities);
-
-    // Send name (version 2+)
-    if (version >= 2) {
-        c.wl_seat_send_name(resource, "seat0");
-    }
-}
-
-fn seatResourceDestroy(resource: ?*c.wl_resource) callconv(.c) void {
-    const data: *SeatData = @ptrCast(@alignCast(
-        c.wl_resource_get_user_data(resource),
-    ));
+fn destroySeat(resource: ?*c.wl_resource) callconv(.c) void {
+    const data = getData(Resource, resource orelse return);
     data.compositor.allocator.destroy(data);
 }
 
-/// Registers the wl_seat global
+var seat_impl = [_]?*const anyopaque{
+    @ptrCast(&getPointer),
+    @ptrCast(&getKeyboard),
+    @ptrCast(&getTouch),
+    @ptrCast(&release),
+};
+
+var pointer_impl = [_]?*const anyopaque{
+    @ptrCast(&setCursor),
+    @ptrCast(&release),
+};
+
+var keyboard_impl = [_]?*const anyopaque{@ptrCast(&release)};
+var touch_impl = [_]?*const anyopaque{@ptrCast(&release)};
+
+fn bind(client: ?*c.wl_client, context: ?*anyopaque, requested: u32, id: u32) callconv(.c) void {
+    const compositor: *Compositor = @ptrCast(@alignCast(context orelse return));
+    const resource = c.wl_resource_create(
+        client,
+        &c.wl_seat_interface,
+        @intCast(@min(requested, version)),
+        id,
+    ) orelse return c.wl_client_post_no_memory(client);
+
+    const data = compositor.allocator.create(Resource) catch {
+        c.wl_resource_destroy(resource);
+        return c.wl_client_post_no_memory(client);
+    };
+    data.* = .{ .compositor = compositor };
+    c.wl_resource_set_implementation(resource, @ptrCast(&seat_impl), data, destroySeat);
+    c.wl_seat_send_capabilities(
+        resource,
+        c.WL_SEAT_CAPABILITY_POINTER |
+            c.WL_SEAT_CAPABILITY_KEYBOARD |
+            c.WL_SEAT_CAPABILITY_TOUCH,
+    );
+    if (requested >= 2) c.wl_seat_send_name(resource, "seat0");
+}
+
 pub fn register(compositor: *Compositor) !void {
-    const global = try wayland.Global.create(
+    _ = try wayland.Global.create(
         compositor.server.getDisplay(),
         &c.wl_seat_interface,
-        WL_SEAT_VERSION,
+        version,
         compositor,
-        seatBind,
+        bind,
     );
-    _ = global; // Global is owned by display, no need to track
+}
+
+fn getData(comptime T: type, resource: *c.wl_resource) *T {
+    return @ptrCast(@alignCast(c.wl_resource_get_user_data(resource)));
 }

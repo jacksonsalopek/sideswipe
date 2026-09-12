@@ -76,7 +76,7 @@ pub const TypeITiming = struct {
     pub fn parse(data: []const u8) ?TypeITiming {
         return parseInternal(data, false);
     }
-    
+
     /// Internal parser for both Type I (v1) and Type VII (v2)
     fn parseInternal(data: []const u8, is_type7: bool) ?TypeITiming {
         if (data.len < 20) return null;
@@ -96,7 +96,7 @@ pub const TypeITiming = struct {
         const stereo_3d: Stereo3DSupport = @enumFromInt((options >> 5) & 0x03);
         const interlaced = (options & 0x10) != 0;
         const aspect_ratio_raw = options & 0x0F;
-        
+
         // Map aspect ratio (see DisplayID spec Table 4-3)
         const aspect_ratio = switch (aspect_ratio_raw) {
             0 => AspectRatio{ .h = 1, .v = 1 },
@@ -418,7 +418,7 @@ pub const TypeXTiming = struct {
 test "Type I timing parsing - 1080p60" {
     var data: [20]u8 = undefined;
 
-    // 1920x1080@60Hz  
+    // 1920x1080@60Hz
     // Pixel clock: 148.5 MHz = 148,500,000 Hz
     // Formula: (1 + raw) * 10,000 = 148,500,000
     // raw = 14,849 = 0x3A01 in hex

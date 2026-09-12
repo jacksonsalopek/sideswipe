@@ -1,6 +1,13 @@
 const std = @import("std");
 const string = @import("core.string").string;
 
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+
+fn getEnv(name: [:0]const u8) ?[:0]const u8 {
+    const value = getenv(name.ptr) orelse return null;
+    return std.mem.span(value);
+}
+
 /// Map of variables for translation substitution
 pub const TranslationVarMap = std.StringHashMap(string);
 
@@ -83,7 +90,7 @@ pub const Engine = struct {
 
         const result = try self.entries.getOrPut(locale_copy);
         if (!result.found_existing) {
-            result.value_ptr.* = std.ArrayList(TranslationEntry){};
+            result.value_ptr.* = std.ArrayList(TranslationEntry).empty;
         } else {
             // Free the duplicate locale string if entry already existed
             self.allocator.free(locale_copy);
@@ -121,7 +128,7 @@ pub const Engine = struct {
 
         const result = try self.entries.getOrPut(locale_copy);
         if (!result.found_existing) {
-            result.value_ptr.* = std.ArrayList(TranslationEntry){};
+            result.value_ptr.* = std.ArrayList(TranslationEntry).empty;
         } else {
             self.allocator.free(locale_copy);
         }
@@ -250,8 +257,8 @@ pub const Engine = struct {
     /// Get the system locale
     pub fn getSystemLocale(allocator: std.mem.Allocator) !Locale {
         // Try to get from environment variables
-        const locale_str = std.posix.getenv("LANG") orelse
-            std.posix.getenv("LC_ALL") orelse
+        const locale_str = getEnv("LANG") orelse
+            getEnv("LC_ALL") orelse
             "en_US.UTF-8";
 
         return try Locale.init(locale_str, allocator);
@@ -289,7 +296,7 @@ fn substituteVariables(raw_str: string, var_map: TranslationVarMap, allocator: s
         value: string,
     };
 
-    var ranges = std.ArrayList(Range){};
+    var ranges = std.ArrayList(Range).empty;
     defer ranges.deinit(allocator);
 
     // Find all {variable} patterns

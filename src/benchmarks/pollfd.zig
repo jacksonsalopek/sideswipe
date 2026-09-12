@@ -93,7 +93,7 @@ fn getPollFdsOldBehavior(
     coordinator: *backend.Coordinator,
     alloc: std.mem.Allocator,
 ) ![]backend.PollFd {
-    var result = std.ArrayList(backend.PollFd){};
+    var result = std.ArrayList(backend.PollFd).empty;
     errdefer result.deinit(alloc);
 
     // Get poll FDs from all implementations
@@ -207,7 +207,7 @@ fn runBenchmark(
     }
     coordinator.implementations.clearRetainingCapacity();
 
-    var mock_impls = std.ArrayList(*MockImplementation){};
+    var mock_impls = std.ArrayList(*MockImplementation).empty;
     defer {
         for (mock_impls.items) |mock| {
             mock.deinit(alloc);

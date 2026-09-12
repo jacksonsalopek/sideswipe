@@ -51,7 +51,7 @@ pub const Parser = struct {
         return .{
             .allocator = allocator,
             .args = args,
-            .options = std.ArrayList(ArgOption){},
+            .options = std.ArrayList(ArgOption).empty,
         };
     }
 
@@ -105,10 +105,10 @@ pub const Parser = struct {
 
         const name_copy = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(name_copy);
-        
+
         const abbrev_copy = try self.allocator.dupe(u8, abbrev);
         errdefer self.allocator.free(abbrev_copy);
-        
+
         const desc_copy = try self.allocator.dupe(u8, description);
         errdefer self.allocator.free(desc_copy);
 
@@ -126,7 +126,7 @@ pub const Parser = struct {
         var i: usize = 1; // Skip program name
         while (i < self.args.len) : (i += 1) {
             const arg = self.args[i];
-            
+
             var option_name: []const u8 = undefined;
             var is_long = false;
 
@@ -255,10 +255,10 @@ pub const Parser = struct {
     /// Generate a formatted help description
     pub fn getDescription(self: *Self, header: []const u8, max_width: ?usize) ![]const u8 {
         const width = max_width orelse 80;
-        var output = std.ArrayList(u8){};
-        errdefer output.deinit(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
 
-        const writer = output.writer(self.allocator);
+        const writer = &output.writer;
 
         // Header
         try writer.print("┏ {s}\n", .{header});
@@ -272,7 +272,7 @@ pub const Parser = struct {
         // Calculate column widths
         var max_name_width: usize = 0;
         var max_abbrev_width: usize = 0;
-        
+
         for (self.options.items) |opt| {
             max_name_width = @max(max_name_width, opt.name.len + 3); // "--" prefix + space
             if (opt.abbrev.len > 0) {
@@ -285,7 +285,7 @@ pub const Parser = struct {
         for (self.options.items) |opt| {
             try writer.writeAll("┣--");
             try writer.writeAll(opt.name);
-            
+
             const name_padding = max_name_width - opt.name.len - 2; // -2 for "--"
             try writePadding(writer, name_padding);
 
@@ -294,7 +294,7 @@ pub const Parser = struct {
                 try writer.writeAll(opt.abbrev);
                 try writer.writeAll(" ");
                 try writer.writeAll(getTypeString(opt.arg_type));
-                
+
                 const type_str = getTypeString(opt.arg_type);
                 const abbrev_padding = max_abbrev_width - opt.abbrev.len - 2 - type_str.len - 1;
                 try writePadding(writer, abbrev_padding);
@@ -304,7 +304,7 @@ pub const Parser = struct {
 
             try writer.writeAll(" | ");
             try writer.writeAll(opt.description);
-            
+
             // Account for Unicode box-drawing character width (┃ takes 2 display columns but is 3 bytes)
             const used = max_name_width + max_abbrev_width + 3 + opt.description.len;
             const unicode_border_width = 2; // ┃ displays as 2 columns
@@ -322,7 +322,7 @@ pub const Parser = struct {
         }
         try writer.writeAll("┛\n");
 
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     fn getTypeString(arg_type: ArgType) []const u8 {
@@ -346,7 +346,7 @@ pub const Parser = struct {
 test "Parser - basic parsing with bool and float" {
     const testing = std.testing;
     const args = [_][]const u8{ "app", "--hello", "--value", "0.2" };
-    
+
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
 
@@ -368,7 +368,7 @@ test "Parser - basic parsing with bool and float" {
 test "Parser - description generation format" {
     const testing = std.testing;
     const args = [_][]const u8{"app"};
-    
+
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
 
@@ -391,7 +391,7 @@ test "Parser - description generation format" {
 test "Parser - parse fails on unknown argument" {
     const testing = std.testing;
     const args = [_][]const u8{ "app", "--hello", "--value", "0.2" };
-    
+
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
 
@@ -408,7 +408,7 @@ test "Parser - parse fails on unknown argument" {
 test "Parser - parse fails on missing value for option" {
     const testing = std.testing;
     const args = [_][]const u8{ "app", "--hello", "--value" };
-    
+
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
 
@@ -424,7 +424,7 @@ test "Parser - parse fails on missing value for option" {
 test "Parser - string and int parsing with short forms" {
     const testing = std.testing;
     const args = [_][]const u8{ "app", "--value", "hi", "-w", "2" };
-    
+
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
 
@@ -443,7 +443,7 @@ test "Parser - string and int parsing with short forms" {
 test "Parser - parse fails on invalid argument format" {
     const testing = std.testing;
     const args = [_][]const u8{ "app", "e" }; // Missing - or --
-    
+
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
 
@@ -457,45 +457,45 @@ test "Parser - parse fails on invalid argument format" {
 test "Parser - duplicate name registration fails" {
     const testing = std.testing;
     const args = [_][]const u8{"app"};
-    
+
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
 
     try parser.registerStringOption("aa", "v", "Sets a valueeeeeee");
     const result = parser.registerStringOption("aa", "w", "Sets a valueeeeeee 2");
-    
+
     try testing.expectError(Parser.ParseError.DuplicateOption, result);
 }
 
 test "Parser - duplicate abbrev registration fails" {
     const testing = std.testing;
     const args = [_][]const u8{"app"};
-    
+
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
 
     try parser.registerStringOption("bb", "b", "Sets a valueeeeeee");
     const result = parser.registerStringOption("cc", "b", "Sets a valueeeeeee 2");
-    
+
     try testing.expectError(Parser.ParseError.DuplicateOption, result);
 }
 
 test "Parser - empty name registration fails" {
     const testing = std.testing;
     const args = [_][]const u8{"app"};
-    
+
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
 
     const result = parser.registerFloatOption("", "a", "Sets a valueeeeeee 2");
-    
+
     try testing.expectError(Parser.ParseError.EmptyName, result);
 }
 
 test "Parser - option without abbrev works" {
     const testing = std.testing;
     const args = [_][]const u8{ "app", "--verbose" };
-    
+
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
 
@@ -508,7 +508,7 @@ test "Parser - option without abbrev works" {
 test "Parser - mixed long and short forms" {
     const testing = std.testing;
     const args = [_][]const u8{ "app", "-v", "--count", "42", "-o", "test.txt" };
-    
+
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
 
@@ -525,7 +525,7 @@ test "Parser - mixed long and short forms" {
 test "Parser - get by abbrev works" {
     const testing = std.testing;
     const args = [_][]const u8{ "app", "-v" };
-    
+
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
 
@@ -540,12 +540,12 @@ test "Parser - get by abbrev works" {
 test "Parser - invalid int value fails" {
     const testing = std.testing;
     const args = [_][]const u8{ "app", "--count", "notanumber" };
-    
+
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
 
     try parser.registerIntOption("count", "c", "Count");
-    
+
     const result = parser.parse();
     try testing.expectError(Parser.ParseError.InvalidValue, result);
 }
@@ -553,12 +553,12 @@ test "Parser - invalid int value fails" {
 test "Parser - invalid float value fails" {
     const testing = std.testing;
     const args = [_][]const u8{ "app", "--ratio", "notafloat" };
-    
+
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
 
     try parser.registerFloatOption("ratio", "r", "Ratio");
-    
+
     const result = parser.parse();
     try testing.expectError(Parser.ParseError.InvalidValue, result);
 }

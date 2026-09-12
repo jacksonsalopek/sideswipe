@@ -44,34 +44,34 @@ pub const MetadataDescriptors = packed struct(u8) {
 pub const Block = struct {
     /// Supported colorimetry modes
     colorimetry: Colorimetry,
-    
+
     /// Metadata descriptors
     descriptors: MetadataDescriptors,
-    
+
     /// Parse from extended data block payload (at least 2 bytes)
     pub fn parse(data: []const u8) ?Block {
         if (data.len < 2) return null;
-        
+
         return Block{
             .colorimetry = @bitCast(data[0]),
             .descriptors = @bitCast(data[1]),
         };
     }
-    
+
     /// Check if any extended colorimetry is supported
     pub fn hasExtendedColorimetry(self: Block) bool {
         const c = self.colorimetry;
-        return c.xvycc601 or c.xvycc709 or c.sycc601 or c.opycc601 or 
-               c.oprgb or c.bt2020_cycc or c.bt2020_ycc or c.bt2020_rgb;
+        return c.xvycc601 or c.xvycc709 or c.sycc601 or c.opycc601 or
+            c.oprgb or c.bt2020_cycc or c.bt2020_ycc or c.bt2020_rgb;
     }
-    
+
     /// Check if BT.2020 (any variant) is supported
     pub fn supportsBt2020(self: Block) bool {
-        return self.colorimetry.bt2020_cycc or 
-               self.colorimetry.bt2020_ycc or 
-               self.colorimetry.bt2020_rgb;
+        return self.colorimetry.bt2020_cycc or
+            self.colorimetry.bt2020_ycc or
+            self.colorimetry.bt2020_rgb;
     }
-    
+
     /// Check if DCI-P3 is supported
     pub fn supportsDciP3(self: Block) bool {
         return self.descriptors.dci_p3;
@@ -85,9 +85,9 @@ test "colorimetry parsing - basic" {
         0b00000011, // xvYCC601 + xvYCC709
         0b00000000, // No metadata descriptors
     };
-    
+
     const block = Block.parse(&data).?;
-    
+
     try testing.expect(block.colorimetry.xvycc601);
     try testing.expect(block.colorimetry.xvycc709);
     try testing.expect(!block.colorimetry.bt2020_rgb);
@@ -99,9 +99,9 @@ test "colorimetry parsing - BT.2020" {
         0b11100000, // BT2020 RGB + YCC + cYCC
         0b00000000,
     };
-    
+
     const block = Block.parse(&data).?;
-    
+
     try testing.expect(block.colorimetry.bt2020_rgb);
     try testing.expect(block.colorimetry.bt2020_ycc);
     try testing.expect(block.colorimetry.bt2020_cycc);
@@ -113,9 +113,9 @@ test "colorimetry parsing - DCI-P3" {
         0b00000000,
         0b00010000, // DCI-P3 (bit 4)
     };
-    
+
     const block = Block.parse(&data).?;
-    
+
     try testing.expect(block.supportsDciP3());
     try testing.expect(!block.hasExtendedColorimetry());
 }
@@ -125,9 +125,9 @@ test "colorimetry parsing - with metadata descriptors" {
         0b00001111, // sYCC + opYCC + xvYCC709 + xvYCC601
         0b00000011, // MD0 + MD1
     };
-    
+
     const block = Block.parse(&data).?;
-    
+
     try testing.expect(block.colorimetry.sycc601);
     try testing.expect(block.colorimetry.opycc601);
     try testing.expect(block.descriptors.md0);

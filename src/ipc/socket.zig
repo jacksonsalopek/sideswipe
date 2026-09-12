@@ -63,8 +63,8 @@ pub const RawParsedMessage = struct {
 
     pub fn init(allocator: std.mem.Allocator) RawParsedMessage {
         return .{
-            .data = std.ArrayList(u8){},
-            .fds = std.ArrayList(posix.fd_t){},
+            .data = std.ArrayList(u8).empty,
+            .fds = std.ArrayList(posix.fd_t).empty,
             .allocator = allocator,
         };
     }
@@ -77,7 +77,7 @@ pub const RawParsedMessage = struct {
     /// Close all file descriptors in this message
     pub fn closeFds(self: *RawParsedMessage) void {
         for (self.fds.items) |fd| {
-            posix.close(fd);
+            core.unix.close(fd);
         }
         self.fds.clearRetainingCapacity();
     }
@@ -203,7 +203,7 @@ pub const Connection = struct {
 
     /// Send message bytes
     pub fn send(self: *Connection, data: []const u8) !usize {
-        return try posix.write(self.fd.get(), data);
+        return try core.unix.write(self.fd.get(), data);
     }
 
     /// Send message with file descriptors
@@ -244,7 +244,7 @@ pub const Connection = struct {
 
     /// Receive message
     pub fn receive(self: *Connection, buffer: []u8) !usize {
-        return try posix.read(self.fd.get(), buffer);
+        return try core.unix.read(self.fd.get(), buffer);
     }
 
     /// Parse message from this socket
@@ -303,15 +303,15 @@ pub const Server = struct {
 
     pub fn init(allocator: std.mem.Allocator, socket_path: []const u8) !Server {
         // Create Unix domain socket
-        const fd = try posix.socket(
+        const fd = try core.unix.socket(
             posix.AF.UNIX,
             posix.SOCK.STREAM | posix.SOCK.CLOEXEC,
             0,
         );
-        errdefer posix.close(fd);
+        errdefer core.unix.close(fd);
 
         // Remove existing socket file if present
-        std.fs.cwd().deleteFile(socket_path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.Options.debug_io, socket_path) catch {};
 
         // Bind to socket path
         var addr = posix.sockaddr.un{
@@ -326,10 +326,10 @@ pub const Server = struct {
         @memcpy(addr.path[0..socket_path.len], socket_path);
         addr.path[socket_path.len] = 0;
 
-        try posix.bind(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
+        try core.unix.bind(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
 
         // Listen for connections
-        try posix.listen(fd, 128);
+        try core.unix.listen(fd, 128);
 
         return .{
             .socket_path = socket_path,
@@ -339,14 +339,14 @@ pub const Server = struct {
     }
 
     pub fn deinit(self: *Server) void {
-        posix.close(self.listen_fd);
+        core.unix.close(self.listen_fd);
         // Clean up socket file
-        std.fs.cwd().deleteFile(self.socket_path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.Options.debug_io, self.socket_path) catch {};
     }
 
     /// Accept a new client connection
     pub fn accept(self: *Server) !Connection {
-        const client_fd = try posix.accept(
+        const client_fd = try core.unix.accept(
             self.listen_fd,
             null,
             null,
@@ -362,12 +362,12 @@ pub const Client = struct {
     socket: Connection,
 
     pub fn connect(allocator: std.mem.Allocator, socket_path: []const u8) !Client {
-        const fd = try posix.socket(
+        const fd = try core.unix.socket(
             posix.AF.UNIX,
             posix.SOCK.STREAM | posix.SOCK.CLOEXEC,
             0,
         );
-        errdefer posix.close(fd);
+        errdefer core.unix.close(fd);
 
         var addr = posix.sockaddr.un{
             .family = posix.AF.UNIX,
@@ -381,7 +381,7 @@ pub const Client = struct {
         @memcpy(addr.path[0..socket_path.len], socket_path);
         addr.path[socket_path.len] = 0;
 
-        try posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
+        try core.unix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
 
         return .{
             .socket = Connection.init(FileDescriptor.init(fd), allocator),
@@ -473,13 +473,13 @@ test "parseFromFd - basic data" {
     if (result != 0) return error.ConnectionpairFailed;
 
     defer {
-        posix.close(fds[0]);
-        posix.close(fds[1]);
+        core.unix.close(fds[0]);
+        core.unix.close(fds[1]);
     }
 
     // Send test data
     const test_msg = "Test message for parseFromFd";
-    const sent = try posix.write(fds[0], test_msg);
+    const sent = try core.unix.write(fds[0], test_msg);
     try testing.expectEqual(test_msg.len, sent);
 
     // Parse from receiving end using FileDescriptor wrapper
@@ -503,8 +503,8 @@ test "parseFromFd - large data in chunks" {
     if (result != 0) return error.ConnectionpairFailed;
 
     defer {
-        posix.close(fds[0]);
-        posix.close(fds[1]);
+        core.unix.close(fds[0]);
+        core.unix.close(fds[1]);
     }
 
     // Send large message (bigger than BUFFER_SIZE)
@@ -517,7 +517,7 @@ test "parseFromFd - large data in chunks" {
         byte.* = @intCast(i % 256);
     }
 
-    const sent = try posix.write(fds[0], large_data);
+    const sent = try core.unix.write(fds[0], large_data);
     try testing.expectEqual(large_size, sent);
 
     // Parse from receiving end using FileDescriptor wrapper
@@ -539,14 +539,14 @@ test "Connection - parseMessage integration" {
     );
     if (result != 0) return error.ConnectionpairFailed;
 
-    defer posix.close(fds[0]);
+    defer core.unix.close(fds[0]);
 
     var sock = Connection.initRaw(fds[1], testing.allocator);
     defer sock.deinit();
 
     // Send test data
     const test_msg = "Connection parseMessage test";
-    _ = try posix.write(fds[0], test_msg);
+    _ = try core.unix.write(fds[0], test_msg);
 
     // Parse using Connection method
     var parsed = try sock.parseMessage();
@@ -567,13 +567,13 @@ test "FileDescriptor - integration with parseFromFd" {
     if (result != 0) return error.ConnectionpairFailed;
 
     defer {
-        posix.close(fds[0]);
-        posix.close(fds[1]);
+        core.unix.close(fds[0]);
+        core.unix.close(fds[1]);
     }
 
     // Send test data
     const test_msg = "FileDescriptor test";
-    _ = try posix.write(fds[0], test_msg);
+    _ = try core.unix.write(fds[0], test_msg);
 
     // Use FileDescriptor wrapper
     const fd_wrapper = FileDescriptor.init(fds[1]);
@@ -593,7 +593,7 @@ test "RawParsedMessage - closeFds" {
     defer msg.deinit();
 
     // Create some dummy FDs (pipes)
-    const pipe_fds = try posix.pipe();
+    const pipe_fds = try core.unix.pipe();
 
     try msg.fds.append(testing.allocator, pipe_fds[0]);
     try msg.fds.append(testing.allocator, pipe_fds[1]);

@@ -40,7 +40,7 @@ pub const LogLevel = enum(u8) {
 pub const Logger = struct {
     allocator: std.mem.Allocator,
     log_level: LogLevel,
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
 
     // Configuration flags
     time_enabled: bool,
@@ -50,7 +50,7 @@ pub const Logger = struct {
     rolling_enabled: bool,
 
     // File output
-    log_file: ?std.fs.File,
+    log_file: ?std.Io.File,
     log_file_path: ?[]const u8,
 
     // Rolling log buffer
@@ -64,7 +64,7 @@ pub const Logger = struct {
         return .{
             .allocator = allocator,
             .log_level = .debug,
-            .mutex = .{},
+            .mutex = .init,
             .time_enabled = false,
             .stdout_enabled = true,
             .file_enabled = false,
@@ -72,14 +72,14 @@ pub const Logger = struct {
             .rolling_enabled = false,
             .log_file = null,
             .log_file_path = null,
-            .rolling_log = std.ArrayList(u8){},
+            .rolling_log = std.ArrayList(u8).empty,
         };
     }
 
     /// Clean up logger resources
     pub fn deinit(self: *Self) void {
         if (self.log_file) |file| {
-            file.close();
+            file.close(std.Options.debug_io);
         }
         if (self.log_file_path) |path| {
             self.allocator.free(path);
@@ -89,47 +89,47 @@ pub const Logger = struct {
 
     /// Set the minimum log level
     pub fn setLogLevel(self: *Self, level: LogLevel) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
         self.log_level = level;
     }
 
     /// Enable or disable timestamps in log messages
     pub fn setTime(self: *Self, enabled: bool) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
         self.time_enabled = enabled;
     }
 
     /// Enable or disable stdout output
     pub fn setEnableStdout(self: *Self, enabled: bool) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
         self.stdout_enabled = enabled;
     }
 
     /// Enable or disable color output (only affects stdout)
     pub fn setEnableColor(self: *Self, enabled: bool) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
         self.color_enabled = enabled;
     }
 
     /// Enable or disable rolling log buffer
     pub fn setEnableRolling(self: *Self, enabled: bool) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
         self.rolling_enabled = enabled;
     }
 
     /// Set output file for logging
     pub fn setOutputFile(self: *Self, file_path: ?[]const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
 
         // Close existing file if any
         if (self.log_file) |file| {
-            file.close();
+            file.close(std.Options.debug_io);
             self.log_file = null;
         }
         if (self.log_file_path) |path| {
@@ -139,7 +139,7 @@ pub const Logger = struct {
 
         if (file_path) |path| {
             // Open or create the log file
-            const file = try std.fs.cwd().createFile(path, .{
+            const file = try std.Io.Dir.cwd().createFile(std.Options.debug_io, path, .{
                 .truncate = true,
                 .read = false,
             });
@@ -153,8 +153,8 @@ pub const Logger = struct {
 
     /// Get the current rolling log buffer contents
     pub fn getRollingLog(self: *Self) []const u8 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
         return self.rolling_log.items;
     }
 
@@ -168,23 +168,22 @@ pub const Logger = struct {
             return;
         }
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
 
         // Double-check with lock held
         if (@intFromEnum(level) < @intFromEnum(self.log_level)) {
             return;
         }
 
-        var buffer = std.ArrayList(u8){};
-        defer buffer.deinit(self.allocator);
-
-        const writer = buffer.writer(self.allocator);
+        var buffer: std.Io.Writer.Allocating = .init(self.allocator);
+        defer buffer.deinit();
+        const writer = &buffer.writer;
 
         // Build the log message
         self.buildLogMessage(writer, level, fmt, args) catch return;
 
-        const message = buffer.items;
+        const message = writer.buffered();
 
         // Output to stdout
         if (self.stdout_enabled) {
@@ -196,7 +195,7 @@ pub const Logger = struct {
             if (self.log_file) |file| {
                 const prefix = level.toString();
                 var file_buffer: [4096]u8 = undefined;
-                var file_writer = file.writer(&file_buffer);
+                var file_writer = file.writer(std.Options.debug_io, &file_buffer);
                 var file_io = &file_writer.interface;
                 file_io.print("{s} ]: {s}\n", .{ prefix, message }) catch {};
                 file_io.flush() catch {};
@@ -206,11 +205,11 @@ pub const Logger = struct {
         // Append to rolling log
         if (self.rolling_enabled) {
             const prefix = level.toString();
-            var rolling_buffer = std.ArrayList(u8){};
-            defer rolling_buffer.deinit(self.allocator);
+            var rolling_buffer: std.Io.Writer.Allocating = .init(self.allocator);
+            defer rolling_buffer.deinit();
 
-            rolling_buffer.writer(self.allocator).print("{s} ]: {s}", .{ prefix, message }) catch return;
-            self.appendToRolling(rolling_buffer.items) catch {};
+            rolling_buffer.writer.print("{s} ]: {s}", .{ prefix, message }) catch return;
+            self.appendToRolling(rolling_buffer.writer.buffered()) catch {};
         }
     }
 
@@ -231,14 +230,14 @@ pub const Logger = struct {
 
     /// Write message to stdout with optional coloring
     fn writeToStdout(self: *Self, level: LogLevel, message: []const u8) !void {
-        const stdout_file = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
+        const stdout_file = std.Io.File.stdout();
         var buffer: [4096]u8 = undefined;
-        var stdout_writer = stdout_file.writer(&buffer);
+        var stdout_writer = stdout_file.writer(std.Options.debug_io, &buffer);
         var stdout = &stdout_writer.interface;
 
         // Print timestamp first if enabled
         if (self.time_enabled) {
-            const timestamp_ms = std.time.milliTimestamp();
+            const timestamp_ms = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds();
             const total_seconds = @divFloor(timestamp_ms, 1000);
             const millis: u64 = @intCast(@rem(timestamp_ms, 1000));
             const seconds_in_day = @rem(total_seconds, 86400);
@@ -367,13 +366,13 @@ pub const LoggerConnection = struct {
 
         if (self.name) |name| {
             // Build the full message with the name prefix
-            var buffer = std.ArrayList(u8){};
-            defer buffer.deinit(self.allocator);
+            var buffer: std.Io.Writer.Allocating = .init(self.allocator);
+            defer buffer.deinit();
 
-            buffer.writer(self.allocator).print("from {s} ", .{name}) catch return;
-            buffer.writer(self.allocator).print(fmt, args) catch return;
+            buffer.writer.print("from {s} ", .{name}) catch return;
+            buffer.writer.print(fmt, args) catch return;
 
-            self.logger.log(level, "{s}", .{buffer.items});
+            self.logger.log(level, "{s}", .{buffer.writer.buffered()});
         } else {
             self.logger.log(level, fmt, args);
         }
@@ -611,7 +610,7 @@ test "Logger - file output" {
     try logger.setOutputFile(null);
 
     // Read and verify
-    const file_content = std.fs.cwd().readFileAlloc(testing.allocator, "/tmp/test_logger.log", 1024) catch |err| {
+    const file_content = std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, "/tmp/test_logger.log", testing.allocator, .limited(1024)) catch |err| {
         std.debug.print("Failed to read log file: {}\n", .{err});
         return err;
     };
@@ -620,7 +619,7 @@ test "Logger - file output" {
     try testing.expect(std.mem.indexOf(u8, file_content, "DEBUG ]: Hi file!") != null);
 
     // Clean up
-    std.fs.cwd().deleteFile("/tmp/test_logger.log") catch {};
+    std.Io.Dir.cwd().deleteFile(std.Options.debug_io, "/tmp/test_logger.log") catch {};
 }
 
 test "Logger - time and color configuration" {

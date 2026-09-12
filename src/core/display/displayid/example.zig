@@ -6,10 +6,8 @@
 const std = @import("std");
 const displayid = @import("root.zig");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
     // Example: Create a DisplayID v2.0 section with multiple data blocks
     var data = try allocator.alloc(u8, 256);
@@ -140,43 +138,43 @@ pub fn main() !void {
     // Type I timing example (1920x1080@60Hz)
     {
         var timing_data: [20]u8 = undefined;
-        
+
         // Pixel clock: 148.5 MHz, raw = 14849
         timing_data[0] = 0x01;
         timing_data[1] = 0x3A;
         timing_data[2] = 0x00;
-        
+
         // Options: preferred + 16:9 aspect
         timing_data[3] = 0x84;
-        
+
         // H active: 1920 (stored as 1919)
         timing_data[4] = 0x7F;
         timing_data[5] = 0x07;
-        
+
         // H blank: 280 (stored as 279)
         timing_data[6] = 0x17;
         timing_data[7] = 0x01;
-        
+
         // H sync offset: 88 (stored as 87), positive polarity
         timing_data[8] = 0x57;
         timing_data[9] = 0x80;
-        
+
         // H sync width: 44 (stored as 43)
         timing_data[10] = 0x2B;
         timing_data[11] = 0x00;
-        
+
         // V active: 1080 (stored as 1079)
         timing_data[12] = 0x37;
         timing_data[13] = 0x04;
-        
+
         // V blank: 45 (stored as 44)
         timing_data[14] = 0x2C;
         timing_data[15] = 0x00;
-        
+
         // V sync offset: 4 (stored as 3), positive polarity
         timing_data[16] = 0x03;
         timing_data[17] = 0x80;
-        
+
         // V sync width: 5 (stored as 4)
         timing_data[18] = 0x04;
         timing_data[19] = 0x00;

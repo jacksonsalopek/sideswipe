@@ -146,7 +146,7 @@ test "Matrix3 - determinant" {
         .{ 0, 1, 4 },
         .{ 5, 6, 0 },
     });
-    
+
     const det = m.determinant();
     try testing.expectEqual(@as(f32, 1), det);
 }
@@ -157,10 +157,10 @@ test "Matrix3 - inversion" {
         .{ 0, 1, 4 },
         .{ 5, 6, 0 },
     });
-    
+
     const inv = m.invert();
     const result = m.mul(inv);
-    
+
     // Result should be approximately identity
     try testing.expectApproxEqAbs(@as(f32, 1), result.m[0][0], 0.0001);
     try testing.expectApproxEqAbs(@as(f32, 1), result.m[1][1], 0.0001);
@@ -174,10 +174,10 @@ test "Matrix3 - multiplication" {
         .{ 4, 5, 6 },
         .{ 7, 8, 9 },
     });
-    
+
     const m2 = Mat3f32.identity;
     const result = m1.mul(m2);
-    
+
     // M * I = M
     try testing.expectEqual(m1.m[0][0], result.m[0][0]);
     try testing.expectEqual(m1.m[1][1], result.m[1][1]);
@@ -190,9 +190,9 @@ test "Matrix3 - transpose" {
         .{ 4, 5, 6 },
         .{ 7, 8, 9 },
     });
-    
+
     const t = m.transpose();
-    
+
     try testing.expectEqual(@as(f32, 1), t.m[0][0]);
     try testing.expectEqual(@as(f32, 4), t.m[0][1]);
     try testing.expectEqual(@as(f32, 7), t.m[0][2]);
@@ -205,10 +205,10 @@ test "Matrix3 - vector multiplication" {
         .{ 0, 3, 0 },
         .{ 0, 0, 1 },
     });
-    
+
     const vec = [3]f32{ 1, 1, 1 };
     const result = m.mulVec3(vec);
-    
+
     try testing.expectEqual(@as(f32, 2), result[0]);
     try testing.expectEqual(@as(f32, 3), result[1]);
     try testing.expectEqual(@as(f32, 1), result[2]);
@@ -218,7 +218,7 @@ test "Matrix3 - flat array conversion" {
     const flat = [9]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
     const m = Mat3f32.initFlat(flat);
     const back = m.toFlat();
-    
+
     try testing.expectEqualSlices(f32, &flat, &back);
 }
 
@@ -228,10 +228,10 @@ test "Matrix3(f64) - high precision color operations" {
         .{ 0.2126729, 0.7151522, 0.0721750 },
         .{ 0.0193339, 0.1191920, 0.9503041 },
     });
-    
+
     const vec = [3]f64{ 1.0, 1.0, 1.0 };
     const result = m.mulVec3(vec);
-    
+
     // D65 white point conversion
     try testing.expectApproxEqAbs(@as(f64, 0.9505), result[0], 0.001);
     try testing.expectApproxEqAbs(@as(f64, 1.0), result[1], 0.001);

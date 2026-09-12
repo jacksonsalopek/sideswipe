@@ -105,57 +105,57 @@ pub const EdidBaseBlock = extern struct {
 
     /// Manufacturer ID (2 bytes, big-endian packed)
     manufacturer_id: ManufacturerId,
-    
+
     /// Product code (2 bytes, little-endian)
     product_code: u16,
-    
+
     /// Serial number (4 bytes, little-endian)
     serial_number: u32,
-    
+
     /// Week of manufacture (0 = not specified, 1-54 = week, 0xFF = model year in year field)
     manufacture_week: u8,
-    
+
     /// Year of manufacture (year = 1990 + this value)
     manufacture_year: u8,
-    
+
     /// EDID version (should be 1)
     edid_version: u8,
-    
+
     /// EDID revision (3 or 4)
     edid_revision: u8,
-    
+
     /// Video input definition
     video_input: VideoInputRaw,
-    
+
     /// Maximum horizontal image size in cm (0 if not specified)
     max_h_image_size: u8,
-    
+
     /// Maximum vertical image size in cm (0 if not specified)
     max_v_image_size: u8,
-    
+
     /// Display gamma = (gamma_value + 100) / 100 (0xFF = defined in extension)
     display_gamma: u8,
-    
+
     /// Feature support
     feature_support: FeatureSupport,
-    
+
     /// Color characteristics (10 bytes, 0x19-0x22)
     /// Bytes 0-1: Low bits (2 bits each for red/green/blue/white x/y)
     /// Bytes 2-9: High bits (8 bits each)
     color_characteristics: [10]u8,
-    
+
     /// Established timings (3 bytes, bitmap)
     established_timings: [3]u8,
-    
+
     /// Standard timing identification (16 bytes = 8 x 2-byte descriptors)
     standard_timings: [8]StandardTiming,
-    
+
     /// Detailed timing descriptors / display descriptors (72 bytes = 4 x 18-byte blocks)
     detailed_timing_descriptors: [4][18]u8,
-    
+
     /// Number of extensions to follow
     extension_flag: u8,
-    
+
     /// Checksum (sum of all 128 bytes should be 0)
     checksum: u8,
 

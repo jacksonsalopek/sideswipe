@@ -18,40 +18,34 @@ pub fn validateChecksumSIMD(data: *const [128]u8) bool {
             .x86_64, .aarch64 => true,
             else => false,
         };
-        
+
         if (!has_simd) {
             // Fallback to scalar implementation
             return validateChecksumScalar(data);
         }
     }
-    
+
     // Use 128-bit vectors (16 bytes at a time)
     const Vec16u8 = @Vector(16, u8);
-    
+
     // Initialize accumulator vector to zeros
     var acc: Vec16u8 = @splat(0);
-    
+
     // Process 128 bytes in chunks of 16
     // 128 / 16 = 8 iterations
     comptime var i: usize = 0;
     inline while (i < 8) : (i += 1) {
         const offset = i * 16;
-        
+
         // Load 16 bytes into a vector
         const chunk: Vec16u8 = data[offset..][0..16].*;
-        
+
         // Vector addition with wrapping (automatic SIMD add)
         acc +%= chunk;
     }
-    
+
     // Horizontal sum: reduce 16 bytes to 1
-    var sum: u8 = 0;
-    var j: usize = 0;
-    while (j < 16) : (j += 1) {
-        sum +%= acc[j];
-    }
-    
-    return sum == 0;
+    return @reduce(.Add, acc) == 0;
 }
 
 /// Scalar fallback for checksum validation
@@ -68,26 +62,26 @@ pub fn validateChecksumScalar(data: *const [128]u8) bool {
 /// Compares 8 bytes at once using vector comparison.
 pub fn validateHeaderSIMD(header: *const [8]u8) bool {
     const expected = [_]u8{ 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00 };
-    
+
     comptime {
         const has_simd = switch (builtin.cpu.arch) {
             .x86_64, .aarch64 => true,
             else => false,
         };
-        
+
         if (!has_simd) {
             return std.mem.eql(u8, header, &expected);
         }
     }
-    
+
     // Load both as vectors
     const Vec8u8 = @Vector(8, u8);
     const header_vec: Vec8u8 = header.*;
     const expected_vec: Vec8u8 = expected;
-    
+
     // Vector equality comparison
     const cmp = header_vec == expected_vec;
-    
+
     // Check if all lanes are true
     return @reduce(.And, cmp);
 }
@@ -98,9 +92,9 @@ pub fn validateHeaderSIMD(header: *const [8]u8) bool {
 pub fn memEqualSIMD(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
     if (a.len == 0) return true;
-    
+
     const len = a.len;
-    
+
     // Use largest vector size that fits in the data
     if (len >= 32 and builtin.cpu.arch == .x86_64) {
         return memEqualSIMD32(a, b);
@@ -114,64 +108,64 @@ pub fn memEqualSIMD(a: []const u8, b: []const u8) bool {
 /// 128-bit SIMD comparison (16 bytes at a time)
 fn memEqualSIMD16(a: []const u8, b: []const u8) bool {
     std.debug.assert(a.len == b.len);
-    
+
     const Vec16u8 = @Vector(16, u8);
     const len = a.len;
     var i: usize = 0;
-    
+
     // Process 16-byte chunks
     while (i + 16 <= len) : (i += 16) {
         const va: Vec16u8 = a[i..][0..16].*;
         const vb: Vec16u8 = b[i..][0..16].*;
-        
+
         if (!@reduce(.And, va == vb)) {
             return false;
         }
     }
-    
+
     // Handle remaining bytes
     while (i < len) : (i += 1) {
         if (a[i] != b[i]) return false;
     }
-    
+
     return true;
 }
 
 /// 256-bit SIMD comparison (32 bytes at a time) - AVX2
 fn memEqualSIMD32(a: []const u8, b: []const u8) bool {
     std.debug.assert(a.len == b.len);
-    
+
     const Vec32u8 = @Vector(32, u8);
     const len = a.len;
     var i: usize = 0;
-    
+
     // Process 32-byte chunks
     while (i + 32 <= len) : (i += 32) {
         const va: Vec32u8 = a[i..][0..32].*;
         const vb: Vec32u8 = b[i..][0..32].*;
-        
+
         if (!@reduce(.And, va == vb)) {
             return false;
         }
     }
-    
+
     // Handle remaining bytes with 16-byte vectors
     if (i + 16 <= len) {
         const Vec16u8 = @Vector(16, u8);
         const va: Vec16u8 = a[i..][0..16].*;
         const vb: Vec16u8 = b[i..][0..16].*;
-        
+
         if (!@reduce(.And, va == vb)) {
             return false;
         }
         i += 16;
     }
-    
+
     // Handle tail
     while (i < len) : (i += 1) {
         if (a[i] != b[i]) return false;
     }
-    
+
     return true;
 }
 
@@ -189,30 +183,25 @@ pub fn findByteSIMD(haystack: []const u8, needle: u8) ?usize {
 fn findByteSIMD16(haystack: []const u8, needle: u8) ?usize {
     const Vec16u8 = @Vector(16, u8);
     const needle_vec: Vec16u8 = @splat(needle);
-    
+
     var i: usize = 0;
     const len = haystack.len;
-    
+
     // Process 16-byte chunks
     while (i + 16 <= len) : (i += 16) {
         const chunk: Vec16u8 = haystack[i..][0..16].*;
         const matches = chunk == needle_vec;
-        
-        // Check if any lane matched
-        if (@reduce(.Or, matches)) {
-            // Find which lane matched
-            var j: usize = 0;
-            while (j < 16) : (j += 1) {
-                if (matches[j]) return i + j;
-            }
-        }
+
+        // Find the first matching lane from the comparison mask.
+        const match_mask: u16 = @bitCast(matches);
+        if (match_mask != 0) return i + @ctz(match_mask);
     }
-    
+
     // Handle tail
     while (i < len) : (i += 1) {
         if (haystack[i] == needle) return i;
     }
-    
+
     return null;
 }
 
@@ -220,29 +209,29 @@ fn findByteSIMD16(haystack: []const u8, needle: u8) ?usize {
 
 fn generateTestData() [128]u8 {
     var data = [_]u8{0} ** 128;
-    
+
     // Fill with some pattern
     for (&data, 0..) |*byte, i| {
         byte.* = @intCast(i % 256);
     }
-    
+
     // Calculate checksum
     var sum: u8 = 0;
     for (data[0..127]) |byte| {
         sum +%= byte;
     }
     data[127] = 0 -% sum;
-    
+
     return data;
 }
 
 test "SIMD checksum validation" {
     const data = generateTestData();
-    
+
     // Both should produce same result
     const scalar_result = validateChecksumScalar(&data);
     const simd_result = validateChecksumSIMD(&data);
-    
+
     try testing.expect(scalar_result);
     try testing.expect(simd_result);
     try testing.expectEqual(scalar_result, simd_result);
@@ -251,10 +240,10 @@ test "SIMD checksum validation" {
 test "SIMD checksum validation - invalid" {
     var data = generateTestData();
     data[127] = 0xFF; // Break checksum
-    
+
     const scalar_result = validateChecksumScalar(&data);
     const simd_result = validateChecksumSIMD(&data);
-    
+
     try testing.expect(!scalar_result);
     try testing.expect(!simd_result);
     try testing.expectEqual(scalar_result, simd_result);
@@ -263,7 +252,7 @@ test "SIMD checksum validation - invalid" {
 test "SIMD header validation" {
     const valid_header = [_]u8{ 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00 };
     try testing.expect(validateHeaderSIMD(&valid_header));
-    
+
     const invalid_header = [_]u8{ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00 };
     try testing.expect(!validateHeaderSIMD(&invalid_header));
 }
@@ -272,17 +261,17 @@ test "SIMD memory comparison" {
     const a = "Hello, World! This is a test of SIMD memory comparison!";
     const b = "Hello, World! This is a test of SIMD memory comparison!";
     const c = "Hello, World! This is a test of SIMD memory comparison?";
-    
+
     try testing.expect(memEqualSIMD(a, b));
     try testing.expect(!memEqualSIMD(a, c));
 }
 
 test "SIMD byte search" {
     const haystack = "The quick brown fox jumps over the lazy dog";
-    
+
     const idx = findByteSIMD(haystack, 'q');
     try testing.expectEqual(@as(?usize, 4), idx);
-    
+
     const no_match = findByteSIMD(haystack, 'X');
     try testing.expectEqual(@as(?usize, null), no_match);
 }
@@ -290,25 +279,25 @@ test "SIMD byte search" {
 // Benchmark helpers
 
 pub fn benchmarkChecksumScalar(data: *const [128]u8, iterations: usize) u64 {
-    const start = std.time.nanoTimestamp();
-    
+    const start = std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds();
+
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
         _ = validateChecksumScalar(data);
     }
-    
-    const end = std.time.nanoTimestamp();
+
+    const end = std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds();
     return @intCast(end - start);
 }
 
 pub fn benchmarkChecksumSIMD(data: *const [128]u8, iterations: usize) u64 {
-    const start = std.time.nanoTimestamp();
-    
+    const start = std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds();
+
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
         _ = validateChecksumSIMD(data);
     }
-    
-    const end = std.time.nanoTimestamp();
+
+    const end = std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds();
     return @intCast(end - start);
 }

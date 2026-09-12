@@ -52,6 +52,7 @@ pub const EventType = enum(c_int) {
     gesture_hold_begin = c.LIBINPUT_EVENT_GESTURE_HOLD_BEGIN,
     gesture_hold_end = c.LIBINPUT_EVENT_GESTURE_HOLD_END,
     switch_toggle = c.LIBINPUT_EVENT_SWITCH_TOGGLE,
+    _,
 };
 
 pub const DeviceCapability = enum(c_int) {
@@ -95,3 +96,55 @@ pub const Switch = enum(c_int) {
     lid = c.LIBINPUT_SWITCH_LID,
     tablet_mode = c.LIBINPUT_SWITCH_TABLET_MODE,
 };
+
+pub const TabletToolProximityState = enum(c_int) {
+    out = c.LIBINPUT_TABLET_TOOL_PROXIMITY_STATE_OUT,
+    in = c.LIBINPUT_TABLET_TOOL_PROXIMITY_STATE_IN,
+};
+
+pub const TabletToolTipState = enum(c_int) {
+    up = c.LIBINPUT_TABLET_TOOL_TIP_UP,
+    down = c.LIBINPUT_TABLET_TOOL_TIP_DOWN,
+};
+
+pub const TabletPadRingSource = enum(c_int) {
+    unknown = c.LIBINPUT_TABLET_PAD_RING_SOURCE_UNKNOWN,
+    finger = c.LIBINPUT_TABLET_PAD_RING_SOURCE_FINGER,
+};
+
+pub const TabletPadStripSource = enum(c_int) {
+    unknown = c.LIBINPUT_TABLET_PAD_STRIP_SOURCE_UNKNOWN,
+    finger = c.LIBINPUT_TABLET_PAD_STRIP_SOURCE_FINGER,
+};
+
+/// Queries a single device capability bit.
+pub fn hasCapability(device: *Device, capability: DeviceCapability) bool {
+    const raw: c.enum_libinput_device_capability = @intCast(@intFromEnum(capability));
+    return c.libinput_device_has_capability(device, raw) != 0;
+}
+
+const testing = std.testing;
+
+test "hasCapability - signature accepts all capabilities" {
+    // Compile-time check that every DeviceCapability maps to a libinput constant.
+    const caps = [_]DeviceCapability{ .keyboard, .pointer, .touch, .tablet_tool, .tablet_pad, .gesture, .switch_device };
+    for (caps) |cap| {
+        _ = @intFromEnum(cap);
+    }
+}
+
+test "tablet enums - distinct states" {
+    try testing.expect(TabletToolProximityState.out != TabletToolProximityState.in);
+    try testing.expect(TabletToolTipState.up != TabletToolTipState.down);
+    try testing.expect(TabletPadRingSource.unknown != TabletPadRingSource.finger);
+    try testing.expect(TabletPadStripSource.unknown != TabletPadStripSource.finger);
+}
+
+test "unknown event tags remain representable" {
+    const event_type: EventType = @enumFromInt(0x7fff);
+    const handled = switch (event_type) {
+        .none => true,
+        else => false,
+    };
+    try testing.expect(!handled);
+}

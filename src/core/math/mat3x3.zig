@@ -6,7 +6,7 @@ const Transform = @import("transform.zig").Direction;
 
 pub const Mat3x3 = struct {
     matrix: [9]f32,
-    
+
     /// Alias for backwards compatibility
     pub const Type = Mat3x3;
 
@@ -166,7 +166,7 @@ pub const Mat3x3 = struct {
     pub fn format(
         self: Mat3x3,
         comptime fmt: string,
-        options: std.fmt.FormatOptions,
+        options: std.fmt.Options,
         writer: anytype,
     ) !void {
         _ = fmt;
@@ -256,9 +256,9 @@ test "Mat3x3.format" {
     var buf: [200]u8 = undefined;
 
     // Test the custom format function directly
-    var fbs = std.io.fixedBufferStream(&buf);
-    try mat.format("", .{}, fbs.writer());
-    const result = fbs.getWritten();
+    var writer: std.Io.Writer = .fixed(&buf);
+    try mat.format("", .{}, &writer);
+    const result = writer.buffered();
 
     // Check if the custom format function produced the expected output
     try std.testing.expect(result.len > 0);
@@ -375,15 +375,15 @@ test "Mat3x3.format - with non-finite values" {
     var buf: [300]u8 = undefined;
 
     // Format with NaN should not crash
-    var fbs1 = std.io.fixedBufferStream(&buf);
-    try mat_nan.format("", .{}, fbs1.writer());
-    const result1 = fbs1.getWritten();
+    var writer1: std.Io.Writer = .fixed(&buf);
+    try mat_nan.format("", .{}, &writer1);
+    const result1 = writer1.buffered();
     try std.testing.expect(result1.len > 0);
 
     // Format with Inf should not crash
-    var fbs2 = std.io.fixedBufferStream(&buf);
-    try mat_inf.format("", .{}, fbs2.writer());
-    const result2 = fbs2.getWritten();
+    var writer2: std.Io.Writer = .fixed(&buf);
+    try mat_inf.format("", .{}, &writer2);
+    const result2 = writer2.buffered();
     try std.testing.expect(result2.len > 0);
 }
 

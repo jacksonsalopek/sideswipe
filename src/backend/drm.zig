@@ -40,7 +40,7 @@ pub const Property = struct {
 
         return .{
             .id = prop_id,
-            .name = try alloc.dupe(u8, std.mem.sliceTo(&prop.*.name, 0)),
+            .name = try alloc.dupe(u8, std.mem.sliceTo(prop.*.name[0..], 0)),
             .allocator = alloc,
         };
     }
@@ -94,7 +94,7 @@ pub const Plane = struct {
             .type = .overlay,
             .initial_fb_id = plane_ptr.*.fb_id,
             .possible_crtcs = plane_ptr.*.possible_crtcs,
-            .formats = std.ArrayList(u32){},
+            .formats = std.ArrayList(u32).empty,
             .allocator = alloc,
         };
 
@@ -119,7 +119,7 @@ pub const Plane = struct {
             const prop = c.drmModeGetProperty(fd, props.*.props[j]) orelse continue;
             defer c.drmModeFreeProperty(prop);
 
-            const prop_name = std.mem.sliceTo(&prop.*.name, 0);
+            const prop_name = std.mem.sliceTo(prop.*.name[0..], 0);
             const prop_id = props.*.props[j];
             const prop_value = props.*.prop_values[j];
 
@@ -204,7 +204,7 @@ pub const CRTC = struct {
                 const prop = c.drmModeGetProperty(fd, p.*.props[i]) orelse continue;
                 defer c.drmModeFreeProperty(prop);
 
-                const prop_name = std.mem.sliceTo(&prop.*.name, 0);
+                const prop_name = std.mem.sliceTo(prop.*.name[0..], 0);
                 if (std.mem.eql(u8, prop_name, "MODE_ID")) {
                     self.props.mode_id = p.*.props[i];
                 } else if (std.mem.eql(u8, prop_name, "ACTIVE")) {
@@ -290,7 +290,7 @@ pub const Connector = struct {
                 c.DRM_MODE_DISCONNECTED => .disconnected,
                 else => .unknown,
             },
-            .modes = std.ArrayList(output.Mode){},
+            .modes = std.ArrayList(output.Mode).empty,
             .allocator = alloc,
             .be = be,
         };
@@ -318,7 +318,7 @@ pub const Connector = struct {
                 const prop = c.drmModeGetProperty(be.drm_fd, p.*.props[j]) orelse continue;
                 defer c.drmModeFreeProperty(prop);
 
-                const prop_name = std.mem.sliceTo(&prop.*.name, 0);
+                const prop_name = std.mem.sliceTo(prop.*.name[0..], 0);
                 if (std.mem.eql(u8, prop_name, "CRTC_ID")) {
                     self.props.crtc_id = p.*.props[j];
                 } else if (std.mem.eql(u8, prop_name, "DPMS")) {
@@ -561,7 +561,7 @@ pub const Backend = struct {
 
     /// Attempt to create DRM backends for all available GPUs
     pub fn attempt(alloc: std.mem.Allocator, backend_ptr: ?*anyopaque) !std.ArrayList(*Self) {
-        var backends = std.ArrayList(*Self){};
+        var backends = std.ArrayList(*Self).empty;
         errdefer {
             for (backends.items) |b| {
                 b.deinit();
@@ -601,18 +601,18 @@ pub const Backend = struct {
         errdefer alloc.destroy(self);
 
         // Extract GPU name from path (e.g., "card0" from "/dev/dri/card0")
-        const name = std.fs.path.basename(path);
+        const name = std.Io.Dir.path.basename(path);
 
         self.* = .{
             .allocator = alloc,
             .gpu_name = try alloc.dupe(u8, name),
             .gpu_path = try alloc.dupe(u8, path),
             .backend_ptr = be,
-            .connectors = std.ArrayList(*Connector){},
-            .crtcs = std.ArrayList(*CRTC){},
-            .planes = std.ArrayList(*Plane){},
-            .primary_formats = std.ArrayList(misc.DRMFormat){},
-            .cursor_formats = std.ArrayList(misc.DRMFormat){},
+            .connectors = std.ArrayList(*Connector).empty,
+            .crtcs = std.ArrayList(*CRTC).empty,
+            .planes = std.ArrayList(*Plane).empty,
+            .primary_formats = std.ArrayList(misc.DRMFormat).empty,
+            .cursor_formats = std.ArrayList(misc.DRMFormat).empty,
         };
 
         _ = primary; // For multi-GPU support later
@@ -648,10 +648,10 @@ pub const Backend = struct {
         self.cursor_formats.deinit(self.allocator);
 
         if (self.drm_fd >= 0) {
-            std.posix.close(self.drm_fd);
+            core.unix.close(self.drm_fd);
         }
         if (self.render_node_fd >= 0) {
-            std.posix.close(self.render_node_fd);
+            core.unix.close(self.render_node_fd);
         }
 
         self.allocator.free(self.gpu_name);
@@ -684,7 +684,7 @@ pub const Backend = struct {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
         // Open DRM device
-        self.drm_fd = std.posix.open(
+        self.drm_fd = core.unix.open(
             self.gpu_path,
             .{ .ACCMODE = .RDWR, .CLOEXEC = true },
             0,
@@ -744,7 +744,7 @@ pub const Backend = struct {
 
     fn onReadyImpl(ptr: *anyopaque) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        
+
         // Scan and initialize connected outputs
         self.scanOutputs() catch |err| {
             if (self.backend_ptr) |_| {
@@ -753,20 +753,20 @@ pub const Backend = struct {
             }
         };
     }
-    
+
     /// Scan connected outputs and parse EDID information
     fn scanOutputs(self: *Self) !void {
         const edid_parser = @import("core.display").edid;
-        
+
         for (self.connectors.items) |conn| {
             // Only process connected displays
             if (conn.status != .connected) continue;
-            
+
             // Log basic connector info
             var msg_buf: [256]u8 = undefined;
             const msg = std.fmt.bufPrint(&msg_buf, "Found connected output: {s}", .{conn.name}) catch "Output found";
             cli.log.debug("{s}", .{msg});
-            
+
             // Try to get EDID data
             if (conn.props.edid != 0) {
                 const edid_data = self.getConnectorEDID(conn) catch {
@@ -774,54 +774,43 @@ pub const Backend = struct {
                     continue;
                 };
                 defer self.allocator.free(edid_data);
-                
+
                 // Parse EDID
                 const parsed = edid_parser.fast.parse(edid_data) catch {
                     cli.log.warn("Failed to parse EDID data", .{});
                     continue;
                 };
-                
+
                 // Log display information
                 const manufacturer = parsed.getManufacturerName() orelse "Unknown";
                 const serial = parsed.getSerialNumber();
-                
-                const info_msg = std.fmt.bufPrint(&msg_buf, 
-                    "Display: {s} (Serial: {d})", 
-                    .{manufacturer, serial}
-                ) catch "Display info";
+
+                const info_msg = std.fmt.bufPrint(&msg_buf, "Display: {s} (Serial: {d})", .{ manufacturer, serial }) catch "Display info";
                 cli.log.debug("{s}", .{info_msg});
-                
+
                 // Log physical size if available
                 const width_cm = parsed.getScreenWidthCm();
                 const height_cm = parsed.getScreenHeightCm();
                 if (width_cm > 0 and height_cm > 0) {
-                    const size_msg = std.fmt.bufPrint(&msg_buf,
-                        "Physical size: {d}x{d} cm",
-                        .{width_cm, height_cm}
-                    ) catch "Physical size";
+                    const size_msg = std.fmt.bufPrint(&msg_buf, "Physical size: {d}x{d} cm", .{ width_cm, height_cm }) catch "Physical size";
                     cli.log.debug("{s}", .{size_msg});
                 }
+                self.logHdrCaps(conn.name, edid_data);
             }
-            
+
             // Log available modes
             if (conn.modes.items.len > 0) {
-                const mode_msg = std.fmt.bufPrint(&msg_buf,
-                    "Available modes: {d}",
-                    .{conn.modes.items.len}
-                ) catch "Modes available";
+                const mode_msg = std.fmt.bufPrint(&msg_buf, "Available modes: {d}", .{conn.modes.items.len}) catch "Modes available";
                 cli.log.debug("{s}", .{mode_msg});
-                
+
                 // Log preferred mode if any
                 for (conn.modes.items) |mode| {
                     if (mode.preferred) {
-                        const pref_msg = std.fmt.bufPrint(&msg_buf,
-                            "Preferred mode: {d}x{d} @ {d}Hz",
-                            .{
-                                @as(u32, @intFromFloat(mode.pixel_size.getX())),
-                                @as(u32, @intFromFloat(mode.pixel_size.getY())),
-                                mode.refresh_rate / 1000,
-                            }
-                        ) catch "Preferred mode";
+                        const pref_msg = std.fmt.bufPrint(&msg_buf, "Preferred mode: {d}x{d} @ {d}Hz", .{
+                            @as(u32, @intFromFloat(mode.pixel_size.getX())),
+                            @as(u32, @intFromFloat(mode.pixel_size.getY())),
+                            mode.refresh_rate / 1000,
+                        }) catch "Preferred mode";
                         cli.log.debug("{s}", .{pref_msg});
                         break;
                     }
@@ -829,16 +818,43 @@ pub const Backend = struct {
             }
         }
     }
-    
+
+    fn logHdrCaps(self: *Self, connector_name: []const u8, edid_data: []const u8) void {
+        _ = self;
+        const cta = @import("core.display").cta;
+        var offset: usize = 128;
+        while (offset + 128 <= edid_data.len) : (offset += 128) {
+            if (edid_data[offset] != 0x02) continue;
+            const bytes: *align(1) const [128]u8 = @ptrCast(edid_data[offset .. offset + 128]);
+            const extension = cta.CtaExtensionBlock.fromBytes(bytes);
+            const hdr = extension.getHdrStaticMetadata() orelse continue;
+            const colorimetry = extension.getColorimetryBlock();
+            cli.log.info(
+                "HDR caps {s}: HDR10={} HLG={} BT.2020={} max={d:.1} avg={d:.1} min={d:.4} cd/m2",
+                .{
+                    connector_name,
+                    hdr.supportsHdr10(),
+                    hdr.supportsHlg(),
+                    if (colorimetry) |value| value.supportsBt2020() else false,
+                    hdr.max_luminance_cdm2,
+                    hdr.max_frame_avg_luminance_cdm2,
+                    hdr.min_luminance_cdm2,
+                },
+            );
+            return;
+        }
+        cli.log.info("HDR caps {s}: SDR-only (no CTA HDR static metadata)", .{connector_name});
+    }
+
     /// Read EDID blob from connector property
     fn getConnectorEDID(self: *Self, conn: *Connector) ![]u8 {
         if (conn.props.edid == 0) return error.NoEDIDProperty;
-        
+
         // Get the property blob
         const props = c.drmModeObjectGetProperties(self.drm_fd, conn.id, c.DRM_MODE_OBJECT_CONNECTOR);
         if (props == null) return error.GetPropertiesFailed;
         defer c.drmModeFreeObjectProperties(props.?);
-        
+
         // Find the EDID property value (blob ID)
         var blob_id: u64 = 0;
         var i: u32 = 0;
@@ -848,24 +864,24 @@ pub const Backend = struct {
                 break;
             }
         }
-        
+
         if (blob_id == 0) return error.NoEDIDBlob;
-        
+
         // Get the blob data
         const blob = c.drmModeGetPropertyBlob(self.drm_fd, @intCast(blob_id));
         if (blob == null) return error.GetBlobFailed;
         defer c.drmModeFreePropertyBlob(blob.?);
-        
+
         const edid_len = blob.?.*.length;
         if (edid_len == 0 or edid_len > 8192) return error.InvalidEDIDSize;
-        
+
         // Copy EDID data
         const edid_data = try self.allocator.alloc(u8, edid_len);
         errdefer self.allocator.free(edid_data);
-        
+
         const src_ptr: [*]const u8 = @ptrCast(blob.?.*.data);
         @memcpy(edid_data, src_ptr[0..edid_len]);
-        
+
         return edid_data;
     }
 
@@ -931,21 +947,21 @@ pub const Backend = struct {
             }
         }
     }
-    
+
     /// Query plane formats and modifiers
     fn queryPlaneFormats(self: *Self, plane: *Plane, format_list: *std.ArrayList(misc.DRMFormat)) !void {
         // Try to get format modifiers if supported
         const plane_res = c.drmModeGetPlane(self.drm_fd, plane.id);
         if (plane_res == null) return;
         defer c.drmModeFreePlane(plane_res.?);
-        
+
         var i: u32 = 0;
         while (i < plane_res.?.*.count_formats) : (i += 1) {
             const format = plane_res.?.*.formats[i];
-            
+
             var drm_fmt = misc.DRMFormat.init(self.allocator);
             drm_fmt.drm_format = format;
-            
+
             // Try to get modifiers for this format if kernel supports it
             if (self.drm_props.supports_add_fb2_modifiers) {
                 const modifiers = self.getPlaneFormatModifiers(plane.id, format) catch null;
@@ -956,43 +972,43 @@ pub const Backend = struct {
                     }
                 }
             }
-            
+
             // If no modifiers found, add linear modifier as fallback
             if (drm_fmt.modifiers.items.len == 0) {
                 try drm_fmt.addModifier(self.allocator, 0); // DRM_FORMAT_MOD_LINEAR
             }
-            
+
             try format_list.append(self.allocator, drm_fmt);
         }
     }
-    
+
     /// Get format modifiers for a specific plane and format
     fn getPlaneFormatModifiers(self: *Self, plane_id: u32, format: u32) ![]u64 {
         // Get plane properties to find IN_FORMATS blob
         const props = c.drmModeObjectGetProperties(self.drm_fd, plane_id, c.DRM_MODE_OBJECT_PLANE);
         if (props == null) return error.GetPropertiesFailed;
         defer c.drmModeFreeObjectProperties(props.?);
-        
+
         var in_formats_blob_id: u64 = 0;
         var i: u32 = 0;
         while (i < props.?.*.count_props) : (i += 1) {
             const prop = c.drmModeGetProperty(self.drm_fd, props.?.*.props[i]) orelse continue;
             defer c.drmModeFreeProperty(prop);
-            
-            const prop_name = std.mem.sliceTo(&prop.*.name, 0);
+
+            const prop_name = std.mem.sliceTo(prop.*.name[0..], 0);
             if (std.mem.eql(u8, prop_name, "IN_FORMATS")) {
                 in_formats_blob_id = props.?.*.prop_values[i];
                 break;
             }
         }
-        
+
         if (in_formats_blob_id == 0) return error.NoInFormatsBlob;
-        
+
         // Get the blob data
         const blob = c.drmModeGetPropertyBlob(self.drm_fd, @intCast(in_formats_blob_id));
         if (blob == null) return error.GetBlobFailed;
         defer c.drmModeFreePropertyBlob(blob.?);
-        
+
         // Parse IN_FORMATS blob to extract modifiers for this format
         // This is a simplified version - proper parsing would need the drm_format_modifier_blob structure
         // For now, return empty array and let caller use linear modifier
@@ -1015,7 +1031,7 @@ fn scanGPUs(alloc: std.mem.Allocator, sess: *session.Type) ![]const *session.Dev
         return error.UdevScanFailed;
     }
 
-    var devices = std.ArrayList(*session.Device){};
+    var devices = std.ArrayList(*session.Device).empty;
     errdefer {
         for (devices.items) |dev| {
             dev.deinit();
@@ -1146,22 +1162,22 @@ pub const AtomicRequest = struct {
 
         // Set framebuffer
         self.add(plane.id, plane.props.fb_id, fb_id);
-        
+
         // Set CRTC
         self.add(plane.id, plane.props.crtc_id, crtc_id);
-        
+
         // Set position (CRTC_X, CRTC_Y)
         const crtc_x: u64 = @intFromFloat(pos.getX());
         const crtc_y: u64 = @intFromFloat(pos.getY());
         self.add(plane.id, plane.props.crtc_x, crtc_x);
         self.add(plane.id, plane.props.crtc_y, crtc_y);
-        
+
         // Set destination size (CRTC_W, CRTC_H)
         const crtc_w: u64 = @intFromFloat(size.getX());
         const crtc_h: u64 = @intFromFloat(size.getY());
         self.add(plane.id, plane.props.crtc_w, crtc_w);
         self.add(plane.id, plane.props.crtc_h, crtc_h);
-        
+
         // Set source rectangle (16.16 fixed point)
         // Source starts at (0, 0) and spans the full buffer
         const src_w: u64 = @intFromFloat(size.getX() * 65536.0);
@@ -1353,7 +1369,7 @@ test "AtomicRequest - setPlaneProps with disabled plane" {
         .type = .primary,
         .initial_fb_id = 0,
         .possible_crtcs = 1,
-        .formats = std.ArrayList(u32){},
+        .formats = std.ArrayList(u32).empty,
         .props = .{
             .fb_id = 10,
             .crtc_id = 11,
@@ -1383,7 +1399,7 @@ test "AtomicRequest - setPlaneProps with valid configuration" {
         .type = .primary,
         .initial_fb_id = 0,
         .possible_crtcs = 1,
-        .formats = std.ArrayList(u32){},
+        .formats = std.ArrayList(u32).empty,
         .props = .{
             .fb_id = 10,
             .crtc_id = 11,

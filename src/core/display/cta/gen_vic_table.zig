@@ -21,27 +21,28 @@ const VicEntry = struct {
     aspect_ratio: []const u8,
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
     var log = Logger.init(allocator);
     defer log.deinit();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var args = std.ArrayList([]const u8).empty;
+    defer args.deinit(allocator);
+    var arg_iterator = std.process.Args.Iterator.init(init.minimal.args);
+    defer arg_iterator.deinit();
+    while (arg_iterator.next()) |arg| try args.append(allocator, arg);
 
-    if (args.len != 3) {
-        log.err("Usage: {s} <cta-vic-table.c> <output.zig>", .{args[0]});
+    if (args.items.len != 3) {
+        log.err("Usage: {s} <cta-vic-table.c> <output.zig>", .{args.items[0]});
         return error.InvalidArgs;
     }
 
-    const input_path = args[1];
-    const output_path = args[2];
+    const input_path = args.items[1];
+    const output_path = args.items[2];
 
     // Read C file
-    const c_data = try std.fs.cwd().readFileAlloc(allocator, input_path, 10 * 1024 * 1024);
+    const c_data = try std.Io.Dir.cwd().readFileAlloc(init.io, input_path, allocator, .limited(10 * 1024 * 1024));
     defer allocator.free(c_data);
 
     // Parse VIC entries (simple line-by-line parsing)
@@ -67,7 +68,7 @@ pub fn main() !void {
 
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t");
-        
+
         // Start of new entry: [XX] = {
         if (std.mem.startsWith(u8, trimmed, "[") and std.mem.containsAtLeast(u8, trimmed, 1, "] = {")) {
             // Extract VIC code
@@ -126,10 +127,10 @@ pub fn main() !void {
     }
 
     // Generate Zig file
-    var output_buf = std.ArrayList(u8){};
-    defer output_buf.deinit(allocator);
+    var output_buf: std.Io.Writer.Allocating = .init(allocator);
+    defer output_buf.deinit();
 
-    const writer = output_buf.writer(allocator);
+    const writer = &output_buf.writer;
 
     try writer.writeAll(
         \\//! CTA-861 VIC timing database
@@ -164,7 +165,7 @@ pub fn main() !void {
     );
 
     // Write all VIC entries (sorted by VIC code)
-    var vic_codes = std.ArrayList(u8){};
+    var vic_codes = std.ArrayList(u8).empty;
     defer vic_codes.deinit(allocator);
 
     var iter = vics.keyIterator();
@@ -206,15 +207,15 @@ pub fn main() !void {
         \\/// Lookup VIC timing by code (O(log n) binary search)
         \\pub fn lookup(vic: u8) ?Timing {
         \\    if (vic == 0) return null;
-        \\    
+        \\
         \\    // Binary search
         \\    var left: usize = 0;
         \\    var right: usize = entries.len;
-        \\    
+        \\
         \\    while (left < right) {
         \\        const mid = left + (right - left) / 2;
         \\        const entry_vic = entries[mid].vic;
-        \\        
+        \\
         \\        if (entry_vic == vic) {
         \\            return entries[mid];
         \\        } else if (entry_vic < vic) {
@@ -223,7 +224,7 @@ pub fn main() !void {
         \\            right = mid;
         \\        }
         \\    }
-        \\    
+        \\
         \\    return null;
         \\}
         \\
@@ -244,7 +245,7 @@ pub fn main() !void {
     );
 
     // Write to file
-    try std.fs.cwd().writeFile(.{ .sub_path = output_path, .data = output_buf.items });
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = output_path, .data = writer.buffered() });
 
     log.info("Generated {d} VIC entries to {s}", .{ vics.count(), output_path });
 }

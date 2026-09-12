@@ -14,7 +14,7 @@ const MAX_REGION_SIDE: i64 = 10000000;
 pub const Region = struct {
     region: c.pixman_region32_t,
     allocator: std.mem.Allocator,
-    
+
     /// Alias for backwards compatibility
     pub const Type = Region;
 

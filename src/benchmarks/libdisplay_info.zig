@@ -17,20 +17,20 @@ const c = @cImport({
 /// Try to load EDID from system, fall back to test data
 fn loadEdidData(allocator: std.mem.Allocator, log: *cli.Logger) ![]u8 {
     // Try to find a real EDID from sysfs
-    var dir = std.fs.openDirAbsolute("/sys/class/drm", .{ .iterate = true }) catch {
+    var dir = std.Io.Dir.openDirAbsolute(std.Options.debug_io, "/sys/class/drm", .{}) catch {
         log.warn("Cannot access /sys/class/drm, using test data", .{});
         return generateDellTestEdid(allocator, log);
     };
-    defer dir.close();
+    defer dir.close(std.Options.debug_io);
 
     var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
+    while (iter.next(std.Options.debug_io) catch null) |entry| {
         if (entry.kind != .directory) continue;
 
         var path_buf: [256]u8 = undefined;
         const edid_path = std.fmt.bufPrint(&path_buf, "/sys/class/drm/{s}/edid", .{entry.name}) catch continue;
 
-        if (std.fs.cwd().readFileAlloc(allocator, edid_path, 4096)) |data| {
+        if (std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, edid_path, allocator, .limited(4096))) |data| {
             if (data.len >= 128) {
                 log.info("Using real EDID from {s} ({d} bytes)", .{ edid_path, data.len });
                 return data;
@@ -127,19 +127,19 @@ pub fn run(allocator: std.mem.Allocator, log: *cli.Logger) !void {
 
     // Benchmark Zig implementation
     log.info("Benchmarking Zig implementation...", .{});
-    const zig_start = std.time.nanoTimestamp();
+    const zig_start = std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds();
 
     for (0..iterations) |_| {
         const zig_edid = try display.edid.fast.parse(test_data);
         _ = zig_edid;
     }
 
-    const zig_end = std.time.nanoTimestamp();
+    const zig_end = std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds();
     const zig_time = zig_end - zig_start;
 
     // Benchmark C implementation
     log.info("Benchmarking C libdisplay-info...", .{});
-    const c_start = std.time.nanoTimestamp();
+    const c_start = std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds();
 
     for (0..iterations) |_| {
         const c_info = c.di_info_parse_edid(test_data.ptr, test_data.len);
@@ -148,7 +148,7 @@ pub fn run(allocator: std.mem.Allocator, log: *cli.Logger) !void {
         }
     }
 
-    const c_end = std.time.nanoTimestamp();
+    const c_end = std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds();
     const c_time = c_end - c_start;
 
     // Results

@@ -23,7 +23,7 @@ pub const Wire = struct {
             .protocol_name = protocol_name,
             .version = version,
             .allocator = allocator,
-            .listeners = std.ArrayList(?*const anyopaque){},
+            .listeners = std.ArrayList(?*const anyopaque).empty,
         };
     }
 
@@ -67,7 +67,7 @@ pub const Call = struct {
             .builder = builder,
             .object_id = object_id,
             .method_id = method_id,
-            .fds = std.ArrayList(std.posix.fd_t){},
+            .fds = std.ArrayList(std.posix.fd_t).empty,
         };
     }
 

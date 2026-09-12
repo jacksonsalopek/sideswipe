@@ -1,5 +1,5 @@
 //! DRM renderer using EGL and OpenGL ES
-//! 
+//!
 //! This module provides GPU-accelerated rendering capabilities for the compositor.
 //! It handles:
 //! - EGL initialization with DRM/GBM backend
@@ -7,27 +7,27 @@
 //! - DMA-BUF to GL texture import
 //! - Buffer blitting between GPU buffers
 //! - Pixel readback for CPU access
-//! 
+//!
 //! The renderer uses OpenGL ES 3.0 for compatibility with most GPU drivers.
 //! It supports both regular GL_TEXTURE_2D and GL_TEXTURE_EXTERNAL_OES for
 //! hardware-decoded video textures.
-//! 
+//!
 //! ## Architecture
-//! 
+//!
 //! The renderer is initialized with a DRM file descriptor and creates:
 //! 1. GBM device from DRM FD
 //! 2. EGL display using EGL_PLATFORM_GBM_MESA
 //! 3. EGL context with OpenGL ES 3.0
 //! 4. Vertex and fragment shaders for texture rendering
-//! 
+//!
 //! ## DMA-BUF Support
-//! 
+//!
 //! The renderer requires `EGL_EXT_image_dma_buf_import` extension to create
 //! EGLImages from DMA-BUF file descriptors. This allows zero-copy rendering
 //! of client buffers.
-//! 
+//!
 //! ## Multi-GPU Support
-//! 
+//!
 //! The blit() and readBuffer() functions support multi-GPU scenarios where
 //! buffers need to be copied between different GPUs or converted to CPU-
 //! accessible memory.
@@ -40,6 +40,8 @@ const buffer = @import("buffer.zig");
 const misc = @import("misc.zig");
 
 const log = std.log.scoped(.renderer);
+const egl_device_ext: c.EGLint = 0x322C;
+const egl_drm_render_node_file_ext: c.EGLint = 0x323E;
 
 // Import EGL and OpenGL ES headers
 const c = @cImport({
@@ -48,6 +50,7 @@ const c = @cImport({
     @cInclude("GLES3/gl3.h");
     @cInclude("GLES2/gl2ext.h");
     @cInclude("drm_fourcc.h");
+    @cInclude("gbm.h");
 });
 
 // Type aliases for convenience
@@ -79,7 +82,7 @@ pub const GLTexture = struct {
             c.glDeleteTextures(1, &self.texid);
         }
         if (self.image) |img| {
-            _ = c.eglDestroyImageKHR(display, img);
+            destroyImage(display, img);
         }
     }
 
@@ -186,6 +189,16 @@ pub const BlitResult = struct {
     sync_fd: ?i32 = null,
 };
 
+pub const Layer = struct {
+    buffer: buffer.Interface,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    opacity: f32 = 1,
+    uv: [8]f32 = .{ 1, 0, 0, 0, 1, 1, 0, 1 },
+};
+
 /// DRM renderer
 pub const Type = struct {
     allocator: std.mem.Allocator,
@@ -195,6 +208,7 @@ pub const Type = struct {
     shader_ext: Shader, // For external textures
     formats: std.ArrayList(misc.GLFormat),
     primary_renderer: ?*Type = null, // For multi-GPU
+    gbm_device: ?*c.struct_gbm_device = null,
 
     const Self = @This();
 
@@ -208,11 +222,14 @@ pub const Type = struct {
             .egl = EGLState.init(),
             .shader = .{},
             .shader_ext = .{},
-            .formats = std.ArrayList(misc.GLFormat){},
+            .formats = std.ArrayList(misc.GLFormat).empty,
         };
 
         errdefer self.formats.deinit(allocator);
+        errdefer self.destroyGbmDevice();
         errdefer self.egl.deinit();
+        errdefer self.shader_ext.deinit();
+        errdefer self.shader.deinit();
 
         // Initialize EGL with DRM FD
         try self.initEGL(drm_fd);
@@ -228,6 +245,50 @@ pub const Type = struct {
         return self;
     }
 
+    /// Creates a surfaceless renderer for a nested compositor.
+    pub fn createNested(allocator: std.mem.Allocator, native_display: *anyopaque) !*Self {
+        const self = try allocator.create(Self);
+        errdefer allocator.destroy(self);
+        self.* = .{
+            .allocator = allocator,
+            .egl = EGLState.init(),
+            .shader = .{},
+            .shader_ext = .{},
+            .formats = std.ArrayList(misc.GLFormat).empty,
+        };
+        errdefer self.formats.deinit(allocator);
+        errdefer self.egl.deinit();
+        errdefer self.shader_ext.deinit();
+        errdefer self.shader.deinit();
+        try self.initNestedEGL(native_display);
+        try self.compileShaders();
+        try self.querySupportedFormats();
+        log.info("Nested Wayland EGL renderer initialized", .{});
+        return self;
+    }
+
+    /// Opens the DRM render node advertised by this EGL display.
+    pub fn openDeviceNode(self: *const Self) ?i32 {
+        const display = self.egl.display orelse return null;
+        const query_display = @as(
+            ?*const fn (c.EGLDisplay, c.EGLint, [*c]c.EGLAttrib) callconv(.c) c.EGLBoolean,
+            @ptrCast(c.eglGetProcAddress("eglQueryDisplayAttribEXT")),
+        ) orelse return null;
+        const query_device = @as(
+            ?*const fn (?*anyopaque, c.EGLint) callconv(.c) ?[*:0]const u8,
+            @ptrCast(c.eglGetProcAddress("eglQueryDeviceStringEXT")),
+        ) orelse return null;
+
+        var device: c.EGLAttrib = 0;
+        if (query_display(display, egl_device_ext, &device) == c.EGL_FALSE) return null;
+        if (device == 0) return null;
+        const path_ptr = query_device(@ptrFromInt(@as(usize, @intCast(device))), egl_drm_render_node_file_ext) orelse
+            return null;
+        const fd = core.unix.open(std.mem.span(path_ptr), .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0) catch
+            return null;
+        return fd;
+    }
+
     /// Initialize EGL display and context
     fn initEGL(self: *Self, drm_fd: i32) !void {
         // Get EGL display from DRM FD
@@ -237,11 +298,11 @@ pub const Type = struct {
         ) orelse return error.EGLExtensionNotSupported;
 
         // Create GBM device from DRM FD
-        const gbm_mod = @cImport(@cInclude("gbm.h"));
-        const gbm_device = gbm_mod.gbm_create_device(drm_fd);
+        const gbm_device = c.gbm_create_device(drm_fd);
         if (gbm_device == null) {
             return error.GBMDeviceCreationFailed;
         }
+        self.gbm_device = gbm_device;
 
         // Get EGL display
         const display = egl_get_platform_display(
@@ -253,8 +314,21 @@ pub const Type = struct {
             return error.EGLDisplayCreationFailed;
         }
         self.egl.display = display;
+        try self.initEGLDisplay(display, c.EGL_WINDOW_BIT);
+    }
 
-        // Initialize EGL
+    fn initNestedEGL(self: *Self, native_display: *anyopaque) !void {
+        const get_platform_display = @as(
+            ?*const fn (c.EGLenum, ?*anyopaque, [*c]const c.EGLAttrib) callconv(.c) c.EGLDisplay,
+            @ptrCast(c.eglGetProcAddress("eglGetPlatformDisplayEXT")),
+        ) orelse return error.EGLExtensionNotSupported;
+        const display = get_platform_display(c.EGL_PLATFORM_WAYLAND_KHR, native_display, null);
+        if (display == c.EGL_NO_DISPLAY) return error.EGLDisplayCreationFailed;
+        self.egl.display = display;
+        try self.initEGLDisplay(display, c.EGL_PBUFFER_BIT);
+    }
+
+    fn initEGLDisplay(self: *Self, display: EGLDisplay, surface_type: c.EGLint) !void {
         var major: c.EGLint = 0;
         var minor: c.EGLint = 0;
         if (c.eglInitialize(display, &major, &minor) == c.EGL_FALSE) {
@@ -265,7 +339,7 @@ pub const Type = struct {
 
         // Choose EGL config
         const config_attribs = [_]c.EGLint{
-            c.EGL_SURFACE_TYPE,    c.EGL_WINDOW_BIT,
+            c.EGL_SURFACE_TYPE,    surface_type,
             c.EGL_RED_SIZE,        8,
             c.EGL_GREEN_SIZE,      8,
             c.EGL_BLUE_SIZE,       8,
@@ -335,26 +409,6 @@ pub const Type = struct {
         ;
 
         self.shader = try self.compileShaderProgram(vertex_src, fragment_src, c.GL_TEXTURE_2D);
-
-        // External texture shader for OES external textures
-        const fragment_ext_src =
-            \\#version 300 es
-            \\#extension GL_OES_EGL_image_external : require
-            \\precision mediump float;
-            \\in vec2 v_texcoord;
-            \\out vec4 fragColor;
-            \\uniform samplerExternalOES tex;
-            \\
-            \\void main() {
-            \\    fragColor = texture(tex, v_texcoord);
-            \\}
-        ;
-
-        self.shader_ext = self.compileShaderProgram(vertex_src, fragment_ext_src, c.GL_TEXTURE_EXTERNAL_OES) catch {
-            log.debug("External texture shader not supported, using standard shader only", .{});
-            self.shader_ext = self.shader;
-            return;
-        };
     }
 
     /// Compile a shader program from vertex and fragment sources
@@ -437,10 +491,10 @@ pub const Type = struct {
 
     /// Query supported DMA-BUF formats
     fn querySupportedFormats(self: *Self) !void {
-        // Check for required extensions
-        const extensions_str = c.glGetString(c.GL_EXTENSIONS);
+        const display = self.egl.display orelse return error.NoEGLDisplay;
+        const extensions_str = c.eglQueryString(display, c.EGL_EXTENSIONS);
         if (extensions_str == null) {
-            return error.GLExtensionsQueryFailed;
+            return error.EGLExtensionsQueryFailed;
         }
 
         const extensions = std.mem.span(extensions_str);
@@ -453,7 +507,7 @@ pub const Type = struct {
 
         // Query supported formats via EGL_EXT_image_dma_buf_import_modifiers
         const egl_formats = @import("egl_formats.zig");
-        
+
         // For now, add common formats that are widely supported
         const common_formats = [_]struct { format: u32, modifier: u64 }{
             .{ .format = @as(u32, @bitCast(@as(i32, 875713112))), .modifier = 0 }, // DRM_FORMAT_XRGB8888
@@ -481,7 +535,14 @@ pub const Type = struct {
         self.shader_ext.deinit();
         self.formats.deinit(self.allocator);
         self.egl.deinit();
+        self.destroyGbmDevice();
         self.allocator.destroy(self);
+    }
+
+    fn destroyGbmDevice(self: *Self) void {
+        const device = self.gbm_device orelse return;
+        c.gbm_device_destroy(device);
+        self.gbm_device = null;
     }
 
     /// Blit from one buffer to another (for multi-GPU or format conversion)
@@ -519,18 +580,18 @@ pub const Type = struct {
             log.err("Failed to create framebuffer from destination DMA-BUF: {}", .{err});
             return .{ .success = false };
         };
-        defer c.glDeleteFramebuffers(1, &dst_fbo);
+        defer dst_fbo.deinit(self);
 
         // Bind destination framebuffer
-        c.glBindFramebuffer(c.GL_FRAMEBUFFER, dst_fbo);
+        c.glBindFramebuffer(c.GL_FRAMEBUFFER, dst_fbo.id);
         defer c.glBindFramebuffer(c.GL_FRAMEBUFFER, 0);
 
         // Set viewport
         c.glViewport(
             0,
             0,
-            @intFromFloat(dst_dmabuf.size.x),
-            @intFromFloat(dst_dmabuf.size.y),
+            @intFromFloat(dst_dmabuf.size.getX()),
+            @intFromFloat(dst_dmabuf.size.getY()),
         );
 
         // Use appropriate shader
@@ -538,8 +599,8 @@ pub const Type = struct {
         c.glUseProgram(shader.program);
 
         // Set up orthographic projection matrix
-        const width_f: f32 = @floatCast(dst_dmabuf.size.x);
-        const height_f: f32 = @floatCast(dst_dmabuf.size.y);
+        const width_f: f32 = @floatCast(dst_dmabuf.size.getX());
+        const height_f: f32 = @floatCast(dst_dmabuf.size.getY());
         const proj = [9]f32{
             2.0 / width_f, 0.0,             0.0,
             0.0,           -2.0 / height_f, 0.0,
@@ -567,27 +628,93 @@ pub const Type = struct {
         return .{ .success = true };
     }
 
+    /// Composites DMA-BUF layers into tightly packed RGBA8 pixels.
+    pub fn composeDmabufs(
+        self: *Self,
+        layers: []const Layer,
+        width: i32,
+        height: i32,
+        out_rgba: []u8,
+    ) bool {
+        if (width <= 0 or height <= 0) return false;
+        const pixel_count = std.math.mul(usize, @intCast(width), @intCast(height)) catch return false;
+        const required = std.math.mul(usize, pixel_count, 4) catch return false;
+        if (out_rgba.len < required) return false;
+
+        var guard = ContextGuard.init(self);
+        defer guard.deinit();
+        const framebuffer = createMemoryFramebuffer(width, height) catch |err| {
+            log.err("Failed to create composition framebuffer: {}", .{err});
+            return false;
+        };
+        defer framebuffer.deinit();
+
+        c.glBindFramebuffer(c.GL_FRAMEBUFFER, framebuffer.id);
+        defer c.glBindFramebuffer(c.GL_FRAMEBUFFER, 0);
+        c.glViewport(0, 0, width, height);
+        c.glClearColor(0, 0, 0, 0);
+        c.glClear(c.GL_COLOR_BUFFER_BIT);
+        c.glEnable(c.GL_BLEND);
+        c.glBlendFuncSeparate(c.GL_ONE, c.GL_ONE_MINUS_SRC_ALPHA, c.GL_ONE, c.GL_ONE_MINUS_SRC_ALPHA);
+
+        for (layers) |layer| {
+            if (!self.drawLayer(layer, width, height)) return false;
+        }
+        c.glReadPixels(0, 0, width, height, c.GL_RGBA, c.GL_UNSIGNED_BYTE, out_rgba.ptr);
+        return c.glGetError() == c.GL_NO_ERROR;
+    }
+
+    fn drawLayer(self: *Self, layer: Layer, target_width: i32, target_height: i32) bool {
+        const attrs = layer.buffer.dmabuf();
+        if (!attrs.success or attrs.fds[0] < 0) return false;
+        const texture = self.createTextureFromDMABUF(attrs) catch |err| {
+            log.err("Failed to import composition DMA-BUF: {}", .{err});
+            return false;
+        };
+        defer self.destroyTexture(texture);
+
+        const shader = if (texture.target == c.GL_TEXTURE_EXTERNAL_OES) &self.shader_ext else &self.shader;
+        const projection = layerProjection(layer, target_width, target_height);
+        c.glUseProgram(shader.program);
+        c.glUniformMatrix3fv(shader.proj, 1, c.GL_FALSE, &projection);
+        c.glUniform1i(shader.tex, 0);
+        c.glActiveTexture(c.GL_TEXTURE0);
+        texture.bind();
+        c.glBindVertexArray(shader.vao);
+        c.glBindBuffer(c.GL_ARRAY_BUFFER, shader.vbo_uv);
+        c.glBufferData(c.GL_ARRAY_BUFFER, @sizeOf(@TypeOf(layer.uv)), &layer.uv, c.GL_DYNAMIC_DRAW);
+        c.glDrawArrays(c.GL_TRIANGLE_STRIP, 0, 4);
+        const full_uv = [_]f32{ 1, 0, 0, 0, 1, 1, 0, 1 };
+        c.glBufferData(c.GL_ARRAY_BUFFER, @sizeOf(@TypeOf(full_uv)), &full_uv, c.GL_STATIC_DRAW);
+        c.glBindBuffer(c.GL_ARRAY_BUFFER, 0);
+        c.glBindVertexArray(0);
+        texture.unbind();
+        const gl_error = c.glGetError();
+        if (gl_error == c.GL_NO_ERROR) return true;
+        log.err("Failed to draw composition layer: GL error 0x{x}", .{gl_error});
+        return false;
+    }
+
     /// Create GL texture from DMA-BUF
     fn createTextureFromDMABUF(self: *Self, attrs: buffer.DMABUFAttrs) !GLTexture {
         const display = self.egl.display orelse return error.NoEGLDisplay;
 
-        // Choose texture target based on modifier
-        const target: c.GLenum = if (attrs.modifier != 0) c.GL_TEXTURE_EXTERNAL_OES else c.GL_TEXTURE_2D;
-
-        // Build EGLImage attributes
-        const width: c.EGLint = @intFromFloat(attrs.size.x);
-        const height: c.EGLint = @intFromFloat(attrs.size.y);
+        const target: c.GLenum = c.GL_TEXTURE_2D;
+        const width: c.EGLint = @intFromFloat(attrs.size.getX());
+        const height: c.EGLint = @intFromFloat(attrs.size.getY());
         const format: c.EGLint = @intCast(attrs.format);
-
-        const img_attribs = [_]c.EGLAttrib{
-            c.EGL_WIDTH,                     width,
-            c.EGL_HEIGHT,                    height,
-            c.EGL_LINUX_DRM_FOURCC_EXT,      format,
-            c.EGL_DMA_BUF_PLANE0_FD_EXT,     attrs.fds[0],
-            c.EGL_DMA_BUF_PLANE0_OFFSET_EXT, attrs.offsets[0],
-            c.EGL_DMA_BUF_PLANE0_PITCH_EXT,  attrs.strides[0],
-            c.EGL_NONE,
-        };
+        if (attrs.planes <= 0 or attrs.planes > 4) return error.InvalidPlaneCount;
+        const plane_count: usize = @intCast(attrs.planes);
+        for (0..plane_count) |plane| {
+            if (attrs.fds[plane] < 0 or attrs.strides[plane] == 0) return error.InvalidPlane;
+        }
+        var image_attributes: [47]c.EGLAttrib = undefined;
+        var attribute_count: usize = 0;
+        appendAttribute(&image_attributes, &attribute_count, c.EGL_WIDTH, width);
+        appendAttribute(&image_attributes, &attribute_count, c.EGL_HEIGHT, height);
+        appendAttribute(&image_attributes, &attribute_count, c.EGL_LINUX_DRM_FOURCC_EXT, format);
+        for (0..plane_count) |plane| appendPlaneAttributes(&image_attributes, &attribute_count, attrs, plane);
+        image_attributes[attribute_count] = c.EGL_NONE;
 
         // Create EGLImage
         const egl_create_image = @as(
@@ -600,15 +727,18 @@ pub const Type = struct {
             c.EGL_NO_CONTEXT,
             c.EGL_LINUX_DMA_BUF_EXT,
             null,
-            &img_attribs,
+            &image_attributes,
         );
         if (image == null) {
+            log.err("eglCreateImage DMA-BUF import failed: EGL error 0x{x}", .{c.eglGetError()});
             return error.EGLImageCreationFailed;
         }
+        errdefer destroyImage(display, image);
 
         // Create GL texture
         var texid: c.GLuint = 0;
         c.glGenTextures(1, &texid);
+        errdefer c.glDeleteTextures(1, &texid);
         c.glBindTexture(target, texid);
 
         // Bind EGLImage to texture
@@ -634,8 +764,16 @@ pub const Type = struct {
         };
     }
 
+    pub fn validateDmabufImport(self: *Self, attrs: buffer.DMABUFAttrs) bool {
+        var guard = ContextGuard.init(self);
+        defer guard.deinit();
+        const texture = self.createTextureFromDMABUF(attrs) catch return false;
+        self.destroyTexture(texture);
+        return true;
+    }
+
     /// Create framebuffer from DMA-BUF
-    fn createFramebufferFromDMABUF(self: *Self, attrs: buffer.DMABUFAttrs) !c.GLuint {
+    fn createFramebufferFromDMABUF(self: *Self, attrs: buffer.DMABUFAttrs) !DmabufFramebuffer {
         // First create a texture from the DMA-BUF
         const texture = try self.createTextureFromDMABUF(attrs);
         errdefer self.destroyTexture(texture);
@@ -659,13 +797,12 @@ pub const Type = struct {
         if (status != c.GL_FRAMEBUFFER_COMPLETE) {
             c.glBindFramebuffer(c.GL_FRAMEBUFFER, 0);
             c.glDeleteFramebuffers(1, &fbo);
-            self.destroyTexture(texture);
             return error.FramebufferIncomplete;
         }
 
         c.glBindFramebuffer(c.GL_FRAMEBUFFER, 0);
 
-        return fbo;
+        return .{ .id = fbo, .texture = texture };
     }
 
     /// Destroy a GL texture and its associated EGLImage
@@ -676,7 +813,7 @@ pub const Type = struct {
 
         if (texture.image) |img| {
             if (self.egl.display) |disp| {
-                _ = c.eglDestroyImageKHR(disp, img);
+                destroyImage(disp, img);
             }
         }
     }
@@ -719,10 +856,10 @@ pub const Type = struct {
             log.err("Failed to create framebuffer for reading: {}", .{err});
             return false;
         };
-        defer c.glDeleteFramebuffers(1, &fbo);
+        defer fbo.deinit(self);
 
         // Bind framebuffer
-        c.glBindFramebuffer(c.GL_FRAMEBUFFER, fbo);
+        c.glBindFramebuffer(c.GL_FRAMEBUFFER, fbo.id);
         defer c.glBindFramebuffer(c.GL_FRAMEBUFFER, 0);
 
         // Get pixel format info
@@ -733,8 +870,8 @@ pub const Type = struct {
         };
 
         // Calculate expected size
-        const width: u32 = @intFromFloat(dmabuf.size.x);
-        const height: u32 = @intFromFloat(dmabuf.size.y);
+        const width: u32 = @intFromFloat(dmabuf.size.getX());
+        const height: u32 = @intFromFloat(dmabuf.size.getY());
         const stride = pixel_format.minStride(width);
         const expected_size = stride * height;
 
@@ -764,6 +901,116 @@ pub const Type = struct {
         return true;
     }
 };
+
+fn destroyImage(display: EGLDisplay, image: EGLImage) void {
+    const destroy_image = @as(
+        ?*const fn (c.EGLDisplay, c.EGLImageKHR) callconv(.c) c.EGLBoolean,
+        @ptrCast(c.eglGetProcAddress("eglDestroyImageKHR")),
+    ) orelse return;
+    _ = destroy_image(display, image);
+}
+
+const DmabufFramebuffer = struct {
+    id: GLuint,
+    texture: GLTexture,
+
+    fn deinit(self: DmabufFramebuffer, renderer: *Type) void {
+        c.glDeleteFramebuffers(1, &self.id);
+        renderer.destroyTexture(self.texture);
+    }
+};
+
+const MemoryFramebuffer = struct {
+    id: GLuint,
+    renderbuffer: GLuint,
+
+    fn deinit(self: MemoryFramebuffer) void {
+        c.glDeleteRenderbuffers(1, &self.renderbuffer);
+        c.glDeleteFramebuffers(1, &self.id);
+    }
+};
+
+fn createMemoryFramebuffer(width: i32, height: i32) !MemoryFramebuffer {
+    var renderbuffer: GLuint = 0;
+    c.glGenRenderbuffers(1, &renderbuffer);
+    errdefer c.glDeleteRenderbuffers(1, &renderbuffer);
+    c.glBindRenderbuffer(c.GL_RENDERBUFFER, renderbuffer);
+    c.glRenderbufferStorage(c.GL_RENDERBUFFER, c.GL_RGBA8, width, height);
+
+    var framebuffer: GLuint = 0;
+    c.glGenFramebuffers(1, &framebuffer);
+    errdefer c.glDeleteFramebuffers(1, &framebuffer);
+    c.glBindFramebuffer(c.GL_FRAMEBUFFER, framebuffer);
+    c.glFramebufferRenderbuffer(c.GL_FRAMEBUFFER, c.GL_COLOR_ATTACHMENT0, c.GL_RENDERBUFFER, renderbuffer);
+    if (c.glCheckFramebufferStatus(c.GL_FRAMEBUFFER) != c.GL_FRAMEBUFFER_COMPLETE) {
+        return error.FramebufferIncomplete;
+    }
+    return .{ .id = framebuffer, .renderbuffer = renderbuffer };
+}
+
+fn layerProjection(layer: Layer, target_width: i32, target_height: i32) [9]f32 {
+    const target_width_f: f32 = @floatFromInt(target_width);
+    const target_height_f: f32 = @floatFromInt(target_height);
+    const width: f32 = @floatFromInt(layer.width);
+    const height: f32 = @floatFromInt(layer.height);
+    const x: f32 = @floatFromInt(layer.x);
+    const y: f32 = @floatFromInt(layer.y);
+    return .{
+        2 * width / target_width_f, 0,                             0,
+        0,                          -2 * height / target_height_f, 0,
+        2 * x / target_width_f - 1, 1 - 2 * y / target_height_f,   1,
+    };
+}
+
+fn appendPlaneAttributes(
+    attributes: *[47]c.EGLAttrib,
+    count: *usize,
+    dmabuf: buffer.DMABUFAttrs,
+    plane: usize,
+) void {
+    const fd_names = [_]c.EGLAttrib{
+        c.EGL_DMA_BUF_PLANE0_FD_EXT,
+        c.EGL_DMA_BUF_PLANE1_FD_EXT,
+        c.EGL_DMA_BUF_PLANE2_FD_EXT,
+        c.EGL_DMA_BUF_PLANE3_FD_EXT,
+    };
+    const offset_names = [_]c.EGLAttrib{
+        c.EGL_DMA_BUF_PLANE0_OFFSET_EXT,
+        c.EGL_DMA_BUF_PLANE1_OFFSET_EXT,
+        c.EGL_DMA_BUF_PLANE2_OFFSET_EXT,
+        c.EGL_DMA_BUF_PLANE3_OFFSET_EXT,
+    };
+    const pitch_names = [_]c.EGLAttrib{
+        c.EGL_DMA_BUF_PLANE0_PITCH_EXT,
+        c.EGL_DMA_BUF_PLANE1_PITCH_EXT,
+        c.EGL_DMA_BUF_PLANE2_PITCH_EXT,
+        c.EGL_DMA_BUF_PLANE3_PITCH_EXT,
+    };
+    const modifier_low_names = [_]c.EGLAttrib{
+        c.EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT,
+        c.EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT,
+        c.EGL_DMA_BUF_PLANE2_MODIFIER_LO_EXT,
+        c.EGL_DMA_BUF_PLANE3_MODIFIER_LO_EXT,
+    };
+    const modifier_high_names = [_]c.EGLAttrib{
+        c.EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT,
+        c.EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT,
+        c.EGL_DMA_BUF_PLANE2_MODIFIER_HI_EXT,
+        c.EGL_DMA_BUF_PLANE3_MODIFIER_HI_EXT,
+    };
+    appendAttribute(attributes, count, fd_names[plane], dmabuf.fds[plane]);
+    appendAttribute(attributes, count, offset_names[plane], dmabuf.offsets[plane]);
+    appendAttribute(attributes, count, pitch_names[plane], dmabuf.strides[plane]);
+    if (dmabuf.modifier == 0x00ffffffffffffff) return;
+    appendAttribute(attributes, count, modifier_low_names[plane], @as(u32, @truncate(dmabuf.modifier)));
+    appendAttribute(attributes, count, modifier_high_names[plane], @as(u32, @truncate(dmabuf.modifier >> 32)));
+}
+
+fn appendAttribute(attributes: *[47]c.EGLAttrib, count: *usize, name: c.EGLAttrib, value: anytype) void {
+    attributes[count.*] = name;
+    attributes[count.* + 1] = @intCast(value);
+    count.* += 2;
+}
 
 /// EGL context guard (RAII for making/releasing context)
 pub const ContextGuard = struct {
@@ -836,7 +1083,7 @@ test "ContextGuard - initialization" {
         .egl = EGLState.init(),
         .shader = .{},
         .shader_ext = .{},
-        .formats = std.ArrayList(misc.GLFormat){},
+        .formats = std.ArrayList(misc.GLFormat).empty,
     };
     defer renderer.formats.deinit(testing.allocator);
 
@@ -846,6 +1093,19 @@ test "ContextGuard - initialization" {
     try testing.expectEqual(&renderer, guard.renderer);
 }
 
+test "Renderer - openDeviceNode without an EGL display returns null" {
+    var rend = Type{
+        .allocator = testing.allocator,
+        .backend = null,
+        .egl = EGLState.init(),
+        .shader = .{},
+        .shader_ext = .{},
+        .formats = std.ArrayList(misc.GLFormat).empty,
+    };
+    defer rend.formats.deinit(testing.allocator);
+    try testing.expectEqual(@as(?i32, null), rend.openDeviceNode());
+}
+
 test "Renderer - verifyDestinationDmabuf with no formats" {
     var renderer = Type{
         .allocator = testing.allocator,
@@ -853,7 +1113,7 @@ test "Renderer - verifyDestinationDmabuf with no formats" {
         .egl = EGLState.init(),
         .shader = .{},
         .shader_ext = .{},
-        .formats = std.ArrayList(misc.GLFormat){},
+        .formats = std.ArrayList(misc.GLFormat).empty,
     };
     defer renderer.formats.deinit(testing.allocator);
 
@@ -873,7 +1133,7 @@ test "Renderer - verifyDestinationDmabuf with matching format" {
         .egl = EGLState.init(),
         .shader = .{},
         .shader_ext = .{},
-        .formats = std.ArrayList(misc.GLFormat){},
+        .formats = std.ArrayList(misc.GLFormat).empty,
     };
     defer renderer.formats.deinit(testing.allocator);
 
@@ -899,7 +1159,7 @@ test "Renderer - verifyDestinationDmabuf with external format" {
         .egl = EGLState.init(),
         .shader = .{},
         .shader_ext = .{},
-        .formats = std.ArrayList(misc.GLFormat){},
+        .formats = std.ArrayList(misc.GLFormat).empty,
     };
     defer renderer.formats.deinit(testing.allocator);
 
@@ -917,4 +1177,35 @@ test "Renderer - verifyDestinationDmabuf with external format" {
 
     // External formats with non-zero modifiers can't be render targets
     try testing.expectFalse(renderer.verifyDestinationDmabuf(attrs));
+}
+
+test "Renderer - layer projection maps logical rectangle to clip space" {
+    const projection = layerProjection(.{
+        .buffer = undefined,
+        .x = 100,
+        .y = 50,
+        .width = 400,
+        .height = 200,
+    }, 1000, 500);
+
+    try testing.expectEqual(@as(f32, 0.8), projection[0]);
+    try testing.expectEqual(@as(f32, -0.8), projection[4]);
+    try testing.expectEqual(@as(f32, -0.8), projection[6]);
+    try testing.expectEqual(@as(f32, 0.8), projection[7]);
+}
+
+test "Renderer - DMA-BUF image attributes preserve modifier" {
+    var attributes: [47]c.EGLAttrib = undefined;
+    var count: usize = 0;
+    appendPlaneAttributes(&attributes, &count, .{
+        .fds = .{ 7, -1, -1, -1 },
+        .offsets = .{ 16, 0, 0, 0 },
+        .strides = .{ 4096, 0, 0, 0 },
+        .modifier = 0x0123456789abcdef,
+    }, 0);
+
+    try testing.expectEqual(@as(usize, 10), count);
+    try testing.expectEqual(@as(c.EGLAttrib, 7), attributes[1]);
+    try testing.expectEqual(@as(c.EGLAttrib, 0x89abcdef), attributes[7]);
+    try testing.expectEqual(@as(c.EGLAttrib, 0x01234567), attributes[9]);
 }

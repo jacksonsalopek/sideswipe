@@ -59,52 +59,52 @@ pub const SyncInfo = union(SignalType) {
 pub const DetailedRaw = extern struct {
     /// Pixel clock in 10 kHz units (little-endian)
     pixel_clock_10khz: u16,
-    
+
     /// Horizontal addressable video (low 8 bits)
     h_active_lo: u8,
-    
+
     /// Horizontal blanking (low 8 bits)
     h_blank_lo: u8,
-    
+
     /// Horizontal addressable (bits 11-8) and blanking (bits 11-8)
     h_hi: u8,
-    
+
     /// Vertical addressable video (low 8 bits)
     v_active_lo: u8,
-    
+
     /// Vertical blanking (low 8 bits)
     v_blank_lo: u8,
-    
+
     /// Vertical addressable (bits 11-8) and blanking (bits 11-8)
     v_hi: u8,
-    
+
     /// Horizontal front porch (low 8 bits)
     h_front_porch_lo: u8,
-    
+
     /// Horizontal sync pulse width (low 8 bits)
     h_sync_pulse_lo: u8,
-    
+
     /// Vertical front porch (bits 7-4) and sync pulse (bits 3-0), both low 4 bits
     v_front_sync_lo: u8,
-    
+
     /// High bits for front porch and sync
     front_sync_hi: u8,
-    
+
     /// Horizontal image size in mm (low 8 bits)
     h_image_mm_lo: u8,
-    
+
     /// Vertical image size in mm (low 8 bits)
     v_image_mm_lo: u8,
-    
+
     /// High bits for image size
     image_size_hi: u8,
-    
+
     /// Horizontal border pixels
     h_border: u8,
-    
+
     /// Vertical border lines
     v_border: u8,
-    
+
     /// Flags byte
     flags: u8,
 
@@ -182,11 +182,11 @@ pub const DetailedRaw = extern struct {
     pub fn getStereoMode(self: *align(1) const DetailedRaw) StereoMode {
         const stereo_hi = (self.flags >> 5) & 0x03;
         const stereo_lo = self.flags & 0x01;
-        
+
         if (stereo_hi == 0) {
             return .none;
         }
-        
+
         const value = (stereo_hi << 1) | stereo_lo;
         return @enumFromInt(value);
     }
@@ -202,7 +202,7 @@ pub const DetailedRaw = extern struct {
         if (self.getSignalType() != .digital_separate) {
             return null;
         }
-        
+
         return DigitalSeparateSync{
             .vsync_polarity = @enumFromInt((self.flags >> 2) & 0x01),
             .hsync_polarity = @enumFromInt((self.flags >> 1) & 0x01),
@@ -222,7 +222,7 @@ pub const Established = struct {
     has_640x480_75hz: bool,
     has_800x600_56hz: bool,
     has_800x600_60hz: bool,
-    
+
     // Established timings II (byte 0x24)
     has_800x600_72hz: bool,
     has_800x600_75hz: bool,
@@ -232,7 +232,7 @@ pub const Established = struct {
     has_1024x768_70hz: bool,
     has_1024x768_75hz: bool,
     has_1280x1024_75hz: bool,
-    
+
     // Manufacturer timings (byte 0x25, bit 7)
     has_1152x870_75hz: bool,
 };
@@ -249,7 +249,7 @@ pub fn parseEstablishedTimings(bytes: *align(1) const [3]u8) Established {
         .has_640x480_75hz = (bytes[0] & 0x04) != 0,
         .has_800x600_56hz = (bytes[0] & 0x02) != 0,
         .has_800x600_60hz = (bytes[0] & 0x01) != 0,
-        
+
         // Byte 1 (0x24)
         .has_800x600_72hz = (bytes[1] & 0x80) != 0,
         .has_800x600_75hz = (bytes[1] & 0x40) != 0,
@@ -259,7 +259,7 @@ pub fn parseEstablishedTimings(bytes: *align(1) const [3]u8) Established {
         .has_1024x768_70hz = (bytes[1] & 0x04) != 0,
         .has_1024x768_75hz = (bytes[1] & 0x02) != 0,
         .has_1280x1024_75hz = (bytes[1] & 0x01) != 0,
-        
+
         // Byte 2 (0x25)
         .has_1152x870_75hz = (bytes[2] & 0x80) != 0,
     };
@@ -278,7 +278,7 @@ pub const StandardAspectRatio = enum(u2) {
 pub const Standard = struct {
     /// Horizontal resolution
     h_active: u16,
-    /// Vertical resolution  
+    /// Vertical resolution
     v_active: u16,
     /// Refresh rate in Hz
     refresh_rate_hz: u8,
@@ -290,19 +290,19 @@ pub const Standard = struct {
 pub fn parseStandardTiming(bytes: *align(1) const [2]u8) ?Standard {
     const byte0 = bytes[0];
     const byte1 = bytes[1];
-    
+
     // 0x0101 means unused
     if (byte0 == 0x01 and byte1 == 0x01) {
         return null;
     }
-    
+
     // Horizontal resolution = (byte0 + 31) * 8
     const h_active = (@as(u16, byte0) + 31) * 8;
-    
+
     // Aspect ratio is bits 7-6
     const aspect_bits = (byte1 >> 6) & 0x03;
     const aspect_ratio: StandardAspectRatio = @enumFromInt(aspect_bits);
-    
+
     // Vertical resolution depends on aspect ratio
     const v_active: u16 = switch (aspect_ratio) {
         .ratio_16_10 => (h_active * 10) / 16,
@@ -310,10 +310,10 @@ pub fn parseStandardTiming(bytes: *align(1) const [2]u8) ?Standard {
         .ratio_5_4 => (h_active * 4) / 5,
         .ratio_16_9 => (h_active * 9) / 16,
     };
-    
+
     // Refresh rate = (byte1 & 0x3F) + 60
     const refresh_rate_hz = (byte1 & 0x3F) + 60;
-    
+
     return Standard{
         .h_active = h_active,
         .v_active = v_active,
@@ -326,50 +326,50 @@ pub fn parseStandardTiming(bytes: *align(1) const [2]u8) ?Standard {
 pub const Detailed = struct {
     /// Pixel clock in Hz
     pixel_clock_hz: u64,
-    
+
     /// Horizontal timings (pixels)
     h_active: u16,
     h_blank: u16,
     h_front_porch: u16,
     h_sync_pulse: u16,
-    
+
     /// Vertical timings (lines)
     v_active: u16,
     v_blank: u16,
     v_front_porch: u16,
     v_sync_pulse: u16,
-    
+
     /// Physical display size (mm), 0 if aspect ratio
     h_image_mm: u16,
     v_image_mm: u16,
-    
+
     /// Border pixels/lines
     h_border: u8,
     v_border: u8,
-    
+
     /// Timing properties
     interlaced: bool,
     stereo: StereoMode,
     sync_info: SyncInfo,
-    
+
     /// Calculate horizontal total pixels
     pub fn getHTotal(self: Detailed) u16 {
         return self.h_active + self.h_blank;
     }
-    
+
     /// Calculate vertical total lines
     pub fn getVTotal(self: Detailed) u16 {
         return self.v_active + self.v_blank;
     }
-    
+
     /// Calculate refresh rate in Hz
     pub fn getRefreshRate(self: Detailed) f32 {
         const h_total = self.getHTotal();
         const v_total = self.getVTotal();
         const total_pixels = @as(f32, @floatFromInt(@as(u32, h_total) * v_total));
-        
+
         if (total_pixels == 0) return 0;
-        
+
         const pixel_clock_f = @as(f32, @floatFromInt(self.pixel_clock_hz));
         return pixel_clock_f / total_pixels;
     }
@@ -402,24 +402,24 @@ pub fn parseDisplayDescriptor(bytes: *align(1) const [18]u8) ?DisplayDescriptor 
     if (bytes[0] != 0 or bytes[1] != 0) {
         return null;
     }
-    
+
     // Byte 2 must be 0 (reserved)
     if (bytes[2] != 0) {
         return null;
     }
-    
+
     // Byte 3 is the descriptor tag
     const tag: DisplayDescriptorTag = @enumFromInt(bytes[3]);
-    
+
     // Byte 4 must be 0 (reserved)
     if (bytes[4] != 0) {
         return null;
     }
-    
+
     // Bytes 5-17 are descriptor data (13 bytes)
     var data: [13]u8 = undefined;
     @memcpy(&data, bytes[5..18]);
-    
+
     return DisplayDescriptor{
         .tag = tag,
         .data = data,
@@ -430,7 +430,7 @@ pub fn parseDisplayDescriptor(bytes: *align(1) const [18]u8) ?DisplayDescriptor 
 /// Returns slice into the data, trimmed of trailing spaces
 pub fn extractDescriptorString(data: []const u8) []const u8 {
     var end = data.len;
-    
+
     // Trim trailing spaces and newlines
     while (end > 0) {
         const c = data[end - 1];
@@ -439,7 +439,7 @@ pub fn extractDescriptorString(data: []const u8) []const u8 {
         }
         end -= 1;
     }
-    
+
     return data[0..end];
 }
 
@@ -449,9 +449,9 @@ pub fn parseDetailedTiming(raw: *align(1) const DetailedRaw) ?Detailed {
     if (raw.pixel_clock_10khz == 0) {
         return null; // This is a display descriptor, not a timing
     }
-    
+
     var timing: Detailed = undefined;
-    
+
     timing.pixel_clock_hz = raw.getPixelClockHz();
     timing.h_active = raw.getHActive();
     timing.h_blank = raw.getHBlank();
@@ -467,7 +467,7 @@ pub fn parseDetailedTiming(raw: *align(1) const DetailedRaw) ?Detailed {
     timing.v_border = raw.v_border;
     timing.interlaced = raw.isInterlaced();
     timing.stereo = raw.getStereoMode();
-    
+
     // Parse sync info based on signal type
     const signal_type = raw.getSignalType();
     timing.sync_info = switch (signal_type) {
@@ -482,7 +482,7 @@ pub fn parseDetailedTiming(raw: *align(1) const DetailedRaw) ?Detailed {
             .digital_separate = raw.getDigitalSeparateSync().?,
         },
     };
-    
+
     return timing;
 }
 
@@ -495,44 +495,44 @@ test "DetailedRaw size" {
 test "parse 1920x1080 @ 60Hz timing" {
     // Example: 1920x1080 @ 60Hz (148.5 MHz pixel clock)
     var raw: DetailedRaw = undefined;
-    
+
     // Pixel clock: 148.5 MHz = 14850 in 10kHz units
     raw.pixel_clock_10khz = 14850;
-    
+
     // 1920 pixels active (0x780)
     raw.h_active_lo = 0x80; // Low 8 bits
     // 280 pixels blank (0x118)
     raw.h_blank_lo = 0x18; // Low 8 bits
     // h_hi: upper nibble = 1920 >> 8 = 0x7, lower nibble = 280 >> 8 = 0x1
     raw.h_hi = 0x71;
-    
+
     // 1080 lines active (0x438)
     raw.v_active_lo = 0x38; // Low 8 bits
     // 45 lines blank (0x02D)
     raw.v_blank_lo = 0x2D; // Low 8 bits
     // v_hi: upper nibble = 1080 >> 8 = 0x4, lower nibble = 45 >> 8 = 0x0
     raw.v_hi = 0x40;
-    
+
     // Front porch and sync
     raw.h_front_porch_lo = 88;
     raw.h_sync_pulse_lo = 44;
     raw.v_front_sync_lo = (4 << 4) | 5; // Front porch 4, sync 5
     raw.front_sync_hi = 0;
-    
+
     // Image size: 520mm x 290mm
     raw.h_image_mm_lo = 0x08;
     raw.v_image_mm_lo = 0x22;
     raw.image_size_hi = 0x21;
-    
+
     // No borders
     raw.h_border = 0;
     raw.v_border = 0;
-    
+
     // Flags: not interlaced, digital separate, positive sync both
     raw.flags = 0b00011110; // Digital separate (bits 4-3), h+ v+ (bits 2-1)
-    
+
     const timing = parseDetailedTiming(&raw).?;
-    
+
     try testing.expectEqual(@as(u64, 148_500_000), timing.pixel_clock_hz);
     try testing.expectEqual(@as(u16, 1920), timing.h_active);
     try testing.expectEqual(@as(u16, 280), timing.h_blank);
@@ -540,11 +540,11 @@ test "parse 1920x1080 @ 60Hz timing" {
     try testing.expectEqual(@as(u16, 45), timing.v_blank);
     try testing.expect(!timing.interlaced);
     try testing.expectEqual(StereoMode.none, timing.stereo);
-    
+
     // Check calculated values
     try testing.expectEqual(@as(u16, 2200), timing.getHTotal()); // 1920 + 280
     try testing.expectEqual(@as(u16, 1125), timing.getVTotal()); // 1080 + 45
-    
+
     const refresh = timing.getRefreshRate();
     try testing.expect(refresh > 59.9 and refresh < 60.1); // ~60 Hz
 }
@@ -552,28 +552,28 @@ test "parse 1920x1080 @ 60Hz timing" {
 test "parse returns null for display descriptor" {
     var raw: DetailedRaw = undefined;
     @memset(std.mem.asBytes(&raw), 0);
-    
+
     // Pixel clock = 0 means this is a display descriptor, not timing
     raw.pixel_clock_10khz = 0;
-    
+
     const timing = parseDetailedTiming(&raw);
     try testing.expect(timing == null);
 }
 
 test "detailed timing field extraction" {
     var raw: DetailedRaw = undefined;
-    
+
     // Test split field encoding
     // Want h_active = 0xACD, h_blank = 0xBCD
     // h_active_lo = 0xCD (low 8 bits)
     // h_hi = (0xA << 4) | 0xB = 0xAB (h_active high 4 bits in upper nibble, h_blank high 4 bits in lower)
     raw.h_active_lo = 0xCD;
     raw.h_blank_lo = 0xCD;
-    raw.h_hi = 0xAB; 
-    
+    raw.h_hi = 0xAB;
+
     const h_active = raw.getHActive();
     try testing.expectEqual(@as(u16, 0xACD), h_active); // (0xA << 8) | 0xCD
-    
+
     const h_blank = raw.getHBlank();
     try testing.expectEqual(@as(u16, 0xBCD), h_blank); // (0xB << 8) | 0xCD
 }
@@ -584,9 +584,9 @@ test "standard timing 1920x1080 @ 60Hz" {
     // Refresh: 60 - 60 = 0
     // Aspect: 16:9 = 3
     const bytes = [2]u8{ 0xD1, 0xC0 }; // 0xC0 = 11 000000 (aspect 3, refresh 0)
-    
+
     const std_timing = parseStandardTiming(&bytes).?;
-    
+
     try testing.expectEqual(@as(u16, 1920), std_timing.h_active);
     try testing.expectEqual(@as(u16, 1080), std_timing.v_active);
     try testing.expectEqual(@as(u8, 60), std_timing.refresh_rate_hz);
@@ -605,9 +605,9 @@ test "standard timing different aspect ratios" {
     // Refresh: 75 - 60 = 15 (0x0F)
     // Aspect: 5:4 = 2
     const bytes = [2]u8{ 0x81, 0x8F }; // 0x8F = 10 001111 (aspect 2, refresh 15)
-    
+
     const std_timing = parseStandardTiming(&bytes).?;
-    
+
     try testing.expectEqual(@as(u16, 1280), std_timing.h_active);
     try testing.expectEqual(@as(u16, 1024), std_timing.v_active);
     try testing.expectEqual(@as(u8, 75), std_timing.refresh_rate_hz);
@@ -618,24 +618,24 @@ test "established timings parsing" {
     // Set some bits to test parsing
     const bytes = [3]u8{
         0b10100000, // 720x400@70Hz, 640x480@60Hz
-        0b00001100, // 1024x768@60Hz, 1024x768@70Hz  
+        0b00001100, // 1024x768@60Hz, 1024x768@70Hz
         0b10000000, // 1152x870@75Hz
     };
-    
+
     const timings = parseEstablishedTimings(&bytes);
-    
+
     // Byte 0
     try testing.expect(timings.has_720x400_70hz);
     try testing.expect(!timings.has_720x400_88hz);
     try testing.expect(timings.has_640x480_60hz);
     try testing.expect(!timings.has_640x480_67hz);
-    
+
     // Byte 1
     try testing.expect(!timings.has_800x600_72hz);
     try testing.expect(timings.has_1024x768_60hz);
     try testing.expect(timings.has_1024x768_70hz);
     try testing.expect(!timings.has_1024x768_75hz);
-    
+
     // Byte 2
     try testing.expect(timings.has_1152x870_75hz);
 }
@@ -651,11 +651,11 @@ test "display descriptor product name" {
     // 13 bytes of name data (bytes 5-17)
     const name_data = "Test Monitor ";
     @memcpy(bytes[5..18], name_data);
-    
+
     const desc = parseDisplayDescriptor(&bytes).?;
-    
+
     try testing.expectEqual(DisplayDescriptorTag.product_name, desc.tag);
-    
+
     const name = extractDescriptorString(&desc.data);
     try testing.expectEqualStrings("Test Monitor", name);
 }
@@ -669,10 +669,10 @@ test "display descriptor serial number" {
     bytes[4] = 0;
     const serial_data = "ABC1234567890";
     @memcpy(bytes[5..18], serial_data);
-    
+
     const desc = parseDisplayDescriptor(&bytes).?;
     try testing.expectEqual(DisplayDescriptorTag.product_serial, desc.tag);
-    
+
     const serial = extractDescriptorString(&desc.data);
     try testing.expectEqualStrings("ABC1234567890", serial);
 }
@@ -681,7 +681,7 @@ test "display descriptor returns null for timing" {
     var bytes: [18]u8 = undefined;
     bytes[0] = 0x01; // Non-zero pixel clock = timing descriptor
     bytes[1] = 0x00;
-    
+
     const desc = parseDisplayDescriptor(&bytes);
     try testing.expect(desc == null);
 }

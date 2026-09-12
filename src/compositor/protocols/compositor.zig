@@ -8,6 +8,7 @@ const c = wayland.c;
 const Compositor = @import("../compositor.zig").Compositor;
 const Surface = @import("../surface.zig").Surface;
 const FrameCallback = @import("../surface.zig").FrameCallback;
+const InputRect = @import("../surface.zig").InputRect;
 
 // wl_compositor interface version we support
 const WL_COMPOSITOR_VERSION = 6;
@@ -28,7 +29,33 @@ pub const SurfaceData = struct {
 /// User data attached to wl_region resources
 const RegionData = struct {
     compositor: *Compositor,
-    // Region implementation would go here
+    rectangles: std.ArrayList(InputRect) = .empty,
+
+    fn deinit(self: *RegionData) void {
+        self.rectangles.deinit(self.compositor.allocator);
+        self.compositor.allocator.destroy(self);
+    }
+
+    fn add(self: *RegionData, rectangle: InputRect) !void {
+        if (rectangle.width <= 0 or rectangle.height <= 0) return;
+        try self.rectangles.append(self.compositor.allocator, rectangle);
+    }
+
+    fn subtract(self: *RegionData, removed: InputRect) !void {
+        if (removed.width <= 0 or removed.height <= 0) return;
+        var replacement = std.ArrayList(InputRect).empty;
+        errdefer replacement.deinit(self.compositor.allocator);
+        for (self.rectangles.items) |rectangle| {
+            try appendDifference(
+                self.compositor.allocator,
+                &replacement,
+                rectangle,
+                removed,
+            );
+        }
+        self.rectangles.deinit(self.compositor.allocator);
+        self.rectangles = replacement;
+    }
 };
 
 // wl_compositor request handlers
@@ -106,7 +133,6 @@ fn compositorCreateRegion(
         return;
     };
 
-    // Attach region data (stub for now)
     const region_data = comp.allocator.create(RegionData) catch {
         c.wl_resource_destroy(region_resource);
         c.wl_resource_post_no_memory(resource);
@@ -168,7 +194,9 @@ fn surfaceAttach(
         surface.compositor.logger.debug("Surface {d} attached buffer", .{surface.id});
     }
 
-    surface.attach(buffer_resource, x, y);
+    surface.attach(buffer_resource, x, y) catch {
+        c.wl_resource_post_no_memory(resource);
+    };
 }
 
 fn surfaceDamage(
@@ -249,9 +277,18 @@ fn surfaceSetInputRegion(
     region: ?*c.wl_resource,
 ) callconv(.c) void {
     _ = client;
-    _ = resource;
-    _ = region;
-    // Input region implementation stub
+    const data: *SurfaceData = @ptrCast(@alignCast(
+        c.wl_resource_get_user_data(resource),
+    ));
+    if (region == null) {
+        data.surface.setInputRegion(null) catch c.wl_resource_post_no_memory(resource);
+        return;
+    }
+    const region_data: *RegionData = @ptrCast(@alignCast(
+        c.wl_resource_get_user_data(region),
+    ));
+    data.surface.setInputRegion(region_data.rectangles.items) catch
+        c.wl_resource_post_no_memory(resource);
 }
 
 fn surfaceCommit(
@@ -269,7 +306,40 @@ fn surfaceCommit(
         surface.compositor.logger.debug("Surface {d} committed", .{surface.id});
     }
 
+    surface.validatePendingState() catch |err| {
+        postCommitValidationError(surface, resource orelse return, err);
+        return;
+    };
     surface.commit();
+}
+
+fn postCommitValidationError(
+    surface: *Surface,
+    resource: *c.wl_resource,
+    err: Surface.CommitValidationError,
+) void {
+    switch (err) {
+        error.InvalidScale => c.wl_resource_post_error(
+            resource,
+            c.WL_SURFACE_ERROR_INVALID_SCALE,
+            "buffer scale must be positive",
+        ),
+        error.InvalidSize => c.wl_resource_post_error(
+            resource,
+            c.WL_SURFACE_ERROR_INVALID_SIZE,
+            "buffer dimensions must be divisible by buffer scale",
+        ),
+        error.ViewportBadSize => c.wl_resource_post_error(
+            surface.viewport_resource orelse resource,
+            c.WP_VIEWPORT_ERROR_BAD_SIZE,
+            "fractional viewport source size requires a destination",
+        ),
+        error.ViewportOutOfBuffer => c.wl_resource_post_error(
+            surface.viewport_resource orelse resource,
+            c.WP_VIEWPORT_ERROR_OUT_OF_BUFFER,
+            "viewport source rectangle exceeds the buffer",
+        ),
+    }
 }
 
 fn surfaceSetBufferTransform(
@@ -279,11 +349,24 @@ fn surfaceSetBufferTransform(
 ) callconv(.c) void {
     _ = client;
 
+    if (!validBufferTransform(transform)) {
+        c.wl_resource_post_error(
+            resource,
+            c.WL_SURFACE_ERROR_INVALID_TRANSFORM,
+            "invalid buffer transform",
+        );
+        return;
+    }
     const data: *SurfaceData = @ptrCast(@alignCast(
         c.wl_resource_get_user_data(resource),
     ));
 
     data.surface.setTransform(@intCast(transform));
+}
+
+fn validBufferTransform(transform: i32) bool {
+    return transform >= c.WL_OUTPUT_TRANSFORM_NORMAL and
+        transform <= c.WL_OUTPUT_TRANSFORM_FLIPPED_270;
 }
 
 fn surfaceSetBufferScale(
@@ -292,6 +375,15 @@ fn surfaceSetBufferScale(
     scale: i32,
 ) callconv(.c) void {
     _ = client;
+
+    if (scale <= 0) {
+        c.wl_resource_post_error(
+            resource,
+            c.WL_SURFACE_ERROR_INVALID_SCALE,
+            "buffer scale must be positive",
+        );
+        return;
+    }
 
     const data: *SurfaceData = @ptrCast(@alignCast(
         c.wl_resource_get_user_data(resource),
@@ -346,14 +438,14 @@ var surface_implementation = [_]?*const anyopaque{
     @ptrCast(&surfaceOffset),
 };
 
-// wl_region request handlers (stub)
+// wl_region request handlers
 
 fn regionDestroy(resource: ?*c.wl_resource) callconv(.c) void {
     const data: *RegionData = @ptrCast(@alignCast(
         c.wl_resource_get_user_data(resource),
     ));
 
-    data.compositor.allocator.destroy(data);
+    data.deinit();
 }
 
 fn regionDestroyRequest(
@@ -373,12 +465,11 @@ fn regionAdd(
     height: i32,
 ) callconv(.c) void {
     _ = client;
-    _ = resource;
-    _ = x;
-    _ = y;
-    _ = width;
-    _ = height;
-    // Region add implementation stub
+    const data: *RegionData = @ptrCast(@alignCast(
+        c.wl_resource_get_user_data(resource),
+    ));
+    data.add(.{ .x = x, .y = y, .width = width, .height = height }) catch
+        c.wl_resource_post_no_memory(resource);
 }
 
 fn regionSubtract(
@@ -390,12 +481,60 @@ fn regionSubtract(
     height: i32,
 ) callconv(.c) void {
     _ = client;
-    _ = resource;
-    _ = x;
-    _ = y;
-    _ = width;
-    _ = height;
-    // Region subtract implementation stub
+    const data: *RegionData = @ptrCast(@alignCast(
+        c.wl_resource_get_user_data(resource),
+    ));
+    data.subtract(.{ .x = x, .y = y, .width = width, .height = height }) catch
+        c.wl_resource_post_no_memory(resource);
+}
+
+fn appendDifference(
+    allocator: std.mem.Allocator,
+    result: *std.ArrayList(InputRect),
+    rectangle: InputRect,
+    removed: InputRect,
+) !void {
+    const left = @max(rectangle.x, removed.x);
+    const top = @max(rectangle.y, removed.y);
+    const right = @min(rectangle.x + rectangle.width, removed.x + removed.width);
+    const bottom = @min(rectangle.y + rectangle.height, removed.y + removed.height);
+    if (left >= right or top >= bottom) {
+        try result.append(allocator, rectangle);
+        return;
+    }
+    try appendNonEmpty(result, allocator, .{
+        .x = rectangle.x,
+        .y = rectangle.y,
+        .width = rectangle.width,
+        .height = top - rectangle.y,
+    });
+    try appendNonEmpty(result, allocator, .{
+        .x = rectangle.x,
+        .y = bottom,
+        .width = rectangle.width,
+        .height = rectangle.y + rectangle.height - bottom,
+    });
+    try appendNonEmpty(result, allocator, .{
+        .x = rectangle.x,
+        .y = top,
+        .width = left - rectangle.x,
+        .height = bottom - top,
+    });
+    try appendNonEmpty(result, allocator, .{
+        .x = right,
+        .y = top,
+        .width = rectangle.x + rectangle.width - right,
+        .height = bottom - top,
+    });
+}
+
+fn appendNonEmpty(
+    result: *std.ArrayList(InputRect),
+    allocator: std.mem.Allocator,
+    rectangle: InputRect,
+) !void {
+    if (rectangle.width <= 0 or rectangle.height <= 0) return;
+    try result.append(allocator, rectangle);
 }
 
 var region_implementation = [_]?*const anyopaque{
@@ -458,4 +597,84 @@ pub fn register(compositor: *Compositor) !void {
         compositorBind,
     );
     _ = global; // Global is owned by display, no need to track
+}
+
+const testing = @import("core").testing;
+
+test "wl_surface buffer transform accepts only protocol enum values" {
+    try testing.expect(validBufferTransform(c.WL_OUTPUT_TRANSFORM_NORMAL));
+    try testing.expect(validBufferTransform(c.WL_OUTPUT_TRANSFORM_FLIPPED_270));
+    try testing.expectFalse(validBufferTransform(-1));
+    try testing.expectFalse(validBufferTransform(c.WL_OUTPUT_TRANSFORM_FLIPPED_270 + 1));
+}
+
+test "wl_region add and subtract preserve union geometry" {
+    var fixture = try @import("../surface.zig").TestFixture.setup(testing.allocator);
+    defer fixture.cleanup();
+    const region = try testing.allocator.create(RegionData);
+    region.* = .{ .compositor = fixture.compositor };
+    defer region.deinit();
+
+    try region.add(.{ .x = 0, .y = 0, .width = 100, .height = 80 });
+    try region.add(.{ .x = 200, .y = 200, .width = 10, .height = 10 });
+    try region.subtract(.{ .x = 20, .y = 10, .width = 60, .height = 50 });
+
+    try testing.expectEqual(@as(usize, 5), region.rectangles.items.len);
+    var found_disjoint = false;
+    for (region.rectangles.items) |rectangle| {
+        if (rectangle.x == 200 and rectangle.y == 200 and
+            rectangle.width == 10 and rectangle.height == 10)
+            found_disjoint = true;
+    }
+    try testing.expect(found_disjoint);
+}
+
+test "wl_surface input region copies assignment and commits atomically" {
+    var fixture = try @import("../surface.zig").TestFixture.setup(testing.allocator);
+    defer fixture.cleanup();
+    const surface = try fixture.compositor.createSurface();
+
+    var fds: [2]i32 = undefined;
+    if (std.os.linux.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds) != 0)
+        return error.SocketPairFailed;
+    defer @import("core").unix.close(fds[1]);
+    const client = c.wl_client_create(fixture.server.getDisplay(), fds[0]) orelse
+        return error.ClientCreateFailed;
+    defer c.wl_client_destroy(client);
+
+    const surface_resource = c.wl_resource_create(client, &c.wl_surface_interface, 1, 1) orelse
+        return error.ResourceCreateFailed;
+    const surface_data = try testing.allocator.create(SurfaceData);
+    surface_data.* = .{ .surface = surface };
+    surface.setResource(surface_resource);
+    c.wl_resource_set_implementation(
+        surface_resource,
+        @ptrCast(&surface_implementation),
+        surface_data,
+        surfaceDestroy,
+    );
+
+    const region_resource = c.wl_resource_create(client, &c.wl_region_interface, 1, 2) orelse
+        return error.ResourceCreateFailed;
+    const region_data = try testing.allocator.create(RegionData);
+    region_data.* = .{ .compositor = fixture.compositor };
+    c.wl_resource_set_implementation(
+        region_resource,
+        @ptrCast(&region_implementation),
+        region_data,
+        regionDestroy,
+    );
+    regionAdd(null, region_resource, 10, 20, 30, 40);
+    surfaceSetInputRegion(null, surface_resource, region_resource);
+    c.wl_resource_destroy(region_resource);
+
+    try testing.expect(surface.acceptsInput(0, 0));
+    surfaceCommit(null, surface_resource);
+    try testing.expectFalse(surface.acceptsInput(0, 0));
+    try testing.expect(surface.acceptsInput(15, 25));
+
+    surfaceSetInputRegion(null, surface_resource, null);
+    try testing.expectFalse(surface.acceptsInput(0, 0));
+    surfaceCommit(null, surface_resource);
+    try testing.expect(surface.acceptsInput(0, 0));
 }

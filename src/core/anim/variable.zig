@@ -88,7 +88,7 @@ pub fn AnimatedVariable(comptime T: type) type {
                     self.animation_data.started = true;
                     self.animation_data.paused = false;
                     self.animation_data.finished = false;
-                    self.animation_data.started_time = std.time.milliTimestamp();
+                    self.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds();
 
                     // Call begin callback
                     if (self.callback_on_begin) |callback| {
@@ -104,7 +104,7 @@ pub fn AnimatedVariable(comptime T: type) type {
             if (self.animation_data.finished or self.animation_data.paused or !self.animation_data.started)
                 return;
 
-            const current_time = std.time.milliTimestamp();
+            const current_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds();
             const elapsed = current_time - self.animation_data.started_time;
 
             if (elapsed >= self.animation_data.duration) {
@@ -136,7 +136,7 @@ pub fn AnimatedVariable(comptime T: type) type {
             if (!self.isBeingAnimated())
                 return 0;
 
-            const current_time = std.time.milliTimestamp();
+            const current_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds();
             const elapsed = current_time - self.animation_data.started_time;
             const remaining = self.animation_data.duration - elapsed;
 
@@ -202,7 +202,7 @@ pub fn AnimatedVariable(comptime T: type) type {
                 return 1.0;
             }
 
-            const current_time = std.time.milliTimestamp();
+            const current_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds();
             const elapsed = current_time - self.animation_data.started_time;
 
             if (elapsed >= self.animation_data.duration) {
@@ -271,14 +271,14 @@ test "AnimatedVariable f32" {
     try std.testing.expect(animated.isBeingAnimated());
 
     // Simulate time passing
-    animated.animation_data.started_time = std.time.milliTimestamp() - 50;
+    animated.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
     animated.tick();
 
     // Should be around 50% (linear interpolation)
     try std.testing.expect(animated.value > 40.0 and animated.value < 60.0);
 
     // Finish animation
-    animated.animation_data.started_time = std.time.milliTimestamp() - 100;
+    animated.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 100;
     animated.tick();
 
     try std.testing.expectEqual(@as(f32, 100.0), animated.value);
@@ -306,7 +306,7 @@ test "AnimatedVariable Vector2D" {
 
     animated.setValue(Vector2D.init(100, 100));
 
-    animated.animation_data.started_time = std.time.milliTimestamp() - 50;
+    animated.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
     animated.tick();
 
     try std.testing.expect(animated.value.getX() > 40.0 and animated.value.getX() < 60.0);
@@ -367,7 +367,7 @@ test "AnimatedVariable callbacks - onUpdate" {
     animated.setUpdateCallback(Ctx.onUpdate);
 
     animated.setValue(100.0);
-    animated.animation_data.started_time = std.time.milliTimestamp() - 50;
+    animated.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
 
     animated.tick();
     try std.testing.expectEqual(@as(u32, 1), update_count);
@@ -397,7 +397,7 @@ test "AnimatedVariable callbacks - onEnd" {
     try std.testing.expectEqual(@as(u32, 1), end_count);
 
     animated.setValue(100.0);
-    animated.animation_data.started_time = std.time.milliTimestamp() - 100;
+    animated.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 100;
     animated.tick();
 
     try std.testing.expectEqual(@as(u32, 2), end_count);
@@ -503,7 +503,7 @@ test "AnimatedVariable - getPercent and getCurveValue" {
     try std.testing.expectEqual(@as(f32, 1.0), animated.getCurveValue());
 
     animated.setValue(100.0);
-    animated.animation_data.started_time = std.time.milliTimestamp() - 50;
+    animated.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
 
     // Should be at 50% progress
     const percent = animated.getPercent();
@@ -655,7 +655,7 @@ test "AnimatedVariable - callback re-entrancy (setValue in callback)" {
     animated.setUpdateCallback(Ctx.onUpdate);
 
     animated.setValue(100.0);
-    animated.animation_data.started_time = std.time.milliTimestamp() - 50;
+    animated.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
 
     animated.tick();
 
@@ -688,7 +688,7 @@ test "AnimatedVariable - callback modifies different variable" {
     animated1.setUpdateCallback(Ctx.onUpdate);
 
     animated1.setValue(100.0);
-    animated1.animation_data.started_time = std.time.milliTimestamp() - 50;
+    animated1.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
 
     animated1.tick();
 
@@ -704,7 +704,7 @@ test "AnimatedVariable - onEnd set mid-flight" {
     animated.setDuration(100);
 
     animated.setValue(100.0);
-    animated.animation_data.started_time = std.time.milliTimestamp() - 30;
+    animated.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 30;
 
     // Animation is now in progress at ~30%
     try std.testing.expect(animated.isBeingAnimated());
@@ -724,7 +724,7 @@ test "AnimatedVariable - onEnd set mid-flight" {
     try std.testing.expectEqual(@as(u32, 0), end_count);
 
     // Complete animation
-    animated.animation_data.started_time = std.time.milliTimestamp() - 100;
+    animated.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 100;
     animated.tick();
 
     // Now callback should have fired
@@ -806,7 +806,7 @@ test "AnimatedVariable - setValue during onEnd callback" {
 
     // First animation
     animated.setValue(100.0);
-    animated.animation_data.started_time = std.time.milliTimestamp() - 100;
+    animated.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 100;
     animated.tick();
 
     // onEnd fired and started new animation
@@ -838,7 +838,7 @@ test "AnimatedVariable - multiple interruptions in sequence" {
     try std.testing.expectEqual(@as(u32, 1), begin_count);
 
     // Tick partially
-    animated.animation_data.started_time = std.time.milliTimestamp() - 50;
+    animated.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
     animated.tick();
     const value_at_50 = animated.value;
     try std.testing.expect(value_at_50 > 0.0 and value_at_50 < 100.0);
@@ -876,7 +876,7 @@ test "AnimatedVariable - warp during active animation" {
 
     // Start animation
     animated.setValue(100.0);
-    animated.animation_data.started_time = std.time.milliTimestamp() - 50;
+    animated.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
     animated.tick();
 
     try std.testing.expect(animated.isBeingAnimated());
@@ -918,7 +918,7 @@ test "AnimatedVariable - callback recursion prevention" {
     animated.setUpdateCallback(Ctx.onUpdate);
 
     animated.setValue(100.0);
-    animated.animation_data.started_time = std.time.milliTimestamp() - 50;
+    animated.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 50;
 
     // Single tick should not cause infinite recursion
     animated.tick();
@@ -984,7 +984,7 @@ test "AnimatedVariable - pause and resume with callbacks" {
     animated.setUpdateCallback(Ctx.onUpdate);
 
     animated.setValue(100.0);
-    animated.animation_data.started_time = std.time.milliTimestamp() - 30;
+    animated.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 30;
 
     // Tick while active
     animated.tick();
@@ -1023,7 +1023,7 @@ test "AnimatedVariable - resetAllCallbacks during animation" {
 
     animated.setUpdateCallback(Ctx.onUpdate);
     animated.setValue(100.0);
-    animated.animation_data.started_time = std.time.milliTimestamp() - 30;
+    animated.animation_data.started_time = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds() - 30;
 
     // Tick once
     animated.tick();

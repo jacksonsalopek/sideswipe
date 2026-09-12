@@ -3,19 +3,18 @@
 const std = @import("std");
 const display = @import("root.zig");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
     // Example 1: Fast parser (RECOMMENDED)
     std.debug.print("\n=== Example 1: Fast Parser (210x faster) ===\n", .{});
     {
         // Read EDID from sysfs (or any source)
-        const edid_data = try std.fs.cwd().readFileAlloc(
-            allocator,
+        const edid_data = try std.Io.Dir.cwd().readFileAlloc(
+            init.io,
             "/sys/class/drm/card0-HDMI-A-1/edid",
-            1024,
+            allocator,
+            .limited(1024),
         );
         defer allocator.free(edid_data);
 
@@ -25,15 +24,15 @@ pub fn main() !void {
         // Access display information
         const mfg_id = edid.getManufacturerId();
         std.debug.print("Manufacturer ID: {s}\n", .{mfg_id});
-        
+
         if (edid.getManufacturerName()) |mfg_name| {
             std.debug.print("Manufacturer: {s}\n", .{mfg_name});
         }
-        
+
         if (edid.getProductName()) |product| {
             std.debug.print("Product: {s}\n", .{product});
         }
-        
+
         std.debug.print("Product Code: 0x{X:0>4}\n", .{edid.getProductCode()});
         std.debug.print("Serial: 0x{X:0>8}\n", .{edid.getSerialNumber()});
         std.debug.print("Version: {d}.{d}\n", .{ edid.getVersion(), edid.getRevision() });
@@ -55,10 +54,11 @@ pub fn main() !void {
     // Example 2: Standard parser (when you need ownership semantics)
     std.debug.print("\n=== Example 2: Standard Parser (owns data) ===\n", .{});
     {
-        const edid_data = try std.fs.cwd().readFileAlloc(
-            allocator,
+        const edid_data = try std.Io.Dir.cwd().readFileAlloc(
+            init.io,
             "/sys/class/drm/card0-HDMI-A-1/edid",
-            1024,
+            allocator,
+            .limited(1024),
         );
         defer allocator.free(edid_data);
 

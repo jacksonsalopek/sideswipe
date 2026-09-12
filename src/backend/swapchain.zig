@@ -43,7 +43,7 @@ pub const Swapchain = struct {
             .buffer_allocator = buffer_allocator,
             .backend_impl = backend_impl,
             .options = .{},
-            .buffers = std.ArrayList(buffer.Interface){},
+            .buffers = std.ArrayList(buffer.Interface).empty,
         };
 
         return self;
@@ -149,7 +149,7 @@ pub const Swapchain = struct {
 
     /// Full reconfiguration - reallocate all buffers
     fn fullReconfigure(self: *Self, new_options: Options) !bool {
-        var new_buffers = std.ArrayList(buffer.Interface){};
+        var new_buffers = std.ArrayList(buffer.Interface).empty;
         errdefer {
             for (new_buffers.items) |buf| {
                 buf.deinit();

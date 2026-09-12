@@ -56,7 +56,7 @@ pub const EventLoop = struct {
         self: *EventLoop,
         fd: i32,
         mask: u32,
-        callback: *const fn (i32, u32, ?*anyopaque) callconv(.C) i32,
+        callback: *const fn (i32, u32, ?*anyopaque) callconv(.c) i32,
         data: ?*anyopaque,
     ) Error!*c.wl_event_source {
         return c.wl_event_loop_add_fd(self.handle, fd, mask, callback, data) orelse error.AddFailed;
@@ -65,7 +65,7 @@ pub const EventLoop = struct {
     /// Adds a timer event source.
     pub fn addTimer(
         self: *EventLoop,
-        callback: *const fn (?*anyopaque) callconv(.C) i32,
+        callback: *const fn (?*anyopaque) callconv(.c) i32,
         data: ?*anyopaque,
     ) Error!*c.wl_event_source {
         return c.wl_event_loop_add_timer(self.handle, callback, data) orelse error.AddFailed;
@@ -75,7 +75,7 @@ pub const EventLoop = struct {
     pub fn addSignal(
         self: *EventLoop,
         signal_number: i32,
-        callback: *const fn (i32, ?*anyopaque) callconv(.C) i32,
+        callback: *const fn (i32, ?*anyopaque) callconv(.c) i32,
         data: ?*anyopaque,
     ) Error!*c.wl_event_source {
         return c.wl_event_loop_add_signal(self.handle, signal_number, callback, data) orelse error.AddFailed;

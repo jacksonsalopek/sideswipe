@@ -107,7 +107,7 @@ pub const Implementation = struct {
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
             .allocator = allocator,
-            .buffers = std.ArrayList(buffer.Interface){},
+            .buffers = std.ArrayList(buffer.Interface).empty,
         };
     }
 

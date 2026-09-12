@@ -43,7 +43,7 @@ pub const Builder = struct {
 
     pub fn init(allocator: std.mem.Allocator, msg_type: Type) !Builder {
         var builder = Builder{
-            .data = std.ArrayList(u8){},
+            .data = std.ArrayList(u8).empty,
             .allocator = allocator,
         };
         try builder.data.append(allocator, @intFromEnum(msg_type));

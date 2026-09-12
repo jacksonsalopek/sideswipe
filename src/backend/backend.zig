@@ -31,7 +31,10 @@ pub const ImplementationOptions = struct {
 };
 
 /// Backend options
-pub const Options = struct {};
+pub const Options = struct {
+    physical_input: bool = false,
+    session_factory: *const fn (std.mem.Allocator) anyerror!*session.Type = session.Type.attempt,
+};
 
 /// Poll file descriptor callback
 pub const PollFd = struct {
@@ -101,6 +104,7 @@ pub const Coordinator = struct {
     implementations: std.ArrayList(Implementation),
     primary_allocator: ?allocator.Interface = null,
     primary_renderer: ?*renderer.Type = null,
+    primary_drm_fd: i32 = -1,
     session: ?*session.Type = null,
     ready: bool = false,
     idle_fd: i32 = -1,
@@ -115,6 +119,15 @@ pub const Coordinator = struct {
         backends: []const ImplementationOptions,
         options: Options,
     ) !*Self {
+        return createTracked(alloc, backends, options, null);
+    }
+
+    fn createTracked(
+        alloc: std.mem.Allocator,
+        backends: []const ImplementationOptions,
+        options: Options,
+        created_idle_fd: ?*i32,
+    ) !*Self {
         if (backends.len == 0) {
             return error.NoBackendsSpecified;
         }
@@ -126,13 +139,16 @@ pub const Coordinator = struct {
             .allocator = alloc,
             .options = options,
             .implementation_options = backends,
-            .implementations = std.ArrayList(Implementation){},
+            .implementations = std.ArrayList(Implementation).empty,
         };
+        errdefer if (self.session) |active| active.deinit();
 
         // Create timerfd for idle events
         const linux = std.os.linux;
         const fd_result = linux.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true });
         self.idle_fd = @intCast(fd_result);
+        if (created_idle_fd) |fd| fd.* = self.idle_fd;
+        errdefer if (self.idle_fd >= 0) core.unix.close(self.idle_fd);
 
         // Instantiate backend implementations from options
         errdefer {
@@ -142,9 +158,19 @@ pub const Coordinator = struct {
             self.implementations.deinit(alloc);
         }
 
+        self.initializePhysicalInput();
         try self.instantiateBackends();
 
         return self;
+    }
+
+    fn initializePhysicalInput(self: *Self) void {
+        if (!self.options.physical_input) return;
+        self.session = self.options.session_factory(self.allocator) catch |err| {
+            cli.log.warn("Physical input session unavailable: {}", .{err});
+            return;
+        };
+        self.poll_fds_dirty = true;
     }
 
     /// Instantiate backend implementations from stored options
@@ -202,8 +228,17 @@ pub const Coordinator = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        if (self.primary_allocator) |alloc| {
+            alloc.deinit();
+            self.primary_allocator = null;
+        }
         if (self.primary_renderer) |rend| {
             rend.deinit();
+            self.primary_renderer = null;
+        }
+        if (self.primary_drm_fd >= 0) {
+            core.unix.close(self.primary_drm_fd);
+            self.primary_drm_fd = -1;
         }
 
         for (self.implementations.items) |impl| {
@@ -216,7 +251,7 @@ pub const Coordinator = struct {
         }
 
         if (self.idle_fd >= 0) {
-            std.posix.close(self.idle_fd);
+            core.unix.close(self.idle_fd);
         }
 
         if (self.cached_poll_fds.len > 0) {
@@ -288,9 +323,10 @@ pub const Coordinator = struct {
 
             self.tryInitializeRenderer(reopened_fd) catch |err| {
                 std.log.err("Renderer initialization failed: {}", .{err});
-                std.posix.close(reopened_fd);
+                core.unix.close(reopened_fd);
                 continue;
             };
+            self.primary_drm_fd = reopened_fd;
 
             self.tryInitializeAllocator(reopened_fd) catch |err| {
                 std.log.err("GBM allocator creation failed: {}", .{err});
@@ -333,7 +369,7 @@ pub const Coordinator = struct {
     fn rebuildPollFds(self: *Self) !void {
         self.freePollFdsCache();
 
-        var result = std.ArrayList(PollFd){};
+        var result = std.ArrayList(PollFd).empty;
         errdefer result.deinit(self.allocator);
 
         try self.collectImplementationFds(&result);
@@ -464,7 +500,7 @@ pub const Coordinator = struct {
 
         if (self.needsAuthentication(drm_fd, new_fd)) {
             self.authenticateDrmFd(drm_fd, new_fd) catch {
-                std.posix.close(new_fd);
+                core.unix.close(new_fd);
                 return -1;
             };
         }
@@ -495,7 +531,7 @@ pub const Coordinator = struct {
     /// Open DRM device by name
     fn openDrmDevice(self: *Self, device_name: [*:0]u8) ?i32 {
         _ = self;
-        const fd = std.posix.open(
+        const fd = core.unix.open(
             std.mem.span(device_name),
             .{ .ACCMODE = .RDWR, .CLOEXEC = true },
             0,
@@ -611,6 +647,44 @@ test "Coordinator - hasSession initially false" {
     try testing.expectFalse(coordinator.hasSession());
 }
 
+test "Coordinator - physical input selection creates runtime session" {
+    const Factory = struct {
+        fn create(alloc: std.mem.Allocator) !*session.Type {
+            return session.Type.init(alloc);
+        }
+    };
+    const backends = [_]ImplementationOptions{
+        .{ .backend_type = .null, .request_mode = .if_available },
+    };
+    var coordinator = try Coordinator.create(testing.allocator, &backends, .{
+        .physical_input = true,
+        .session_factory = Factory.create,
+    });
+    defer coordinator.deinit();
+
+    try testing.expect(coordinator.hasSession());
+    try testing.expect((try coordinator.getPollFds()).len >= 1);
+}
+
+test "Coordinator - physical input context failure remains graceful" {
+    const Failure = struct {
+        fn create(_: std.mem.Allocator) !*session.Type {
+            return error.LibinputContextFailed;
+        }
+    };
+    const backends = [_]ImplementationOptions{
+        .{ .backend_type = .null, .request_mode = .if_available },
+    };
+    var coordinator = try Coordinator.create(testing.allocator, &backends, .{
+        .physical_input = true,
+        .session_factory = Failure.create,
+    });
+    defer coordinator.deinit();
+
+    try testing.expectFalse(coordinator.hasSession());
+    try testing.expect((try coordinator.getPollFds()).len >= 1);
+}
+
 test "Coordinator - start with mandatory backend failure" {
     const backends = [_]ImplementationOptions{
         .{ .backend_type = .drm, .request_mode = .mandatory },
@@ -667,7 +741,7 @@ test "Coordinator - multiple backend types simultaneously" {
 
 test "Coordinator - instantiates wayland backend when WAYLAND_DISPLAY set" {
     // Skip this test if WAYLAND_DISPLAY is not set
-    const wayland_display = std.posix.getenv("WAYLAND_DISPLAY");
+    const wayland_display = core.env.get("WAYLAND_DISPLAY");
     if (wayland_display == null) {
         return error.SkipZigTest;
     }
@@ -706,8 +780,12 @@ test "Coordinator - mandatory backend failure propagates error" {
     };
     const opts: Options = .{};
 
-    const result = Coordinator.create(testing.allocator, &backends, opts);
+    var idle_fd: i32 = -1;
+    const result = Coordinator.createTracked(testing.allocator, &backends, opts, &idle_fd);
     try testing.expectError(error.BackendNotImplemented, result);
+    try testing.expect(idle_fd >= 0);
+    const status = std.posix.system.fcntl(idle_fd, std.posix.F.GETFD, @as(usize, 0));
+    try testing.expectEqual(std.posix.E.BADF, std.posix.errno(status));
 }
 
 test "Coordinator - poll FDs cache invalidation" {

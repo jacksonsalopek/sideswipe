@@ -1,10 +1,17 @@
 const std = @import("std");
 const posix = std.posix;
-const linux = std.os.linux;
 const string = @import("core.string").string;
 
 // F_DUPFD_CLOEXEC constant (not always available in std.posix.F)
 const F_DUPFD_CLOEXEC: i32 = 1030;
+
+extern "c" fn fcntl(fd: c_int, command: c_int, ...) c_int;
+
+fn fcntlFd(fd: posix.fd_t, command: c_int, arg: c_int) !i32 {
+    const result = fcntl(fd, command, arg);
+    if (result < 0) return error.Unexpected;
+    return result;
+}
 
 /// Errors that can occur when reading files
 pub const Error = error{
@@ -50,14 +57,14 @@ pub const Descriptor = struct {
     /// Get file descriptor flags
     pub fn getFlags(self: Self) !i32 {
         if (!self.isValid()) return error.InvalidDescriptor;
-        const result = try posix.fcntl(self.fd, posix.F.GETFD, 0);
+        const result = try fcntlFd(self.fd, posix.F.GETFD, 0);
         return @intCast(result);
     }
 
     /// Set file descriptor flags
     pub fn setFlags(self: Self, flags: i32) !void {
         if (!self.isValid()) return error.InvalidDescriptor;
-        _ = try posix.fcntl(self.fd, posix.F.SETFD, @as(u32, @intCast(flags)));
+        _ = try fcntlFd(self.fd, posix.F.SETFD, @intCast(flags));
     }
 
     /// Take ownership of the file descriptor, leaving this object invalid
@@ -70,7 +77,7 @@ pub const Descriptor = struct {
     /// Reset/close the file descriptor
     pub fn reset(self: *Self) void {
         if (self.fd != -1) {
-            posix.close(self.fd);
+            std.Io.Threaded.closeFd(self.fd);
             self.fd = -1;
         }
     }
@@ -79,7 +86,7 @@ pub const Descriptor = struct {
     pub fn duplicate(self: Self, flags: i32) !Self {
         if (!self.isValid()) return Self.initInvalid();
 
-        const new_fd = try posix.fcntl(self.fd, flags, 0);
+        const new_fd = try fcntlFd(self.fd, flags, 0);
         return Self.init(@intCast(new_fd));
     }
 
@@ -127,31 +134,18 @@ pub const Descriptor = struct {
 
 /// Read entire file contents as a string
 /// Caller owns the returned memory and must free it
-pub fn readFileAsString(allocator: std.mem.Allocator, path: string) (Error || std.fs.File.OpenError || std.fs.File.ReadError)![]u8 {
-    // Check if file exists and is accessible
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
-        return switch (err) {
-            error.FileNotFound => Error.FileNotFound,
-            error.AccessDenied => Error.AccessDenied,
-            error.IsDir => Error.IsDirectory,
-            else => err,
-        };
-    };
-    defer file.close();
-
-    // Get file size
-    const stat = try file.stat();
-    const file_size = stat.size;
-
-    // Read entire file
-    const contents = try file.readToEndAlloc(allocator, file_size);
-    return contents;
+pub fn readFileAsString(allocator: std.mem.Allocator, path: string) (Error || std.Io.Dir.ReadFileAllocError)![]u8 {
+    return readFile(allocator, path, .unlimited);
 }
 
 /// Read entire file contents as a string with a maximum size limit
 /// Caller owns the returned memory and must free it
-pub fn readFileAsStringWithLimit(allocator: std.mem.Allocator, path: string, max_size: usize) (Error || std.fs.File.OpenError || std.fs.File.ReadError)![]u8 {
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+pub fn readFileAsStringWithLimit(allocator: std.mem.Allocator, path: string, max_size: usize) (Error || std.Io.Dir.ReadFileAllocError)![]u8 {
+    return readFile(allocator, path, .limited(max_size));
+}
+
+fn readFile(allocator: std.mem.Allocator, path: string, limit: std.Io.Limit) (Error || std.Io.Dir.ReadFileAllocError)![]u8 {
+    return std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, path, allocator, limit) catch |err| {
         return switch (err) {
             error.FileNotFound => Error.FileNotFound,
             error.AccessDenied => Error.AccessDenied,
@@ -159,10 +153,6 @@ pub fn readFileAsStringWithLimit(allocator: std.mem.Allocator, path: string, max
             else => err,
         };
     };
-    defer file.close();
-
-    const contents = try file.readToEndAlloc(allocator, max_size);
-    return contents;
 }
 
 test "readFileAsString - basic read" {
@@ -175,14 +165,15 @@ test "readFileAsString - basic read" {
     const test_content = "Hello, World!\nThis is a test file.";
 
     {
-        const test_file = try test_dir.dir.createFile("test.txt", .{});
-        defer test_file.close();
-        try test_file.writeAll(test_content);
+        const test_file = try test_dir.dir.createFile(std.testing.io, "test.txt", .{});
+        defer test_file.close(std.Options.debug_io);
+        try test_file.writeStreamingAll(std.testing.io, test_content);
     }
 
     // Read the file
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const test_path = try test_dir.dir.realpath("test.txt", &path_buf);
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_len = try test_dir.dir.realPathFile(std.testing.io, "test.txt", &path_buf);
+    const test_path = path_buf[0..path_len];
 
     const contents = try readFileAsString(allocator, test_path);
     defer allocator.free(contents);
@@ -207,14 +198,15 @@ test "readFileAsStringWithLimit - respect size limit" {
     const test_content = "Hello, World! This is a longer test content.";
 
     {
-        const test_file = try test_dir.dir.createFile("test_limit.txt", .{});
-        defer test_file.close();
-        try test_file.writeAll(test_content);
+        const test_file = try test_dir.dir.createFile(std.testing.io, "test_limit.txt", .{});
+        defer test_file.close(std.Options.debug_io);
+        try test_file.writeStreamingAll(std.testing.io, test_content);
     }
 
     // Read with limit
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const test_path = try test_dir.dir.realpath("test_limit.txt", &path_buf);
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_len = try test_dir.dir.realPathFile(std.testing.io, "test_limit.txt", &path_buf);
+    const test_path = path_buf[0..path_len];
 
     const contents = try readFileAsStringWithLimit(allocator, test_path, 1024);
     defer allocator.free(contents);
@@ -230,12 +222,13 @@ test "readFileAsString - empty file" {
     defer test_dir.cleanup();
 
     {
-        const test_file = try test_dir.dir.createFile("empty.txt", .{});
-        test_file.close();
+        const test_file = try test_dir.dir.createFile(std.testing.io, "empty.txt", .{});
+        test_file.close(std.Options.debug_io);
     }
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const test_path = try test_dir.dir.realpath("empty.txt", &path_buf);
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_len = try test_dir.dir.realPathFile(std.testing.io, "empty.txt", &path_buf);
+    const test_path = path_buf[0..path_len];
 
     const contents = try readFileAsString(allocator, test_path);
     defer allocator.free(contents);
@@ -247,8 +240,8 @@ test "Descriptor - basic operations" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
-    const test_file = try test_dir.dir.createFile("test.txt", .{});
-    defer test_file.close();
+    const test_file = try test_dir.dir.createFile(std.testing.io, "test.txt", .{});
+    defer test_file.close(std.Options.debug_io);
 
     const raw_fd = test_file.handle;
     var fd = Descriptor.init(raw_fd);
@@ -273,7 +266,7 @@ test "Descriptor - take ownership" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
-    const test_file = try test_dir.dir.createFile("test.txt", .{});
+    const test_file = try test_dir.dir.createFile(std.testing.io, "test.txt", .{});
     const raw_fd = test_file.handle;
 
     var fd = Descriptor.init(raw_fd);
@@ -284,14 +277,14 @@ test "Descriptor - take ownership" {
     try std.testing.expect(!fd.isValid());
 
     // Close the fd we took
-    posix.close(taken_fd);
+    std.Io.Threaded.closeFd(taken_fd);
 }
 
 test "Descriptor - reset" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
-    const test_file = try test_dir.dir.createFile("test.txt", .{});
+    const test_file = try test_dir.dir.createFile(std.testing.io, "test.txt", .{});
     const raw_fd = test_file.handle;
 
     var fd = Descriptor.init(raw_fd);
@@ -308,8 +301,8 @@ test "Descriptor - duplicate" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
-    const test_file = try test_dir.dir.createFile("test.txt", .{ .read = true });
-    defer test_file.close();
+    const test_file = try test_dir.dir.createFile(std.testing.io, "test.txt", .{ .read = true });
+    defer test_file.close(std.Options.debug_io);
 
     const raw_fd = test_file.handle;
     const fd1 = Descriptor.init(raw_fd);
@@ -333,14 +326,14 @@ test "Descriptor - isReadable" {
 
     // Create a file with some content
     {
-        const test_file = try test_dir.dir.createFile("test.txt", .{});
-        defer test_file.close();
-        try test_file.writeAll("test content");
+        const test_file = try test_dir.dir.createFile(std.testing.io, "test.txt", .{});
+        defer test_file.close(std.Options.debug_io);
+        try test_file.writeStreamingAll(std.testing.io, "test content");
     }
 
     // Open for reading
-    const test_file = try test_dir.dir.openFile("test.txt", .{});
-    defer test_file.close();
+    const test_file = try test_dir.dir.openFile(std.testing.io, "test.txt", .{});
+    defer test_file.close(std.Options.debug_io);
 
     var fd = Descriptor.init(test_file.handle);
 
@@ -356,8 +349,8 @@ test "Descriptor - getFlags and setFlags" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
-    const test_file = try test_dir.dir.createFile("test.txt", .{});
-    defer test_file.close();
+    const test_file = try test_dir.dir.createFile(std.testing.io, "test.txt", .{});
+    defer test_file.close(std.Options.debug_io);
 
     var fd = Descriptor.init(test_file.handle);
     defer {
@@ -379,7 +372,7 @@ test "Descriptor - comprehensive duplicate test" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
-    const test_file = try test_dir.dir.createFile("test.txt", .{ .read = true });
+    const test_file = try test_dir.dir.createFile(std.testing.io, "test.txt", .{ .read = true });
     const raw_fd = test_file.handle;
 
     // fd1 wraps raw_fd but doesn't own it (test_file owns it)
@@ -425,14 +418,14 @@ test "Descriptor - comprehensive duplicate test" {
     _ = fd1.take();
 
     // - test_file closes raw_fd
-    test_file.close();
+    test_file.close(std.Options.debug_io);
 }
 
 test "Descriptor - reset makes non-readable" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
-    const test_file = try test_dir.dir.createFile("test.txt", .{});
+    const test_file = try test_dir.dir.createFile(std.testing.io, "test.txt", .{});
     const raw_fd = test_file.handle;
 
     var fd = Descriptor.init(raw_fd);
@@ -451,7 +444,7 @@ test "Descriptor - isClosed after close" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
-    const test_file = try test_dir.dir.createFile("test.txt", .{});
+    const test_file = try test_dir.dir.createFile(std.testing.io, "test.txt", .{});
     const raw_fd = test_file.handle;
 
     var fd = Descriptor.init(raw_fd);
@@ -467,8 +460,8 @@ test "Descriptor - double take is safe" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
-    const test_file = try test_dir.dir.createFile("test.txt", .{});
-    defer test_file.close();
+    const test_file = try test_dir.dir.createFile(std.testing.io, "test.txt", .{});
+    defer test_file.close(std.Options.debug_io);
     const raw_fd = test_file.handle;
 
     var fd = Descriptor.init(raw_fd);
@@ -488,7 +481,7 @@ test "Descriptor - deinit after take is safe" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
-    const test_file = try test_dir.dir.createFile("test.txt", .{});
+    const test_file = try test_dir.dir.createFile(std.testing.io, "test.txt", .{});
     const raw_fd = test_file.handle;
 
     var fd = Descriptor.init(raw_fd);
@@ -502,7 +495,7 @@ test "Descriptor - deinit after take is safe" {
     try std.testing.expect(!fd.isValid());
 
     // Close the taken fd ourselves
-    posix.close(taken);
+    std.Io.Threaded.closeFd(taken);
 
     // test_file shouldn't close since we already did
     _ = test_file.handle;
@@ -512,8 +505,8 @@ test "Descriptor - multiple duplicates from same source" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
-    const test_file = try test_dir.dir.createFile("test.txt", .{});
-    defer test_file.close();
+    const test_file = try test_dir.dir.createFile(std.testing.io, "test.txt", .{});
+    defer test_file.close(std.Options.debug_io);
     const raw_fd = test_file.handle;
 
     var fd1 = Descriptor.init(raw_fd);
@@ -545,7 +538,7 @@ test "Descriptor - reset multiple times is safe" {
     var test_dir = std.testing.tmpDir(.{});
     defer test_dir.cleanup();
 
-    const test_file = try test_dir.dir.createFile("test.txt", .{});
+    const test_file = try test_dir.dir.createFile(std.testing.io, "test.txt", .{});
     const raw_fd = test_file.handle;
 
     var fd = Descriptor.init(raw_fd);

@@ -1,12 +1,13 @@
 const std = @import("std");
 const string = []const u8;
+const env = @import("env.zig");
 
 /// Check whether a config in the form basePath/hypr/programName.conf exists
 pub fn checkConfigExists(base_path: string, program_name: string, allocator: std.mem.Allocator) !bool {
     const full_path = try fullConfigPath(base_path, program_name, allocator);
     defer allocator.free(full_path);
 
-    std.fs.accessAbsolute(full_path, .{}) catch return false;
+    std.Io.Dir.accessAbsolute(std.Options.debug_io, full_path, .{}) catch return false;
     return true;
 }
 
@@ -17,19 +18,19 @@ pub fn fullConfigPath(base_path: string, program_name: string, allocator: std.me
 
 /// Retrieves the absolute path of the $HOME/.config directory
 pub fn getHome(allocator: std.mem.Allocator) ?string {
-    const home_dir = std.posix.getenv("HOME") orelse return null;
+    const home_dir = env.get("HOME") orelse return null;
 
     // Check if it's an absolute path
-    if (!std.fs.path.isAbsolute(home_dir)) return null;
+    if (!std.Io.Dir.path.isAbsolute(home_dir)) return null;
 
     return std.fmt.allocPrint(allocator, "{s}/.config", .{home_dir}) catch return null;
 }
 
 /// Retrieves a list of paths from the $XDG_CONFIG_DIRS env variable
 pub fn getXdgConfigDirs(allocator: std.mem.Allocator) ?[]string {
-    const xdg_config_dirs = std.posix.getenv("XDG_CONFIG_DIRS") orelse return null;
+    const xdg_config_dirs = env.get("XDG_CONFIG_DIRS") orelse return null;
 
-    var list = std.ArrayList(string){};
+    var list = std.ArrayList(string).empty;
     errdefer {
         for (list.items) |item| allocator.free(item);
         list.deinit(allocator);
@@ -50,10 +51,10 @@ pub fn getXdgConfigDirs(allocator: std.mem.Allocator) ?[]string {
 
 /// Retrieves the absolute path of the $XDG_CONFIG_HOME env variable
 pub fn getXdgConfigHome() ?string {
-    const xdg_config_home = std.posix.getenv("XDG_CONFIG_HOME") orelse return null;
+    const xdg_config_home = env.get("XDG_CONFIG_HOME") orelse return null;
 
     // Check if it's an absolute path
-    if (!std.fs.path.isAbsolute(xdg_config_home)) return null;
+    if (!std.Io.Dir.path.isAbsolute(xdg_config_home)) return null;
 
     return xdg_config_home;
 }
@@ -161,7 +162,7 @@ test "fullConfigPath" {
 
 test "getXdgConfigDirs parsing" {
     // This test would require setting env vars, skip in normal testing
-    if (std.posix.getenv("XDG_CONFIG_DIRS")) |_| {
+    if (env.get("XDG_CONFIG_DIRS")) |_| {
         const dirs = getXdgConfigDirs(std.testing.allocator);
         if (dirs) |d| {
             defer {

@@ -42,6 +42,76 @@ fn generateVicTable(b: *std.Build, target: std.Build.ResolvedTarget, core_cli_mo
     return &gen_vic.step;
 }
 
+/// Resolves the wayland-protocols data directory.
+/// Prefers `pkg-config wayland-protocols --variable=pkgdatadir`,
+/// falls back to the conventional `/usr/share/wayland-protocols`.
+fn resolveProtocolDir(b: *std.Build) []const u8 {
+    var code: u8 = undefined;
+    const out = b.runAllowFail(
+        &.{ "pkg-config", "wayland-protocols", "--variable=pkgdatadir" },
+        &code,
+        .ignore,
+    ) catch return "/usr/share/wayland-protocols";
+    if (code != 0) return "/usr/share/wayland-protocols";
+    const trimmed = std.mem.trim(u8, out, " \t\r\n");
+    if (trimmed.len == 0) return "/usr/share/wayland-protocols";
+    return trimmed;
+}
+
+/// Resolves a protocol XML path, preferring the system directory and
+/// falling back to a vendored copy under `protocols/xml/` when present.
+fn resolveProtocolXml(b: *std.Build, dir: []const u8, rel: []const u8) []const u8 {
+    const system_path = b.pathJoin(&.{ dir, rel });
+    const io = b.graph.io;
+    std.Io.Dir.accessAbsolute(io, system_path, .{}) catch {
+        const vendored = b.pathJoin(&.{ "protocols", "xml", std.fs.path.basename(rel) });
+        b.build_root.handle.access(io, vendored, .{}) catch return system_path;
+        return vendored;
+    };
+    return system_path;
+}
+
+const ProtocolSpec = struct {
+    xml_rel: []const u8,
+    out_base: []const u8,
+};
+
+/// Protocols to generate server headers, client headers, and private code for.
+/// Client headers are unused by the compositor today but keep the M3 shell
+/// client build working from the same generated tree.
+const protocol_specs = [_]ProtocolSpec{
+    .{ .xml_rel = "stable/xdg-shell/xdg-shell.xml", .out_base = "xdg-shell-protocol" },
+    .{ .xml_rel = "unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml", .out_base = "linux-dmabuf-unstable-v1-protocol" },
+    .{ .xml_rel = "staging/xdg-activation/xdg-activation-v1.xml", .out_base = "xdg-activation-v1-protocol" },
+    .{ .xml_rel = "stable/viewporter/viewporter.xml", .out_base = "viewporter-protocol" },
+    .{ .xml_rel = "staging/fractional-scale/fractional-scale-v1.xml", .out_base = "fractional-scale-v1-protocol" },
+};
+
+fn generateProtocolOutputs(
+    b: *std.Build,
+    protocols_step: *std.Build.Step,
+    mkdir_step: *std.Build.Step,
+    xml_path: []const u8,
+    out_base: []const u8,
+) void {
+    const short_base = if (std.mem.endsWith(u8, out_base, "-protocol"))
+        out_base[0 .. out_base.len - "-protocol".len]
+    else
+        out_base;
+    const modes = [_]struct { scanner_arg: []const u8, file: []const u8 }{
+        .{ .scanner_arg = "server-header", .file = b.fmt("{s}.h", .{out_base}) },
+        .{ .scanner_arg = "client-header", .file = b.fmt("{s}-client-protocol.h", .{short_base}) },
+        .{ .scanner_arg = "private-code", .file = b.fmt("{s}.c", .{out_base}) },
+    };
+    for (modes) |mode| {
+        const out_path = b.pathJoin(&.{ "protocols", mode.file });
+        const args = [_][]const u8{ "wayland-scanner", mode.scanner_arg, xml_path, out_path };
+        const cmd = b.addSystemCommand(&args);
+        cmd.step.dependOn(mkdir_step);
+        protocols_step.dependOn(&cmd.step);
+    }
+}
+
 fn setupWaylandProtocols(b: *std.Build) *std.Build.Step {
     // Create protocols directory
     const mkdir_protocols = b.addSystemCommand(&.{
@@ -50,68 +120,42 @@ fn setupWaylandProtocols(b: *std.Build) *std.Build.Step {
         "protocols",
     });
 
-    // Generate xdg-shell protocol (server-side)
-    const xdg_shell_server_header = b.addSystemCommand(&.{
-        "wayland-scanner",
-        "server-header",
-        "/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml",
-        "protocols/xdg-shell-protocol.h",
-    });
-    xdg_shell_server_header.step.dependOn(&mkdir_protocols.step);
-
-    // Generate xdg-shell protocol (client-side)
-    const xdg_shell_client_header = b.addSystemCommand(&.{
-        "wayland-scanner",
-        "client-header",
-        "/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml",
-        "protocols/xdg-shell-client-protocol.h",
-    });
-    xdg_shell_client_header.step.dependOn(&mkdir_protocols.step);
-
-    const xdg_shell_code = b.addSystemCommand(&.{
-        "wayland-scanner",
-        "private-code",
-        "/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml",
-        "protocols/xdg-shell-protocol.c",
-    });
-    xdg_shell_code.step.dependOn(&mkdir_protocols.step);
-
-    // Generate linux-dmabuf protocol (server-side)
-    const dmabuf_server_header = b.addSystemCommand(&.{
-        "wayland-scanner",
-        "server-header",
-        "/usr/share/wayland-protocols/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml",
-        "protocols/linux-dmabuf-unstable-v1-protocol.h",
-    });
-    dmabuf_server_header.step.dependOn(&mkdir_protocols.step);
-
-    // Generate linux-dmabuf protocol (client-side)
-    const dmabuf_client_header = b.addSystemCommand(&.{
-        "wayland-scanner",
-        "client-header",
-        "/usr/share/wayland-protocols/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml",
-        "protocols/linux-dmabuf-unstable-v1-client-protocol.h",
-    });
-    dmabuf_client_header.step.dependOn(&mkdir_protocols.step);
-
-    const dmabuf_code = b.addSystemCommand(&.{
-        "wayland-scanner",
-        "private-code",
-        "/usr/share/wayland-protocols/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml",
-        "protocols/linux-dmabuf-unstable-v1-protocol.c",
-    });
-    dmabuf_code.step.dependOn(&mkdir_protocols.step);
+    const proto_dir = resolveProtocolDir(b);
 
     // Create a step that depends on all protocol generation
     const protocols_step = b.step("_protocols_internal", "Internal step for all protocol generation");
-    protocols_step.dependOn(&xdg_shell_server_header.step);
-    protocols_step.dependOn(&xdg_shell_client_header.step);
-    protocols_step.dependOn(&xdg_shell_code.step);
-    protocols_step.dependOn(&dmabuf_server_header.step);
-    protocols_step.dependOn(&dmabuf_client_header.step);
-    protocols_step.dependOn(&dmabuf_code.step);
+    for (protocol_specs) |spec| {
+        const xml_path = resolveProtocolXml(b, proto_dir, spec.xml_rel);
+        generateProtocolOutputs(b, protocols_step, &mkdir_protocols.step, xml_path, spec.out_base);
+    }
 
     return protocols_step;
+}
+
+/// Adds a compiled wayland-scanner private-code object to the build.
+fn addProtocolObject(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    generate_protocols: *std.Build.Step,
+    name: []const u8,
+    c_file: []const u8,
+) *std.Build.Step.Compile {
+    const obj = b.addObject(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    obj.step.dependOn(generate_protocols);
+    obj.root_module.addCSourceFile(.{
+        .file = b.path(c_file),
+        .flags = &.{"-std=c99"},
+    });
+    obj.root_module.addIncludePath(b.path("protocols"));
+    obj.root_module.link_libc = true;
+    return obj;
 }
 
 pub fn build(b: *std.Build) void {
@@ -274,37 +318,14 @@ pub fn build(b: *std.Build) void {
     });
     compositor_mod.addIncludePath(b.path("protocols"));
     compositor_mod.linkSystemLibrary("wayland-server", .{});
+    compositor_mod.linkSystemLibrary("xkbcommon", .{});
 
     // Wayland protocol sources
-    const xdg_shell_c = b.addObject(.{
-        .name = "xdg-shell-protocol",
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    xdg_shell_c.step.dependOn(generate_protocols);
-    xdg_shell_c.addCSourceFile(.{
-        .file = b.path("protocols/xdg-shell-protocol.c"),
-        .flags = &.{"-std=c99"},
-    });
-    xdg_shell_c.addIncludePath(b.path("protocols"));
-    xdg_shell_c.linkLibC();
-
-    const dmabuf_c = b.addObject(.{
-        .name = "linux-dmabuf-protocol",
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    dmabuf_c.step.dependOn(generate_protocols);
-    dmabuf_c.addCSourceFile(.{
-        .file = b.path("protocols/linux-dmabuf-unstable-v1-protocol.c"),
-        .flags = &.{"-std=c99"},
-    });
-    dmabuf_c.addIncludePath(b.path("protocols"));
-    dmabuf_c.linkLibC();
+    const xdg_shell_c = addProtocolObject(b, target, optimize, generate_protocols, "xdg-shell-protocol", "protocols/xdg-shell-protocol.c");
+    const dmabuf_c = addProtocolObject(b, target, optimize, generate_protocols, "linux-dmabuf-protocol", "protocols/linux-dmabuf-unstable-v1-protocol.c");
+    const activation_c = addProtocolObject(b, target, optimize, generate_protocols, "xdg-activation-protocol", "protocols/xdg-activation-v1-protocol.c");
+    const viewporter_c = addProtocolObject(b, target, optimize, generate_protocols, "viewporter-protocol", "protocols/viewporter-protocol.c");
+    const fractional_scale_c = addProtocolObject(b, target, optimize, generate_protocols, "fractional-scale-protocol", "protocols/fractional-scale-v1-protocol.c");
 
     // Main executable
     const exe = b.addExecutable(.{
@@ -323,23 +344,27 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    exe.addIncludePath(b.path("protocols"));
-    exe.addObject(xdg_shell_c);
-    exe.addObject(dmabuf_c);
-    exe.linkSystemLibrary("libdrm");
-    exe.linkSystemLibrary("libinput");
-    exe.linkSystemLibrary("pixman-1");
-    exe.linkSystemLibrary("gbm");
-    exe.linkSystemLibrary("EGL");
-    exe.linkSystemLibrary("GLESv2");
-    exe.linkSystemLibrary("libudev");
-    exe.linkSystemLibrary("libseat");
-    exe.linkSystemLibrary("wayland-client");
-    exe.linkSystemLibrary("wayland-server");
-    exe.linkSystemLibrary("wayland-cursor");
+    exe.root_module.addIncludePath(b.path("protocols"));
+    exe.root_module.addObject(xdg_shell_c);
+    exe.root_module.addObject(dmabuf_c);
+    exe.root_module.addObject(activation_c);
+    exe.root_module.addObject(viewporter_c);
+    exe.root_module.addObject(fractional_scale_c);
+    exe.root_module.linkSystemLibrary("xkbcommon", .{});
+    exe.root_module.linkSystemLibrary("libdrm", .{});
+    exe.root_module.linkSystemLibrary("libinput", .{});
+    exe.root_module.linkSystemLibrary("pixman-1", .{});
+    exe.root_module.linkSystemLibrary("gbm", .{});
+    exe.root_module.linkSystemLibrary("EGL", .{});
+    exe.root_module.linkSystemLibrary("GLESv2", .{});
+    exe.root_module.linkSystemLibrary("libudev", .{});
+    exe.root_module.linkSystemLibrary("libseat", .{});
+    exe.root_module.linkSystemLibrary("wayland-client", .{});
+    exe.root_module.linkSystemLibrary("wayland-server", .{});
+    exe.root_module.linkSystemLibrary("wayland-cursor", .{});
     // libdisplay-info no longer needed - using native Zig implementation
-    // exe.linkSystemLibrary("libdisplay-info");
-    exe.linkLibC();
+    // exe.root_module.linkSystemLibrary("libdisplay-info", .{});
+    exe.root_module.link_libc = true;
 
     // Ensure generated files are created before build
     exe.step.dependOn(generate_pnp);
@@ -369,8 +394,8 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    core_tests.linkSystemLibrary("pixman-1");
-    core_tests.linkLibC();
+    core_tests.root_module.linkSystemLibrary("pixman-1", .{});
+    core_tests.root_module.link_libc = true;
     const run_core_tests = b.addRunArtifact(core_tests);
     test_step.dependOn(&run_core_tests.step);
 
@@ -386,8 +411,8 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    core_math_tests.linkSystemLibrary("pixman-1");
-    core_math_tests.linkLibC();
+    core_math_tests.root_module.linkSystemLibrary("pixman-1", .{});
+    core_math_tests.root_module.link_libc = true;
     const run_core_math_tests = b.addRunArtifact(core_math_tests);
     test_step.dependOn(&run_core_math_tests.step);
 
@@ -403,8 +428,8 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    core_anim_tests.linkSystemLibrary("pixman-1");
-    core_anim_tests.linkLibC();
+    core_anim_tests.root_module.linkSystemLibrary("pixman-1", .{});
+    core_anim_tests.root_module.link_libc = true;
     const run_core_anim_tests = b.addRunArtifact(core_anim_tests);
     test_step.dependOn(&run_core_anim_tests.step);
 
@@ -420,8 +445,8 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    core_graphics_tests.linkSystemLibrary("pixman-1");
-    core_graphics_tests.linkLibC();
+    core_graphics_tests.root_module.linkSystemLibrary("pixman-1", .{});
+    core_graphics_tests.root_module.link_libc = true;
     const run_core_graphics_tests = b.addRunArtifact(core_graphics_tests);
     test_step.dependOn(&run_core_graphics_tests.step);
 
@@ -437,7 +462,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    core_os_tests.linkLibC();
+    core_os_tests.root_module.link_libc = true;
     const run_core_os_tests = b.addRunArtifact(core_os_tests);
     test_step.dependOn(&run_core_os_tests.step);
 
@@ -453,7 +478,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    core_i18n_tests.linkLibC();
+    core_i18n_tests.root_module.link_libc = true;
     const run_core_i18n_tests = b.addRunArtifact(core_i18n_tests);
     test_step.dependOn(&run_core_i18n_tests.step);
 
@@ -466,7 +491,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    core_string_tests.linkLibC();
+    core_string_tests.root_module.link_libc = true;
     const run_core_string_tests = b.addRunArtifact(core_string_tests);
     test_step.dependOn(&run_core_string_tests.step);
 
@@ -479,7 +504,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    core_cli_tests.linkLibC();
+    core_cli_tests.root_module.link_libc = true;
     const run_core_cli_tests = b.addRunArtifact(core_cli_tests);
     test_step.dependOn(&run_core_cli_tests.step);
 
@@ -492,7 +517,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    core_display_tests.linkLibC();
+    core_display_tests.root_module.link_libc = true;
     // Display tests depend on generated PNP IDs and VIC table
     core_display_tests.step.dependOn(generate_pnp);
     core_display_tests.step.dependOn(generate_vic);
@@ -516,24 +541,27 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    backend_tests.addIncludePath(b.path("protocols"));
-    backend_tests.addObject(xdg_shell_c);
-    backend_tests.addObject(dmabuf_c);
+    backend_tests.root_module.addIncludePath(b.path("protocols"));
+    backend_tests.root_module.addObject(xdg_shell_c);
+    backend_tests.root_module.addObject(dmabuf_c);
+    backend_tests.root_module.addObject(activation_c);
+    backend_tests.root_module.addObject(viewporter_c);
+    backend_tests.root_module.addObject(fractional_scale_c);
     backend_tests.step.dependOn(generate_protocols);
-    backend_tests.linkSystemLibrary("libdrm");
-    backend_tests.linkSystemLibrary("libinput");
-    backend_tests.linkSystemLibrary("pixman-1");
-    backend_tests.linkSystemLibrary("gbm");
-    backend_tests.linkSystemLibrary("EGL");
-    backend_tests.linkSystemLibrary("GLESv2");
-    backend_tests.linkSystemLibrary("libudev");
-    backend_tests.linkSystemLibrary("libseat");
-    backend_tests.linkSystemLibrary("wayland-client");
-    backend_tests.linkSystemLibrary("wayland-server");
-    backend_tests.linkSystemLibrary("wayland-cursor");
+    backend_tests.root_module.linkSystemLibrary("libdrm", .{});
+    backend_tests.root_module.linkSystemLibrary("libinput", .{});
+    backend_tests.root_module.linkSystemLibrary("pixman-1", .{});
+    backend_tests.root_module.linkSystemLibrary("gbm", .{});
+    backend_tests.root_module.linkSystemLibrary("EGL", .{});
+    backend_tests.root_module.linkSystemLibrary("GLESv2", .{});
+    backend_tests.root_module.linkSystemLibrary("libudev", .{});
+    backend_tests.root_module.linkSystemLibrary("libseat", .{});
+    backend_tests.root_module.linkSystemLibrary("wayland-client", .{});
+    backend_tests.root_module.linkSystemLibrary("wayland-server", .{});
+    backend_tests.root_module.linkSystemLibrary("wayland-cursor", .{});
     // libdisplay-info no longer needed - using native Zig implementation
-    // backend_tests.linkSystemLibrary("libdisplay-info");
-    backend_tests.linkLibC();
+    // backend_tests.root_module.linkSystemLibrary("libdisplay-info", .{});
+    backend_tests.root_module.link_libc = true;
     const run_backend_tests = b.addRunArtifact(backend_tests);
     test_step.dependOn(&run_backend_tests.step);
 
@@ -552,7 +580,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    ipc_tests.linkLibC();
+    ipc_tests.root_module.link_libc = true;
     const run_ipc_tests = b.addRunArtifact(ipc_tests);
     test_step.dependOn(&run_ipc_tests.step);
 
@@ -568,11 +596,13 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    wayland_tests.addIncludePath(b.path("protocols"));
-    wayland_tests.addObject(xdg_shell_c);
+    wayland_tests.root_module.addIncludePath(b.path("protocols"));
+    wayland_tests.root_module.addObject(xdg_shell_c);
+    wayland_tests.root_module.addObject(viewporter_c);
+    wayland_tests.root_module.addObject(fractional_scale_c);
     wayland_tests.step.dependOn(generate_protocols);
-    wayland_tests.linkSystemLibrary("wayland-server");
-    wayland_tests.linkLibC();
+    wayland_tests.root_module.linkSystemLibrary("wayland-server", .{});
+    wayland_tests.root_module.link_libc = true;
     const run_wayland_tests = b.addRunArtifact(wayland_tests);
     test_step.dependOn(&run_wayland_tests.step);
 
@@ -592,22 +622,26 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    compositor_tests.addIncludePath(b.path("protocols"));
-    compositor_tests.addObject(xdg_shell_c);
-    compositor_tests.addObject(dmabuf_c);
+    compositor_tests.root_module.addIncludePath(b.path("protocols"));
+    compositor_tests.root_module.addObject(xdg_shell_c);
+    compositor_tests.root_module.addObject(dmabuf_c);
+    compositor_tests.root_module.addObject(activation_c);
+    compositor_tests.root_module.addObject(viewporter_c);
+    compositor_tests.root_module.addObject(fractional_scale_c);
     compositor_tests.step.dependOn(generate_protocols);
-    compositor_tests.linkSystemLibrary("wayland-server");
-    compositor_tests.linkSystemLibrary("libdrm");
-    compositor_tests.linkSystemLibrary("libinput");
-    compositor_tests.linkSystemLibrary("pixman-1");
-    compositor_tests.linkSystemLibrary("gbm");
-    compositor_tests.linkSystemLibrary("EGL");
-    compositor_tests.linkSystemLibrary("GLESv2");
-    compositor_tests.linkSystemLibrary("libudev");
-    compositor_tests.linkSystemLibrary("libseat");
-    compositor_tests.linkSystemLibrary("wayland-client");
-    compositor_tests.linkSystemLibrary("wayland-cursor");
-    compositor_tests.linkLibC();
+    compositor_tests.root_module.linkSystemLibrary("xkbcommon", .{});
+    compositor_tests.root_module.linkSystemLibrary("wayland-server", .{});
+    compositor_tests.root_module.linkSystemLibrary("libdrm", .{});
+    compositor_tests.root_module.linkSystemLibrary("libinput", .{});
+    compositor_tests.root_module.linkSystemLibrary("pixman-1", .{});
+    compositor_tests.root_module.linkSystemLibrary("gbm", .{});
+    compositor_tests.root_module.linkSystemLibrary("EGL", .{});
+    compositor_tests.root_module.linkSystemLibrary("GLESv2", .{});
+    compositor_tests.root_module.linkSystemLibrary("libudev", .{});
+    compositor_tests.root_module.linkSystemLibrary("libseat", .{});
+    compositor_tests.root_module.linkSystemLibrary("wayland-client", .{});
+    compositor_tests.root_module.linkSystemLibrary("wayland-cursor", .{});
+    compositor_tests.root_module.link_libc = true;
     const run_compositor_tests = b.addRunArtifact(compositor_tests);
     test_step.dependOn(&run_compositor_tests.step);
 
@@ -635,23 +669,27 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
-        file_tests.addIncludePath(b.path("protocols"));
-        file_tests.addObject(xdg_shell_c);
-        file_tests.addObject(dmabuf_c);
-        file_tests.linkSystemLibrary("libdrm");
-        file_tests.linkSystemLibrary("libinput");
-        file_tests.linkSystemLibrary("pixman-1");
-        file_tests.linkSystemLibrary("gbm");
-        file_tests.linkSystemLibrary("EGL");
-        file_tests.linkSystemLibrary("GLESv2");
-        file_tests.linkSystemLibrary("libudev");
-        file_tests.linkSystemLibrary("libseat");
-        file_tests.linkSystemLibrary("wayland-client");
-        file_tests.linkSystemLibrary("wayland-server");
-        file_tests.linkSystemLibrary("wayland-cursor");
+        file_tests.root_module.addIncludePath(b.path("protocols"));
+        file_tests.root_module.addObject(xdg_shell_c);
+        file_tests.root_module.addObject(dmabuf_c);
+        file_tests.root_module.addObject(activation_c);
+        file_tests.root_module.addObject(viewporter_c);
+        file_tests.root_module.addObject(fractional_scale_c);
+        file_tests.root_module.linkSystemLibrary("xkbcommon", .{});
+        file_tests.root_module.linkSystemLibrary("libdrm", .{});
+        file_tests.root_module.linkSystemLibrary("libinput", .{});
+        file_tests.root_module.linkSystemLibrary("pixman-1", .{});
+        file_tests.root_module.linkSystemLibrary("gbm", .{});
+        file_tests.root_module.linkSystemLibrary("EGL", .{});
+        file_tests.root_module.linkSystemLibrary("GLESv2", .{});
+        file_tests.root_module.linkSystemLibrary("libudev", .{});
+        file_tests.root_module.linkSystemLibrary("libseat", .{});
+        file_tests.root_module.linkSystemLibrary("wayland-client", .{});
+        file_tests.root_module.linkSystemLibrary("wayland-server", .{});
+        file_tests.root_module.linkSystemLibrary("wayland-cursor", .{});
         // libdisplay-info no longer needed - using native Zig implementation
-        // file_tests.linkSystemLibrary("libdisplay-info");
-        file_tests.linkLibC();
+        // file_tests.root_module.linkSystemLibrary("libdisplay-info", .{});
+        file_tests.root_module.link_libc = true;
 
         if (b.option([]const u8, "filter", "Test name filter")) |filter| {
             const filters = b.allocator.alloc([]const u8, 1) catch @panic("OOM");
@@ -679,25 +717,27 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    benchmark_exe.addIncludePath(b.path("protocols"));
-    benchmark_exe.addObject(xdg_shell_c);
-    benchmark_exe.addObject(dmabuf_c);
+    benchmark_exe.root_module.addIncludePath(b.path("protocols"));
+    benchmark_exe.root_module.addObject(xdg_shell_c);
+    benchmark_exe.root_module.addObject(dmabuf_c);
+    benchmark_exe.root_module.addObject(viewporter_c);
+    benchmark_exe.root_module.addObject(fractional_scale_c);
     benchmark_exe.step.dependOn(generate_protocols);
     benchmark_exe.step.dependOn(generate_pnp);
     benchmark_exe.step.dependOn(generate_vic);
-    benchmark_exe.linkSystemLibrary("libdrm");
-    benchmark_exe.linkSystemLibrary("libinput");
-    benchmark_exe.linkSystemLibrary("pixman-1");
-    benchmark_exe.linkSystemLibrary("gbm");
-    benchmark_exe.linkSystemLibrary("EGL");
-    benchmark_exe.linkSystemLibrary("GLESv2");
-    benchmark_exe.linkSystemLibrary("libudev");
-    benchmark_exe.linkSystemLibrary("libseat");
-    benchmark_exe.linkSystemLibrary("wayland-client");
-    benchmark_exe.linkSystemLibrary("wayland-cursor");
+    benchmark_exe.root_module.linkSystemLibrary("libdrm", .{});
+    benchmark_exe.root_module.linkSystemLibrary("libinput", .{});
+    benchmark_exe.root_module.linkSystemLibrary("pixman-1", .{});
+    benchmark_exe.root_module.linkSystemLibrary("gbm", .{});
+    benchmark_exe.root_module.linkSystemLibrary("EGL", .{});
+    benchmark_exe.root_module.linkSystemLibrary("GLESv2", .{});
+    benchmark_exe.root_module.linkSystemLibrary("libudev", .{});
+    benchmark_exe.root_module.linkSystemLibrary("libseat", .{});
+    benchmark_exe.root_module.linkSystemLibrary("wayland-client", .{});
+    benchmark_exe.root_module.linkSystemLibrary("wayland-cursor", .{});
     // Try to link libdisplay-info for comparison benchmark (optional)
-    benchmark_exe.linkSystemLibrary("libdisplay-info");
-    benchmark_exe.linkLibC();
+    benchmark_exe.root_module.linkSystemLibrary("libdisplay-info", .{});
+    benchmark_exe.root_module.link_libc = true;
 
     // Run benchmarks (pass arguments for specific benchmark selection)
     const benchmark_step = b.step("benchmark", "Run benchmarks (use -- --name <name> for specific benchmark)");

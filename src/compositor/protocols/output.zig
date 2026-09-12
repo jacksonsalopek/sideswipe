@@ -6,6 +6,7 @@ const wayland = @import("wayland");
 const c = wayland.c;
 
 const Compositor = @import("../compositor.zig").Compositor;
+const scale = @import("../scale.zig");
 
 // wl_output interface version we support
 const WL_OUTPUT_VERSION = 4;
@@ -56,19 +57,64 @@ fn outputBind(
         outputResourceDestroy,
     );
 
-    // Send initial output configuration
-    sendOutputInfo(resource, @intCast(version));
+    attach(compositor, resource);
+    sendOutputInfo(resource, @intCast(version), compositor);
 }
 
 fn outputResourceDestroy(resource: ?*c.wl_resource) callconv(.c) void {
     const data: *OutputData = @ptrCast(@alignCast(
         c.wl_resource_get_user_data(resource),
     ));
+    detach(data.compositor, resource);
     data.compositor.allocator.destroy(data);
 }
 
+fn attach(compositor: *Compositor, resource: *c.wl_resource) void {
+    compositor.output_binds.append(compositor.allocator, resource) catch {};
+}
+
+fn detach(compositor: *Compositor, resource: ?*c.wl_resource) void {
+    const target = resource orelse return;
+    for (compositor.output_binds.items, 0..) |bound, index| {
+        if (bound != target) continue;
+        _ = compositor.output_binds.swapRemove(index);
+        return;
+    }
+}
+
+pub fn broadcast(compositor: *Compositor) void {
+    for (compositor.output_binds.items) |resource| {
+        sendOutputInfo(resource, @intCast(c.wl_resource_get_version(resource)), compositor);
+    }
+}
+
+const Mode = struct {
+    width: i32,
+    height: i32,
+    scale: f32,
+};
+
+fn advertisedMode(compositor: *Compositor) Mode {
+    const fractional_scale = compositor.preferredScale();
+    if (compositor.outputs.items.len == 0) {
+        return physicalMode(1920, 1080, fractional_scale);
+    }
+    const output = compositor.outputs.items[0];
+    return physicalMode(output.logical_width, output.logical_height, output.fractional_scale);
+}
+
+fn physicalMode(logical_width: i32, logical_height: i32, fractional_scale: f32) Mode {
+    return .{
+        .width = @intFromFloat(@round(@as(f32, @floatFromInt(@max(logical_width, 1))) * fractional_scale)),
+        .height = @intFromFloat(@round(@as(f32, @floatFromInt(@max(logical_height, 1))) * fractional_scale)),
+        .scale = fractional_scale,
+    };
+}
+
 /// Sends output configuration to the client
-fn sendOutputInfo(resource: ?*c.wl_resource, version: u32) void {
+fn sendOutputInfo(resource: ?*c.wl_resource, version: u32, compositor: *Compositor) void {
+    const mode = advertisedMode(compositor);
+    const fractional_scale = mode.scale;
     // Send geometry (position and physical size)
     // x, y, physical_width_mm, physical_height_mm, subpixel, make, model, transform
     c.wl_output_send_geometry(
@@ -83,19 +129,17 @@ fn sendOutputInfo(resource: ?*c.wl_resource, version: u32) void {
         c.WL_OUTPUT_TRANSFORM_NORMAL,
     );
 
-    // Send mode (resolution and refresh rate)
-    // flags, width, height, refresh (in mHz)
     c.wl_output_send_mode(
         resource,
         c.WL_OUTPUT_MODE_CURRENT | c.WL_OUTPUT_MODE_PREFERRED,
-        1920, // width
-        1080, // height
-        60000, // 60Hz in mHz
+        mode.width,
+        mode.height,
+        60000,
     );
 
     // Send scale (version 2+)
     if (version >= 2) {
-        c.wl_output_send_scale(resource, 1);
+        c.wl_output_send_scale(resource, scale.legacy(fractional_scale));
     }
 
     // Send name (version 4+)
@@ -120,4 +164,13 @@ pub fn register(compositor: *Compositor) !void {
         outputBind,
     );
     _ = global; // Global is owned by display, no need to track
+}
+
+const testing = @import("core").testing;
+
+test "physicalMode scales logical size to buffer pixels" {
+    const mode = physicalMode(1280, 800, 1.5);
+    try testing.expectEqual(@as(i32, 1920), mode.width);
+    try testing.expectEqual(@as(i32, 1200), mode.height);
+    try testing.expectEqual(@as(f32, 1.5), mode.scale);
 }

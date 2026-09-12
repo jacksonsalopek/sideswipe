@@ -7,12 +7,77 @@ const cli = @import("core.cli");
 const math = @import("core.math");
 const Vector2D = math.Vec2;
 const backend = @import("backend.zig");
+const renderer = @import("renderer.zig");
 const output = @import("output.zig");
 const input = @import("input.zig");
 const buffer = @import("buffer.zig");
+const cursor = @import("cursor.zig");
 const misc = @import("misc.zig");
 const ipc = @import("ipc");
 const signals = ipc.signals;
+pub const input_signals = signals;
+
+/// Nested input sink installed by the compositor.
+pub const InputHandler = struct {
+    pointer_motion_absolute: *const fn (?*anyopaque, signals.PointerMotionAbsoluteEvent) void,
+    pointer_button: *const fn (?*anyopaque, signals.PointerButtonEvent) void,
+    pointer_axis: *const fn (?*anyopaque, signals.PointerAxisEvent) void,
+    pointer_frame: *const fn (?*anyopaque) void,
+    keyboard_key: *const fn (?*anyopaque, signals.KeyboardKeyEvent) void,
+    keyboard_modifiers: *const fn (?*anyopaque, signals.KeyboardModifiersEvent) void,
+    touch_down: *const fn (?*anyopaque, signals.TouchDownEvent) void,
+    touch_up: *const fn (?*anyopaque, signals.TouchUpEvent) void,
+    touch_motion: *const fn (?*anyopaque, signals.TouchMotionEvent) void,
+    touch_frame: *const fn (?*anyopaque) void,
+    touch_cancel: *const fn (?*anyopaque) void,
+};
+
+const PointerSample = struct {
+    x: f64 = 0,
+    y: f64 = 0,
+    time_ms: u32 = 0,
+    valid: bool = false,
+};
+
+const PointerKinematics = struct {
+    x: f64,
+    y: f64,
+    dx: f64,
+    dy: f64,
+    distance: f64,
+    dt_ms: u32,
+    speed: f64,
+
+    fn compute(prev: PointerSample, x: f64, y: f64, time_ms: u32) PointerKinematics {
+        if (!prev.valid) return zero(x, y);
+        const dt_ms = time_ms -% prev.time_ms;
+        if (dt_ms == 0 or dt_ms > 1000) return zero(x, y);
+        const dx = x - prev.x;
+        const dy = y - prev.y;
+        const distance = @sqrt(dx * dx + dy * dy);
+        return .{
+            .x = x,
+            .y = y,
+            .dx = dx,
+            .dy = dy,
+            .distance = distance,
+            .dt_ms = dt_ms,
+            .speed = distance * 1000.0 / @as(f64, @floatFromInt(dt_ms)),
+        };
+    }
+
+    fn zero(x: f64, y: f64) PointerKinematics {
+        return .{ .x = x, .y = y, .dx = 0, .dy = 0, .distance = 0, .dt_ms = 0, .speed = 0 };
+    }
+
+    fn heading(self: PointerKinematics) []const u8 {
+        if (self.distance < 0.01) return "still";
+        if (@abs(self.dx) >= @abs(self.dy)) {
+            return if (self.dx >= 0) "right" else "left";
+        }
+        return if (self.dy >= 0) "down" else "up";
+    }
+};
 
 const c = @cImport({
     @cInclude("wayland-client.h");
@@ -20,6 +85,8 @@ const c = @cImport({
     @cInclude("wayland-server.h");
     @cInclude("xdg-shell-client-protocol.h");
     @cInclude("linux-dmabuf-unstable-v1-client-protocol.h");
+    @cInclude("viewporter-client-protocol.h");
+    @cInclude("fractional-scale-v1-client-protocol.h");
     @cInclude("xf86drm.h");
     @cInclude("fcntl.h");
     @cInclude("sys/mman.h");
@@ -36,7 +103,7 @@ pub const Buffer = struct {
     allocator: std.mem.Allocator,
     shm_pool: ?*c.wl_shm_pool = null,
     shm_fd: i32 = -1,
-    
+
     // Buffer properties for cache matching
     width: i32 = 0,
     height: i32 = 0,
@@ -57,7 +124,7 @@ pub const Buffer = struct {
 
         const buf_type = buf.bufferType();
         cli.log.debug("Wayland Backend: Creating buffer (type={})", .{buf_type});
-        
+
         if (buf_type == .dmabuf) {
             try self.createFromDmabuf();
         } else if (buf_type == .shm) {
@@ -80,7 +147,7 @@ pub const Buffer = struct {
 
         return self;
     }
-    
+
     fn bufferReleaseCallback(data: ?*anyopaque, wl_buf: ?*c.wl_buffer) callconv(.c) void {
         _ = wl_buf;
         const self: *Self = @ptrCast(@alignCast(data orelse return));
@@ -97,7 +164,7 @@ pub const Buffer = struct {
         const attrs = self.buffer.dmabuf();
         const width = @as(i32, @intFromFloat(attrs.size.getX()));
         const height = @as(i32, @intFromFloat(attrs.size.getY()));
-        
+
         cli.log.debug(
             "Wayland Backend: Creating DMA-BUF ({}x{} format=0x{x:0>8} modifier=0x{x:0>16} planes={})",
             .{ width, height, attrs.format, attrs.modifier, attrs.planes },
@@ -114,7 +181,7 @@ pub const Buffer = struct {
                 "Wayland Backend: Adding DMA-BUF plane {d} (fd={d} offset={d} stride={d})",
                 .{ i, attrs.fds[i], attrs.offsets[i], attrs.strides[i] },
             );
-            
+
             c.zwp_linux_buffer_params_v1_add(
                 params,
                 attrs.fds[i],
@@ -135,7 +202,7 @@ pub const Buffer = struct {
         );
 
         c.zwp_linux_buffer_params_v1_destroy(params);
-        
+
         if (self.wl_buffer == null) {
             cli.log.err("Wayland Backend: create_immed returned null wl_buffer", .{});
         } else {
@@ -159,7 +226,7 @@ pub const Buffer = struct {
         const height = @as(i32, @intFromFloat(attrs.size.getY()));
         const stride = attrs.stride;
         const size = height * stride;
-        
+
         // Store buffer properties for cache matching
         self.width = width;
         self.height = height;
@@ -172,7 +239,7 @@ pub const Buffer = struct {
         );
 
         const fd = try createAnonymousFile(@intCast(size));
-        errdefer std.posix.close(fd);
+        errdefer core.unix.close(fd);
 
         const data_result = self.buffer.beginDataPtr(0);
         defer self.buffer.endDataPtr();
@@ -183,12 +250,12 @@ pub const Buffer = struct {
         }
 
         const src_data = data_result.ptr.?[0..data_result.size];
-        
+
         cli.log.trace("Wayland Backend: Mapping SHM buffer ({} bytes)", .{size});
         const mapped = std.posix.mmap(
             null,
             @intCast(size),
-            std.posix.PROT.WRITE,
+            .{ .WRITE = true },
             .{ .TYPE = .SHARED },
             fd,
             0,
@@ -201,28 +268,28 @@ pub const Buffer = struct {
         @memcpy(mapped[0..@intCast(size)], src_data[0..@intCast(size)]);
         cli.log.trace("Wayland Backend: Copied {} bytes to SHM buffer", .{size});
 
-        self.shm_pool = c.wl_shm_create_pool(shm, fd, size);
-        self.shm_fd = fd;
-
-        if (self.shm_pool == null) {
+        const pool = c.wl_shm_create_pool(shm, fd, size) orelse {
             cli.log.err("Wayland Backend: Failed to create SHM pool", .{});
             return error.FailedToCreateShmPool;
-        }
+        };
+        errdefer c.wl_shm_pool_destroy(pool);
 
-        self.wl_buffer = c.wl_shm_pool_create_buffer(
-            self.shm_pool,
+        const wl_buffer = c.wl_shm_pool_create_buffer(
+            pool,
             0,
             width,
             height,
             stride,
             attrs.format,
-        );
-        
-        if (self.wl_buffer == null) {
+        ) orelse {
             cli.log.err("Wayland Backend: create_buffer returned null wl_buffer", .{});
-        } else {
-            cli.log.debug("Wayland Backend: SHM wl_buffer created successfully @{*}", .{self.wl_buffer.?});
-        }
+            return error.FailedToCreateShmBuffer;
+        };
+
+        self.shm_pool = pool;
+        self.shm_fd = fd;
+        self.wl_buffer = wl_buffer;
+        cli.log.debug("Wayland Backend: SHM wl_buffer created successfully @{*}", .{wl_buffer});
     }
 
     pub fn deinit(self: *Self) void {
@@ -233,7 +300,7 @@ pub const Buffer = struct {
             c.wl_shm_pool_destroy(pool);
         }
         if (self.shm_fd >= 0) {
-            std.posix.close(self.shm_fd);
+            core.unix.close(self.shm_fd);
         }
         self.allocator.destroy(self);
     }
@@ -241,24 +308,43 @@ pub const Buffer = struct {
     pub fn good(self: *const Self) bool {
         return self.wl_buffer != null;
     }
+
+    fn refreshShm(self: *Self, source: buffer.Interface) !void {
+        const byte_count = try std.math.mul(usize, @intCast(self.height), @intCast(self.stride));
+        const data = source.beginDataPtr(0);
+        defer source.endDataPtr();
+        const source_ptr = data.ptr orelse return error.NoDataPtr;
+        if (data.size < byte_count) return error.InvalidShmAttrs;
+        const mapped = try std.posix.mmap(
+            null,
+            byte_count,
+            .{ .WRITE = true },
+            .{ .TYPE = .SHARED },
+            self.shm_fd,
+            0,
+        );
+        defer std.posix.munmap(mapped);
+        @memcpy(mapped, source_ptr[0..byte_count]);
+        self.buffer = source;
+    }
 };
 
 /// Creates an anonymous file for SHM buffer
 fn createAnonymousFile(size: usize) !i32 {
     const name = "sideswipe-shm";
-    
+
     const fd = std.posix.memfd_createZ(name, 0) catch |err| switch (err) {
-        error.ProcessFdQuotaExceeded,
-        error.SystemFdQuotaExceeded => return err,
-        else => {
+        error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded => return err,
+        else => blk: {
             const tmp_fd = c.shm_open(name, c.O_RDWR | c.O_CREAT | c.O_EXCL, 0o600);
             if (tmp_fd < 0) return error.ShmOpenFailed;
             _ = c.shm_unlink(name);
-            return tmp_fd;
+            break :blk tmp_fd;
         },
     };
 
-    try std.posix.ftruncate(fd, size);
+    errdefer core.unix.close(fd);
+    try core.unix.ftruncate(fd, size);
     return fd;
 }
 
@@ -279,19 +365,30 @@ pub const Output = struct {
     xdg_surface: ?*c.xdg_surface = null,
     xdg_toplevel: ?*c.xdg_toplevel = null,
     frame_callback: ?*c.wl_callback = null,
+    viewport: ?*c.wp_viewport = null,
 
     // Cursor state
     cursor_buffer: ?buffer.Interface = null,
     cursor_surface: ?*c.wl_surface = null,
+    cursor_viewport: ?*c.wp_viewport = null,
     cursor_wl_buffer: ?*c.wl_buffer = null,
     cursor_serial: u32 = 0,
     cursor_hotspot: Vector2D = .{},
+    fractional: ?*c.wp_fractional_scale_v1 = null,
+    configure_callback: ?*const fn (userdata: ?*anyopaque, width: i32, height: i32, scale: f32) void = null,
+    configure_userdata: ?*anyopaque = null,
 
     // Frame event callback
     frame_event_callback: ?*const fn (userdata: ?*anyopaque) void = null,
     frame_event_userdata: ?*anyopaque = null,
+    destroy_event_callback: ?*const fn (userdata: ?*anyopaque) void = null,
+    destroy_event_userdata: ?*anyopaque = null,
 
     const Self = @This();
+    const DestroyEvent = struct {
+        callback: ?*const fn (userdata: ?*anyopaque) void,
+        userdata: ?*anyopaque,
+    };
 
     pub fn create(allocator: std.mem.Allocator, name: []const u8, be: *Backend) !*Self {
         const self = try allocator.create(Self);
@@ -305,7 +402,7 @@ pub const Output = struct {
             .backend = be,
             .allocator = allocator,
             .state = output.State.init(allocator),
-            .buffers = std.ArrayList(*Buffer){},
+            .buffers = std.ArrayList(*Buffer).empty,
         };
 
         // Create Wayland surface
@@ -317,15 +414,31 @@ pub const Output = struct {
             }
         }
 
-        // Create XDG surface
+        self.bindFractionalScale(be);
+        if (be.wayland_state.viewporter) |viewporter| {
+            self.viewport = c.wp_viewporter_get_viewport(viewporter, self.surface);
+        }
         self.initXdgSurface(be);
 
         // Create cursor surface
         if (be.wayland_state.compositor) |compositor| {
             self.cursor_surface = c.wl_compositor_create_surface(compositor);
         }
+        if (be.wayland_state.viewporter) |viewporter| {
+            if (self.cursor_surface) |cursor_surf| {
+                self.cursor_viewport = c.wp_viewporter_get_viewport(viewporter, cursor_surf);
+            }
+        }
 
         return self;
+    }
+
+    fn bindFractionalScale(self: *Self, be: *Backend) void {
+        const manager = be.wayland_state.fractional_scale_manager orelse return;
+        const surf = self.surface orelse return;
+        self.fractional = c.wp_fractional_scale_manager_v1_get_fractional_scale(manager, surf);
+        const fractional = self.fractional orelse return;
+        _ = c.wp_fractional_scale_v1_add_listener(fractional, &fractional_listener, be);
     }
 
     fn initXdgSurface(self: *Self, be: *Backend) void {
@@ -375,6 +488,10 @@ pub const Output = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        self.frame_event_callback = null;
+        self.frame_event_userdata = null;
+        self.destroy_event_callback = null;
+        self.destroy_event_userdata = null;
         for (self.buffers.items) |buf| {
             buf.deinit();
         }
@@ -388,6 +505,9 @@ pub const Output = struct {
             c.wl_buffer_destroy(buf);
         }
 
+        if (self.cursor_viewport) |viewport| c.wp_viewport_destroy(viewport);
+        if (self.fractional) |fractional| c.wp_fractional_scale_v1_destroy(fractional);
+
         if (self.cursor_surface) |surf| {
             c.wl_surface_destroy(surf);
         }
@@ -395,6 +515,7 @@ pub const Output = struct {
         if (self.xdg_toplevel) |toplevel| {
             c.xdg_toplevel_destroy(toplevel);
         }
+        if (self.viewport) |viewport| c.wp_viewport_destroy(viewport);
 
         if (self.xdg_surface) |xdg_surf| {
             c.xdg_surface_destroy(xdg_surf);
@@ -404,6 +525,7 @@ pub const Output = struct {
             c.wl_surface_destroy(surf);
         }
 
+        if (self.state.custom_mode) |mode| self.allocator.destroy(mode);
         self.state.deinit();
         self.allocator.free(self.name);
         self.allocator.destroy(self);
@@ -421,7 +543,7 @@ pub const Output = struct {
         }
 
         const surf = self.surface.?;
-        
+
         cli.log.debug("Output {s}: Committing to Wayland (buffer_committed={})", .{ self.name, self.state.committed.buffer });
 
         // Attach buffer if committed
@@ -430,12 +552,11 @@ pub const Output = struct {
             return false;
         }
 
-        c.wl_surface_commit(surf);
-        
-        // Always register frame callback after commit to know when parent compositor is ready
-        cli.log.debug("Output {s}: Setting up frame callback after commit", .{self.name});
+        // Frame requests take effect with the following surface commit.
+        cli.log.debug("Output {s}: Setting up frame callback for commit", .{self.name});
         self.sendFrameAndSetCallback();
-        
+        c.wl_surface_commit(surf);
+
         // Flush display to ensure all requests are sent to parent compositor
         const display = self.backend.wayland_state.display orelse {
             cli.log.err("Output {s}: No backend display for flushing", .{self.name});
@@ -448,7 +569,7 @@ pub const Output = struct {
             return false;
         }
         cli.log.trace("Output {s}: Flushed display ({d} bytes)", .{ self.name, flush_result });
-        
+
         self.state.onCommit();
         cli.log.debug("Output {s}: Wayland surface committed", .{self.name});
 
@@ -457,7 +578,7 @@ pub const Output = struct {
 
     fn attachBufferIfCommitted(self: *Self, surf: *c.wl_surface) bool {
         cli.log.debug("Output {s}: attachBufferIfCommitted - committed.buffer={} buffer_is_null={}", .{ self.name, self.state.committed.buffer, self.state.buffer == null });
-        
+
         if (!self.state.committed.buffer) {
             cli.log.debug("Output {s}: No buffer to attach (not committed)", .{self.name});
             return true;
@@ -481,6 +602,8 @@ pub const Output = struct {
 
         cli.log.debug("Output {s}: Attaching wl_buffer @{*} to surface", .{ self.name, wl_buffer.wl_buffer });
         c.wl_surface_attach(surf, wl_buffer.wl_buffer, 0, 0);
+        const dest = self.logicalSize();
+        if (self.viewport) |viewport| c.wp_viewport_set_destination(viewport, dest.width, dest.height);
         c.wl_surface_damage_buffer(surf, 0, 0, std.math.maxInt(i32), std.math.maxInt(i32));
 
         return true;
@@ -500,8 +623,24 @@ pub const Output = struct {
     }
 
     pub fn preferredMode(self: *Self) ?*output.Mode {
-        _ = self;
-        return null; // Wayland outputs don't have fixed modes
+        return self.state.mode;
+    }
+
+    pub fn logicalSize(self: *const Self) struct { width: i32, height: i32 } {
+        const mode = self.state.mode orelse return .{ .width = 1280, .height = 720 };
+        return .{
+            .width = @max(1, @as(i32, @intFromFloat(mode.pixel_size.getX()))),
+            .height = @max(1, @as(i32, @intFromFloat(mode.pixel_size.getY()))),
+        };
+    }
+
+    pub fn setConfigureCallback(
+        self: *Self,
+        callback: *const fn (userdata: ?*anyopaque, width: i32, height: i32, scale: f32) void,
+        userdata: ?*anyopaque,
+    ) void {
+        self.configure_callback = callback;
+        self.configure_userdata = userdata;
     }
 
     pub fn setCursor(self: *Self, buf: buffer.Interface, hotspot: Vector2D) bool {
@@ -605,9 +744,9 @@ pub const Output = struct {
 
     pub fn scheduleFrame(self: *Self, reason: output.ScheduleReason) void {
         _ = reason;
-        
+
         cli.log.debug("Output {s}: scheduleFrame() (needs_frame={} frame_scheduled={} callback_pending={})", .{ self.name, self.needs_frame, self.frame_scheduled, self.frame_callback != null });
-        
+
         self.needs_frame = true;
 
         if (self.frame_scheduled) {
@@ -622,18 +761,18 @@ pub const Output = struct {
             self.frame_scheduled_while_waiting = true;
             return;
         }
-        
+
         // No pending frame callback - trigger immediately if available
         const callback_fn = self.frame_event_callback orelse {
             cli.log.warn("Output {s}: No frame callback registered", .{self.name});
             return;
         };
-        
+
         const userdata = self.frame_event_userdata orelse {
             cli.log.err("Output {s}: Frame callback has null userdata", .{self.name});
             return;
         };
-        
+
         cli.log.debug("Output {s}: Triggering immediate frame event to compositor", .{self.name});
         // Trigger frame event to compositor
         callback_fn(userdata);
@@ -650,7 +789,7 @@ pub const Output = struct {
     }
 
     pub fn destroy(self: *Self) bool {
-        self.deinit();
+        self.backend.destroyOutput(self);
         return true;
     }
 
@@ -661,7 +800,7 @@ pub const Output = struct {
         var height: i32 = 0;
         var stride: i32 = 0;
         var format: u32 = 0;
-        
+
         if (buf_type == .shm) {
             const attrs = buf.shm();
             width = @intFromFloat(attrs.size.getX());
@@ -672,12 +811,14 @@ pub const Output = struct {
 
         // Check for reusable buffer with matching properties
         for (self.buffers.items) |wl_buf| {
-            if (!wl_buf.pending_release and 
-                wl_buf.width == width and 
-                wl_buf.height == height and 
-                wl_buf.stride == stride and 
-                wl_buf.format == format) {
+            if (!wl_buf.pending_release and
+                wl_buf.width == width and
+                wl_buf.height == height and
+                wl_buf.stride == stride and
+                wl_buf.format == format)
+            {
                 cli.log.trace("Output {s}: Reusing released wl_buffer @{*}", .{ self.name, wl_buf.wl_buffer });
+                if (buf_type == .shm) try wl_buf.refreshShm(buf);
                 wl_buf.pending_release = true;
                 return wl_buf;
             }
@@ -695,11 +836,13 @@ pub const Output = struct {
                     break;
                 }
             }
+            if (self.buffers.items.len >= MAX_BUFFERS) return error.BufferCacheExhausted;
         }
 
         // Create new buffer
         cli.log.debug("Output {s}: Creating new wl_buffer (cache size: {d})", .{ self.name, self.buffers.items.len });
         const wl_buffer = try Buffer.create(self.allocator, buf, self.backend);
+        errdefer wl_buffer.deinit();
         wl_buffer.pending_release = true;
         try self.buffers.append(self.allocator, wl_buffer);
         cli.log.debug("Output {s}: Created and cached wl_buffer @{*}", .{ self.name, wl_buffer.wl_buffer });
@@ -761,44 +904,83 @@ pub const Output = struct {
         self.frame_event_userdata = userdata;
     }
 
+    pub fn setDestroyCallback(self: *Self, callback: *const fn (userdata: ?*anyopaque) void, userdata: ?*anyopaque) void {
+        self.destroy_event_callback = callback;
+        self.destroy_event_userdata = userdata;
+    }
+
+    fn detachCallbacks(self: *Self) DestroyEvent {
+        const detached: DestroyEvent = .{
+            .callback = self.destroy_event_callback,
+            .userdata = self.destroy_event_userdata,
+        };
+        self.frame_event_callback = null;
+        self.frame_event_userdata = null;
+        self.destroy_event_callback = null;
+        self.destroy_event_userdata = null;
+        self.configure_callback = null;
+        self.configure_userdata = null;
+        return detached;
+    }
+
     pub fn onEnter(self: *Self, serial: u32) void {
         self.cursor_serial = serial;
+        self.backend.applyThemeCursor();
+        self.showHostCursor();
+    }
 
-        if (self.cursor_surface == null) return;
+    fn showHostCursor(self: *Self) void {
+        if (self.cursor_serial == 0) return;
+        if (self.backend.pointers.items.len == 0) return;
+        const surf = self.cursor_surface orelse return;
+        const pointer = self.backend.pointers.items[0];
+        c.wl_pointer_set_cursor(
+            pointer.wl_pointer,
+            self.cursor_serial,
+            surf,
+            @intFromFloat(self.cursor_hotspot.getX()),
+            @intFromFloat(self.cursor_hotspot.getY()),
+        );
+    }
 
-        if (self.backend.pointers.items.len > 0) {
-            const pointer = self.backend.pointers.items[0];
-            c.wl_pointer_set_cursor(
-                pointer.wl_pointer,
-                serial,
-                self.cursor_surface,
-                @intFromFloat(self.cursor_hotspot.getX()),
-                @intFromFloat(self.cursor_hotspot.getY()),
-            );
+    fn attachThemeImage(self: *Self, image: *c.wl_cursor_image, wl_buffer: *c.wl_buffer) void {
+        const surf = self.cursor_surface orelse return;
+        const scale = self.backend.host_scale;
+        const dest_w = cursor.logicalExtent(image.width, scale);
+        const dest_h = cursor.logicalExtent(image.height, scale);
+        if (self.cursor_viewport) |viewport| {
+            c.wp_viewport_set_destination(viewport, dest_w, dest_h);
         }
+        c.wl_surface_attach(surf, wl_buffer, 0, 0);
+        c.wl_surface_damage(surf, 0, 0, dest_w, dest_h);
+        c.wl_surface_commit(surf);
+        self.cursor_hotspot = Vector2D.init(
+            @floatFromInt(cursor.logicalExtent(image.hotspot_x, scale)),
+            @floatFromInt(cursor.logicalExtent(image.hotspot_y, scale)),
+        );
+        self.cursor_wl_buffer = wl_buffer;
     }
 
     // XDG surface callbacks
     fn xdgSurfaceHandleConfigure(data: ?*anyopaque, xdg_surface: ?*c.xdg_surface, serial: u32) callconv(.c) void {
         const self: *Self = @ptrCast(@alignCast(data orelse return));
-        
+
         cli.log.debug("Output {s}: XDG surface configure event (serial={d})", .{ self.name, serial });
-        
+
         if (xdg_surface) |surf| {
             c.xdg_surface_ack_configure(surf, serial);
         }
-        
+
         // Mark as configured - surface is now ready to accept buffer commits
         if (!self.xdg_configured) {
             self.xdg_configured = true;
             cli.log.info("Output {s}: XDG surface now configured and ready", .{self.name});
         }
-        
-        // Initial configure - commit to finalize configuration
-        if (self.surface) |s| {
-            cli.log.debug("Output {s}: Committing surface to finalize XDG configuration", .{self.name});
-            c.wl_surface_commit(s);
-        }
+
+        if (self.surface == null) return;
+        if (self.state.buffer != null) return;
+        cli.log.debug("Output {s}: Committing surface to finalize XDG configuration", .{self.name});
+        c.wl_surface_commit(self.surface.?);
     }
 
     fn xdgToplevelHandleConfigure(data: ?*anyopaque, xdg_toplevel: ?*c.xdg_toplevel, _width: i32, _height: i32, states: ?*c.wl_array) callconv(.c) void {
@@ -806,35 +988,39 @@ pub const Output = struct {
         _ = xdg_toplevel;
         _ = states;
 
-        // Only update if we have valid dimensions (0 means compositor doesn't care)
-        if (_width == 0 or _height == 0) return;
+        const width: u32 = if (_width > 0) @intCast(_width) else 1280;
+        const height: u32 = if (_height > 0) @intCast(_height) else 720;
+        if (!self.updateMode(width, height)) return;
+        self.notifyConfigure();
+    }
 
-        const width = @as(u32, @intCast(_width));
-        const height = @as(u32, @intCast(_height));
-
-        // Check if dimensions actually changed
+    fn updateMode(self: *Self, width: u32, height: u32) bool {
         const current_mode = self.state.mode orelse {
-            // No current mode, create one
-            const mode = self.allocator.create(output.Mode) catch return;
+            const mode = self.allocator.create(output.Mode) catch return false;
             mode.* = .{
                 .pixel_size = Vector2D.init(@floatFromInt(width), @floatFromInt(height)),
-                .refresh_rate = 60000, // 60 Hz default (in mHz)
+                .refresh_rate = 60000,
             };
             self.state.custom_mode = mode;
             self.state.mode = mode;
-            return;
+            return true;
         };
 
         const current_width: u32 = @intFromFloat(current_mode.pixel_size.getX());
         const current_height: u32 = @intFromFloat(current_mode.pixel_size.getY());
+        if (current_width == width and current_height == height) return false;
 
-        if (current_width == width and current_height == height) return;
-
-        // Update dimensions
         if (self.state.custom_mode) |mode| {
             mode.pixel_size.setX(@floatFromInt(width));
             mode.pixel_size.setY(@floatFromInt(height));
         }
+        return true;
+    }
+
+    fn notifyConfigure(self: *Self) void {
+        const callback = self.configure_callback orelse return;
+        const size = self.logicalSize();
+        callback(self.configure_userdata, size.width, size.height, self.backend.host_scale);
     }
 
     fn xdgToplevelHandleClose(data: ?*anyopaque, xdg_toplevel: ?*c.xdg_toplevel) callconv(.c) void {
@@ -995,6 +1181,22 @@ pub const Pointer = struct {
     }
 };
 
+pub const Touch = struct {
+    wl_touch: *c.wl_touch,
+    allocator: std.mem.Allocator,
+
+    pub fn create(allocator: std.mem.Allocator, wl_touch: *c.wl_touch) !*Touch {
+        const self = try allocator.create(Touch);
+        self.* = .{ .wl_touch = wl_touch, .allocator = allocator };
+        return self;
+    }
+
+    pub fn deinit(self: *Touch) void {
+        c.wl_touch_destroy(self.wl_touch);
+        self.allocator.destroy(self);
+    }
+};
+
 /// Main Wayland backend implementation
 pub const Backend = struct {
     coordinator: *backend.Coordinator,
@@ -1002,6 +1204,7 @@ pub const Backend = struct {
     outputs: std.ArrayList(*Output),
     keyboards: std.ArrayList(*Keyboard),
     pointers: std.ArrayList(*Pointer),
+    touches: std.ArrayList(*Touch),
     idle_callbacks: std.ArrayList(*Output),
     dmabuf_formats: std.ArrayList(misc.DRMFormat),
     last_output_id: usize = 0,
@@ -1010,7 +1213,10 @@ pub const Backend = struct {
     last_enter_serial: u32 = 0,
     last_axis_source: signals.PointerAxisEvent.AxisSource = .wheel,
     last_axis_discrete: i32 = 0,
+    last_pointer: PointerSample = .{},
     event_source: ?*c.wl_event_source = null,
+    input_handler: ?InputHandler = null,
+    input_userdata: ?*anyopaque = null,
 
     // Wayland state
     wayland_state: struct {
@@ -1023,7 +1229,13 @@ pub const Backend = struct {
         dmabuf: ?*c.zwp_linux_dmabuf_v1 = null,
         dmabuf_feedback: ?*c.zwp_linux_dmabuf_feedback_v1 = null,
         dmabuf_failed: bool = false,
+        viewporter: ?*c.wp_viewporter = null,
+        fractional_scale_manager: ?*c.wp_fractional_scale_manager_v1 = null,
     } = .{},
+    host_outputs: std.ArrayList(*c.wl_output) = .empty,
+    cursor_theme: ?*c.wl_cursor_theme = null,
+    cursor_theme_size: u32 = 0,
+    host_scale: f32 = 1,
 
     // DRM state
     drm_state: struct {
@@ -1043,11 +1255,13 @@ pub const Backend = struct {
         self.* = .{
             .coordinator = coordinator,
             .allocator = allocator,
-            .outputs = std.ArrayList(*Output){},
-            .keyboards = std.ArrayList(*Keyboard){},
-            .pointers = std.ArrayList(*Pointer){},
-            .idle_callbacks = std.ArrayList(*Output){},
-            .dmabuf_formats = std.ArrayList(misc.DRMFormat){},
+            .outputs = std.ArrayList(*Output).empty,
+            .keyboards = std.ArrayList(*Keyboard).empty,
+            .pointers = std.ArrayList(*Pointer).empty,
+            .touches = std.ArrayList(*Touch).empty,
+            .idle_callbacks = std.ArrayList(*Output).empty,
+            .dmabuf_formats = std.ArrayList(misc.DRMFormat).empty,
+            .host_outputs = std.ArrayList(*c.wl_output).empty,
         };
 
         return self;
@@ -1057,7 +1271,7 @@ pub const Backend = struct {
         if (self.event_source) |source| {
             _ = c.wl_event_source_remove(source);
         }
-        
+
         for (self.outputs.items) |out| {
             out.deinit();
         }
@@ -1073,7 +1287,24 @@ pub const Backend = struct {
         }
         self.pointers.deinit(self.allocator);
 
+        for (self.touches.items) |touch| touch.deinit();
+        self.touches.deinit(self.allocator);
+
         self.idle_callbacks.deinit(self.allocator);
+
+        if (self.cursor_theme) |theme| {
+            c.wl_cursor_theme_destroy(theme);
+            self.cursor_theme = null;
+        }
+
+        for (self.host_outputs.items) |host_output| {
+            c.wl_output_destroy(host_output);
+        }
+        self.host_outputs.deinit(self.allocator);
+
+        if (self.wayland_state.fractional_scale_manager) |manager| {
+            c.wp_fractional_scale_manager_v1_destroy(manager);
+        }
 
         for (self.dmabuf_formats.items) |*format| {
             format.deinit(self.allocator);
@@ -1083,6 +1314,7 @@ pub const Backend = struct {
         if (self.wayland_state.dmabuf_feedback) |feedback| {
             c.zwp_linux_dmabuf_feedback_v1_destroy(feedback);
         }
+        if (self.wayland_state.viewporter) |viewporter| c.wp_viewporter_destroy(viewporter);
 
         if (self.wayland_state.dmabuf) |dmabuf| {
             c.zwp_linux_dmabuf_v1_destroy(dmabuf);
@@ -1113,7 +1345,7 @@ pub const Backend = struct {
         }
 
         if (self.drm_state.fd >= 0) {
-            std.posix.close(self.drm_state.fd);
+            core.unix.close(self.drm_state.fd);
         }
 
         self.allocator.destroy(self);
@@ -1122,6 +1354,58 @@ pub const Backend = struct {
     pub fn backendType(self: *const Self) backend.Type {
         _ = self;
         return .wayland;
+    }
+
+    pub fn setInputHandler(self: *Self, userdata: ?*anyopaque, handler: InputHandler) void {
+        self.input_userdata = userdata;
+        self.input_handler = handler;
+    }
+
+    pub fn applyThemeCursor(self: *Self) void {
+        const image_name = cursor.Image.arrow.xcursorName();
+        const loaded = self.ensureCursorTheme() orelse return;
+        const theme_cursor = findThemeCursor(loaded, image_name) orelse return;
+        if (theme_cursor.image_count == 0 or theme_cursor.images == null) return;
+        const image = theme_cursor.images[0] orelse return;
+        const wl_buffer = c.wl_cursor_image_get_buffer(image) orelse return;
+        for (self.outputs.items) |out| {
+            out.attachThemeImage(image, wl_buffer);
+            out.showHostCursor();
+        }
+        cli.log.debug("Applied XCursor '{s}' at {d}px", .{ image_name, self.cursor_theme_size });
+    }
+
+    fn ensureCursorTheme(self: *Self) ?*c.wl_cursor_theme {
+        const shm = self.wayland_state.shm orelse return null;
+        const spec = cursor.Spec.fromEnv();
+        const size = cursor.pixelSize(spec.size, self.host_scale);
+        if (self.cursor_theme) |theme| {
+            if (self.cursor_theme_size == size) return theme;
+            c.wl_cursor_theme_destroy(theme);
+            self.cursor_theme = null;
+        }
+
+        const name_z = self.allocator.dupeZ(u8, spec.name) catch return null;
+        defer self.allocator.free(name_z);
+        const load_name: ?[*:0]const u8 = if (spec.usesDefaultTheme()) null else name_z.ptr;
+        self.cursor_theme = c.wl_cursor_theme_load(load_name, @intCast(size), shm);
+        if (self.cursor_theme == null) {
+            cli.log.warn("Failed to load XCursor theme {s} at {d}px", .{ spec.name, size });
+            return null;
+        }
+        self.cursor_theme_size = size;
+        cli.log.info("Loaded XCursor theme {s} at {d}px (scale={d:.2})", .{ spec.name, size, self.host_scale });
+        return self.cursor_theme;
+    }
+
+    fn setHostScale(self: *Self, scale: f32) void {
+        if (!std.math.isFinite(scale) or scale < 0.5 or scale > 4) return;
+        if (std.math.approxEqRel(f32, self.host_scale, scale, 0.001)) return;
+        self.host_scale = scale;
+        cli.log.info("Host output scale is {d:.2}", .{scale});
+        if (self.outputs.items.len == 0) return;
+        self.applyThemeCursor();
+        for (self.outputs.items) |out| out.notifyConfigure();
     }
 
     // Registry callbacks
@@ -1150,7 +1434,43 @@ pub const Backend = struct {
                 self.wayland_state.dmabuf_failed = true;
             };
             cli.log.debug("Bound zwp_linux_dmabuf_v1", .{});
+        } else if (std.mem.eql(u8, interface_name, "wp_viewporter")) {
+            self.wayland_state.viewporter = @ptrCast(c.wl_registry_bind(reg, name, &c.wp_viewporter_interface, @min(version, 1)));
+            cli.log.debug("Bound wp_viewporter", .{});
+        } else if (std.mem.eql(u8, interface_name, "wp_fractional_scale_manager_v1")) {
+            self.wayland_state.fractional_scale_manager = @ptrCast(c.wl_registry_bind(
+                reg,
+                name,
+                &c.wp_fractional_scale_manager_v1_interface,
+                @min(version, 1),
+            ));
+            cli.log.debug("Bound wp_fractional_scale_manager_v1", .{});
+        } else if (std.mem.eql(u8, interface_name, "wl_output")) {
+            self.bindHostOutput(reg, name, version);
         }
+    }
+
+    fn bindHostOutput(self: *Self, registry: *c.wl_registry, name: u32, version: u32) void {
+        const host_output: *c.wl_output = @ptrCast(c.wl_registry_bind(
+            registry,
+            name,
+            &c.wl_output_interface,
+            @min(version, 4),
+        ));
+        self.host_outputs.append(self.allocator, host_output) catch {
+            c.wl_output_destroy(host_output);
+            return;
+        };
+        const listener = c.wl_output_listener{
+            .geometry = hostOutputGeometry,
+            .mode = hostOutputMode,
+            .done = hostOutputDone,
+            .scale = hostOutputScale,
+            .name = hostOutputName,
+            .description = hostOutputDescription,
+        };
+        _ = c.wl_output_add_listener(host_output, &listener, self);
+        cli.log.debug("Bound host wl_output", .{});
     }
 
     fn registryHandleGlobalRemove(data: ?*anyopaque, registry: ?*c.wl_registry, name: u32) callconv(.c) void {
@@ -1170,7 +1490,7 @@ pub const Backend = struct {
             return false;
         }
 
-        const xdg_desktop = std.posix.getenv("XDG_CURRENT_DESKTOP");
+        const xdg_desktop = core.env.get("XDG_CURRENT_DESKTOP");
         const desktop_name = if (xdg_desktop) |name| name else "unknown";
         cli.log.debug("Connected to Wayland compositor: {s}", .{desktop_name});
 
@@ -1197,10 +1517,39 @@ pub const Backend = struct {
             .fd = fd,
             .callback = dispatchCallback,
         };
+        if (self.coordinator.primary_renderer == null) {
+            self.coordinator.primary_renderer = renderer.Type.createNested(
+                self.allocator,
+                @ptrCast(self.wayland_state.display.?),
+            ) catch |err| {
+                cli.log.warn("Nested DMA-BUF renderer unavailable: {}", .{err});
+                self.attachRenderNode();
+                return true;
+            };
+        }
+        self.attachRenderNode();
 
         return true;
     }
-    
+
+    fn attachRenderNode(self: *Self) void {
+        if (self.drm_state.fd >= 0) return;
+        if (self.coordinator.primary_renderer) |rend| {
+            if (rend.openDeviceNode()) |fd| {
+                self.drm_state.fd = fd;
+                cli.log.info("Nested DRM render node fd={d}", .{fd});
+                return;
+            }
+        }
+        const fd = openFirstRenderNode();
+        if (fd < 0) {
+            cli.log.warn("No DRM render node available for client DMA-BUF feedback", .{});
+            return;
+        }
+        self.drm_state.fd = fd;
+        cli.log.info("Fallback DRM render node fd={d}", .{fd});
+    }
+
     /// Callback for poll FD events
     fn dispatchCallback() void {
         // Note: This is a workaround since we can't pass self pointer in callback
@@ -1229,11 +1578,12 @@ pub const Backend = struct {
         self.createOutput(null) catch |err| {
             cli.log.err("Failed to create Wayland output: {}", .{err});
         };
-        
+
         // Do a full roundtrip to ensure XDG configure event is received and processed
         const display = self.wayland_state.display orelse return;
         _ = c.wl_display_roundtrip(display);
-        
+        self.applyThemeCursor();
+
         // Verify output is configured
         if (self.outputs.items.len > 0) {
             const out = self.outputs.items[0];
@@ -1243,28 +1593,28 @@ pub const Backend = struct {
             }
         }
     }
-    
+
     /// Dispatch pending events from the parent Wayland compositor
     pub fn dispatchEvents(self: *Self) void {
         const display = self.wayland_state.display orelse return;
-        
+
         // Prepare to read events
         if (c.wl_display_prepare_read(display) != 0) {
             // Events are already being read, dispatch pending
             _ = c.wl_display_dispatch_pending(display);
             return;
         }
-        
+
         // Flush outgoing requests
         _ = c.wl_display_flush(display);
-        
+
         // Read events from the display FD
         _ = c.wl_display_read_events(display);
-        
+
         // Dispatch all pending events
         _ = c.wl_display_dispatch_pending(display);
     }
-    
+
     /// Register backend with server event loop for automatic event dispatch
     pub fn registerWithEventLoop(self: *Self, event_loop_handle: *anyopaque) void {
         const display = self.wayland_state.display orelse {
@@ -1272,9 +1622,9 @@ pub const Backend = struct {
             return;
         };
         const fd = c.wl_display_get_fd(display);
-        
+
         cli.log.debug("Registering Wayland backend with event loop (fd={d})", .{fd});
-        
+
         const loop: *c.wl_event_loop = @ptrCast(@alignCast(event_loop_handle));
         const source = c.wl_event_loop_add_fd(
             loop,
@@ -1286,11 +1636,11 @@ pub const Backend = struct {
             cli.log.err("Failed to register Wayland backend with event loop", .{});
             return;
         };
-        
+
         self.event_source = source;
         cli.log.info("Registered Wayland backend fd={d} with event loop", .{fd});
     }
-    
+
     /// Event loop callback for Wayland display events
     fn waylandDisplayCallback(fd: i32, mask: u32, data: ?*anyopaque) callconv(.c) i32 {
         const self: *Backend = @ptrCast(@alignCast(data orelse return 0));
@@ -1305,7 +1655,7 @@ pub const Backend = struct {
                 cli.log.err("Failed to dispatch pending Wayland events", .{});
                 return 0;
             }
-            
+
             // Then read new events from socket
             if (c.wl_display_prepare_read(display) == 0) {
                 if (c.wl_display_read_events(display) < 0) {
@@ -1313,7 +1663,7 @@ pub const Backend = struct {
                     c.wl_display_cancel_read(display);
                     return 0;
                 }
-                
+
                 // Dispatch the newly read events
                 const dispatched = c.wl_display_dispatch_pending(display);
                 if (dispatched < 0) {
@@ -1338,7 +1688,7 @@ pub const Backend = struct {
             cli.log.err("Failed to flush Wayland display", .{});
             return 0;
         }
-        
+
         return 1;
     }
 
@@ -1350,7 +1700,22 @@ pub const Backend = struct {
         };
 
         const out = try Output.create(self.allocator, output_name, self);
+        errdefer out.deinit();
         try self.outputs.append(self.allocator, out);
+    }
+
+    fn destroyOutput(self: *Self, removed: *Output) void {
+        const destroy_event = removed.detachCallbacks();
+        if (self.focused_output == removed) self.focused_output = null;
+        if (self.keyboard_focused_output == removed) self.keyboard_focused_output = null;
+        removeOutputReference(&self.idle_callbacks, removed);
+        for (self.outputs.items, 0..) |candidate, index| {
+            if (candidate != removed) continue;
+            _ = self.outputs.swapRemove(index);
+            if (destroy_event.callback) |callback| callback(destroy_event.userdata);
+            removed.deinit();
+            return;
+        }
     }
 
     // Seat capability callbacks
@@ -1376,6 +1741,13 @@ pub const Backend = struct {
                 keyboard.deinit();
             }
             self.keyboards.clearRetainingCapacity();
+        }
+
+        if (capabilities & c.WL_SEAT_CAPABILITY_TOUCH != 0) {
+            self.initTouchCapability(seat_ptr);
+        } else {
+            for (self.touches.items) |touch| touch.deinit();
+            self.touches.clearRetainingCapacity();
         }
     }
 
@@ -1426,21 +1798,84 @@ pub const Backend = struct {
         _ = c.wl_keyboard_add_listener(wl_keyboard, &listener, self);
     }
 
+    fn initTouchCapability(self: *Self, seat_ptr: *c.wl_seat) void {
+        if (self.touches.items.len > 0) return;
+        const wl_touch = c.wl_seat_get_touch(seat_ptr) orelse return;
+        const touch = Touch.create(self.allocator, wl_touch) catch return;
+        self.touches.append(self.allocator, touch) catch {
+            touch.deinit();
+            return;
+        };
+        const listener = c.wl_touch_listener{
+            .down = touchHandleDown,
+            .up = touchHandleUp,
+            .motion = touchHandleMotion,
+            .frame = touchHandleFrame,
+            .cancel = touchHandleCancel,
+            .shape = touchHandleShape,
+            .orientation = touchHandleOrientation,
+        };
+        _ = c.wl_touch_add_listener(wl_touch, &listener, self);
+    }
+
     fn seatHandleName(data: ?*anyopaque, seat: ?*c.wl_seat, name: [*c]const u8) callconv(.c) void {
         _ = data;
         _ = seat;
         _ = name;
     }
 
+    fn hostOutputGeometry(
+        _: ?*anyopaque,
+        _: ?*c.wl_output,
+        _: i32,
+        _: i32,
+        _: i32,
+        _: i32,
+        _: i32,
+        _: [*c]const u8,
+        _: [*c]const u8,
+        _: i32,
+    ) callconv(.c) void {}
+
+    fn hostOutputMode(_: ?*anyopaque, _: ?*c.wl_output, _: u32, _: i32, _: i32, _: i32) callconv(.c) void {}
+
+    fn hostOutputDone(_: ?*anyopaque, _: ?*c.wl_output) callconv(.c) void {}
+
+    fn hostOutputScale(data: ?*anyopaque, _: ?*c.wl_output, factor: i32) callconv(.c) void {
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
+        if (factor < 1) return;
+        self.setHostScale(@floatFromInt(factor));
+    }
+
+    fn hostOutputName(_: ?*anyopaque, _: ?*c.wl_output, _: [*c]const u8) callconv(.c) void {}
+
+    fn hostOutputDescription(_: ?*anyopaque, _: ?*c.wl_output, _: [*c]const u8) callconv(.c) void {}
+
+    fn fractionalScalePreferred(data: ?*anyopaque, _: ?*c.wp_fractional_scale_v1, protocol_scale: u32) callconv(.c) void {
+        const self: *Backend = @ptrCast(@alignCast(data orelse return));
+        const scale = @as(f32, @floatFromInt(protocol_scale)) / 120.0;
+        cli.log.debug("Host fractional scale is {d} ({d:.2})", .{ protocol_scale, scale });
+        self.setHostScale(scale);
+    }
+
     // Pointer event callbacks
     fn pointerHandleEnter(data: ?*anyopaque, pointer: ?*c.wl_pointer, serial: u32, surface: ?*c.wl_surface, surface_x: c.wl_fixed_t, surface_y: c.wl_fixed_t) callconv(.c) void {
         _ = pointer;
-        _ = surface_x;
-        _ = surface_y;
         const self: *Self = @ptrCast(@alignCast(data orelse return));
         const surf = surface orelse return;
 
         self.last_enter_serial = serial;
+        const x = @as(f64, @floatFromInt(surface_x)) / 256.0;
+        const y = @as(f64, @floatFromInt(surface_y)) / 256.0;
+        self.last_pointer = .{ .x = x, .y = y, .time_ms = 0, .valid = true };
+        cli.log.trace("Pointer enter serial={d} x={d:.1} y={d:.1}", .{ serial, x, y });
+        if (self.input_handler) |handler| {
+            handler.pointer_motion_absolute(self.input_userdata, .{
+                .time_msec = 0,
+                .x = x,
+                .y = y,
+            });
+        }
 
         // Find which output this surface belongs to
         for (self.outputs.items) |out| {
@@ -1454,11 +1889,11 @@ pub const Backend = struct {
 
     fn pointerHandleLeave(data: ?*anyopaque, pointer: ?*c.wl_pointer, serial: u32, surface: ?*c.wl_surface) callconv(.c) void {
         _ = pointer;
-        _ = serial;
         const self: *Self = @ptrCast(@alignCast(data orelse return));
         const surf = surface orelse return;
+        self.last_pointer.valid = false;
+        cli.log.trace("Pointer leave serial={d}", .{serial});
 
-        // Clear focused output if it matches
         if (self.focused_output) |out| {
             if (out.surface == surf) {
                 self.focused_output = null;
@@ -1469,25 +1904,29 @@ pub const Backend = struct {
     fn pointerHandleMotion(data: ?*anyopaque, pointer: ?*c.wl_pointer, time: u32, surface_x: c.wl_fixed_t, surface_y: c.wl_fixed_t) callconv(.c) void {
         _ = pointer;
         const self: *Self = @ptrCast(@alignCast(data orelse return));
-
-        const session = self.coordinator.session orelse return;
-
-        // Convert Wayland fixed-point to float (24.8 fixed-point format)
         const x = @as(f64, @floatFromInt(surface_x)) / 256.0;
         const y = @as(f64, @floatFromInt(surface_y)) / 256.0;
-
-        session.signal_pointer_motion_absolute.emit(.{
+        self.tracePointerMotion(time, x, y);
+        const handler = self.input_handler orelse return;
+        handler.pointer_motion_absolute(self.input_userdata, .{
             .time_msec = time,
             .x = x,
             .y = y,
         });
     }
 
+    fn tracePointerMotion(self: *Self, time: u32, x: f64, y: f64) void {
+        const motion = PointerKinematics.compute(self.last_pointer, x, y, time);
+        self.last_pointer = .{ .x = x, .y = y, .time_ms = time, .valid = true };
+        cli.log.trace(
+            "Pointer motion x={d:.1} y={d:.1} dx={d:.1} dy={d:.1} dist={d:.1} dt={d}ms speed={d:.0}px/s heading={s}",
+            .{ motion.x, motion.y, motion.dx, motion.dy, motion.distance, motion.dt_ms, motion.speed, motion.heading() },
+        );
+    }
+
     fn pointerHandleButton(data: ?*anyopaque, pointer: ?*c.wl_pointer, serial: u32, time: u32, button: u32, state: u32) callconv(.c) void {
         _ = pointer;
         const self: *Self = @ptrCast(@alignCast(data orelse return));
-
-        const session = self.coordinator.session orelse return;
 
         // Map Wayland button state to IPC ButtonState
         const button_state: signals.PointerButtonEvent.ButtonState = if (state == c.WL_POINTER_BUTTON_STATE_PRESSED)
@@ -1495,7 +1934,12 @@ pub const Backend = struct {
         else
             .released;
 
-        session.signal_pointer_button.emit(.{
+        cli.log.trace(
+            "Pointer button serial={d} button={d} state={s} x={d:.1} y={d:.1}",
+            .{ serial, button, @tagName(button_state), self.last_pointer.x, self.last_pointer.y },
+        );
+        const handler = self.input_handler orelse return;
+        handler.pointer_button(self.input_userdata, .{
             .time_msec = time,
             .button = button,
             .state = button_state,
@@ -1507,16 +1951,26 @@ pub const Backend = struct {
         _ = pointer;
         const self: *Self = @ptrCast(@alignCast(data orelse return));
 
-        const session = self.coordinator.session orelse return;
-
         const orientation: signals.PointerAxisEvent.AxisOrientation = if (axis == c.WL_POINTER_AXIS_VERTICAL_SCROLL)
             .vertical
         else
             .horizontal;
 
         const delta = @as(f64, @floatFromInt(value)) / 256.0;
+        cli.log.trace(
+            "Pointer axis {s} delta={d:.2} discrete={d} source={s} x={d:.1} y={d:.1}",
+            .{
+                @tagName(orientation),
+                delta,
+                self.last_axis_discrete,
+                @tagName(self.last_axis_source),
+                self.last_pointer.x,
+                self.last_pointer.y,
+            },
+        );
 
-        session.signal_pointer_axis.emit(.{
+        const handler = self.input_handler orelse return;
+        handler.pointer_axis(self.input_userdata, .{
             .time_msec = time,
             .source = self.last_axis_source,
             .orientation = orientation,
@@ -1529,11 +1983,10 @@ pub const Backend = struct {
     }
 
     fn pointerHandleFrame(data: ?*anyopaque, pointer: ?*c.wl_pointer) callconv(.c) void {
-        _ = data;
         _ = pointer;
-        // Frame event marks the end of a logical group of pointer events.
-        // In our implementation, events are emitted immediately as they arrive,
-        // so this serves as a logical boundary for potential future event batching.
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
+        const handler = self.input_handler orelse return;
+        handler.pointer_frame(self.input_userdata);
     }
 
     fn pointerHandleAxisSource(data: ?*anyopaque, pointer: ?*c.wl_pointer, axis_source: u32) callconv(.c) void {
@@ -1554,14 +2007,13 @@ pub const Backend = struct {
         const self: *Self = @ptrCast(@alignCast(data orelse return));
         _ = pointer;
 
-        const session = self.coordinator.session orelse return;
-
         const orientation: signals.PointerAxisEvent.AxisOrientation = if (axis == c.WL_POINTER_AXIS_VERTICAL_SCROLL)
             .vertical
         else
             .horizontal;
 
-        session.signal_pointer_axis.emit(.{
+        const handler = self.input_handler orelse return;
+        handler.pointer_axis(self.input_userdata, .{
             .time_msec = time,
             .source = self.last_axis_source,
             .orientation = orientation,
@@ -1582,7 +2034,7 @@ pub const Backend = struct {
     fn keyboardHandleKeymap(data: ?*anyopaque, keyboard: ?*c.wl_keyboard, format: u32, fd: i32, size: u32) callconv(.c) void {
         const self: *Self = @ptrCast(@alignCast(data orelse return));
         _ = keyboard;
-        defer std.posix.close(fd);
+        defer core.unix.close(fd);
 
         if (format != c.WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) {
             return;
@@ -1635,15 +2087,14 @@ pub const Backend = struct {
         _ = serial;
         const self: *Self = @ptrCast(@alignCast(data orelse return));
 
-        const session = self.coordinator.session orelse return;
-
         // Map Wayland key state to IPC KeyState
         const key_state: signals.KeyboardKeyEvent.KeyState = if (state == c.WL_KEYBOARD_KEY_STATE_PRESSED)
             .pressed
         else
             .released;
 
-        session.signal_keyboard_key.emit(.{
+        const handler = self.input_handler orelse return;
+        handler.keyboard_key(self.input_userdata, .{
             .time_msec = time,
             .key = key,
             .state = key_state,
@@ -1655,9 +2106,8 @@ pub const Backend = struct {
         _ = keyboard;
         _ = serial;
 
-        const session = self.coordinator.session orelse return;
-
-        session.signal_keyboard_modifiers.emit(.{
+        const handler = self.input_handler orelse return;
+        handler.keyboard_modifiers(self.input_userdata, .{
             .depressed = mods_depressed,
             .latched = mods_latched,
             .locked = mods_locked,
@@ -1675,6 +2125,66 @@ pub const Backend = struct {
             kbd.repeat_delay = delay;
         }
     }
+
+    fn touchHandleDown(
+        data: ?*anyopaque,
+        _: ?*c.wl_touch,
+        _: u32,
+        time: u32,
+        _: ?*c.wl_surface,
+        id: i32,
+        x: c.wl_fixed_t,
+        y: c.wl_fixed_t,
+    ) callconv(.c) void {
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
+        const handler = self.input_handler orelse return;
+        handler.touch_down(self.input_userdata, .{
+            .time_msec = time,
+            .touch_id = id,
+            .x = @as(f64, @floatFromInt(x)) / 256.0,
+            .y = @as(f64, @floatFromInt(y)) / 256.0,
+        });
+    }
+
+    fn touchHandleUp(data: ?*anyopaque, _: ?*c.wl_touch, _: u32, time: u32, id: i32) callconv(.c) void {
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
+        const handler = self.input_handler orelse return;
+        handler.touch_up(self.input_userdata, .{ .time_msec = time, .touch_id = id });
+    }
+
+    fn touchHandleMotion(
+        data: ?*anyopaque,
+        _: ?*c.wl_touch,
+        time: u32,
+        id: i32,
+        x: c.wl_fixed_t,
+        y: c.wl_fixed_t,
+    ) callconv(.c) void {
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
+        const handler = self.input_handler orelse return;
+        handler.touch_motion(self.input_userdata, .{
+            .time_msec = time,
+            .touch_id = id,
+            .x = @as(f64, @floatFromInt(x)) / 256.0,
+            .y = @as(f64, @floatFromInt(y)) / 256.0,
+        });
+    }
+
+    fn touchHandleFrame(data: ?*anyopaque, _: ?*c.wl_touch) callconv(.c) void {
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
+        const handler = self.input_handler orelse return;
+        handler.touch_frame(self.input_userdata);
+    }
+
+    fn touchHandleCancel(data: ?*anyopaque, _: ?*c.wl_touch) callconv(.c) void {
+        const self: *Self = @ptrCast(@alignCast(data orelse return));
+        const handler = self.input_handler orelse return;
+        handler.touch_cancel(self.input_userdata);
+    }
+
+    fn touchHandleShape(_: ?*anyopaque, _: ?*c.wl_touch, _: i32, _: c.wl_fixed_t, _: c.wl_fixed_t) callconv(.c) void {}
+
+    fn touchHandleOrientation(_: ?*anyopaque, _: ?*c.wl_touch, _: i32, _: c.wl_fixed_t) callconv(.c) void {}
 
     fn initSeat(self: *Self) void {
         if (self.wayland_state.seat == null) return;
@@ -1736,11 +2246,16 @@ pub const Backend = struct {
         };
 
         for (common_formats) |fmt| {
-            var format = misc.DRMFormat.init(self.allocator);
-            format.drm_format = fmt;
-            try format.modifiers.append(self.allocator, 0); // DRM_FORMAT_MOD_LINEAR
-            try self.dmabuf_formats.append(self.allocator, format);
+            try self.addCommonFormat(fmt);
         }
+    }
+
+    fn addCommonFormat(self: *Self, drm_format: u32) !void {
+        var format = misc.DRMFormat.init(self.allocator);
+        errdefer format.deinit(self.allocator);
+        format.drm_format = drm_format;
+        try format.modifiers.append(self.allocator, 0);
+        try self.dmabuf_formats.append(self.allocator, format);
     }
 
     // Dmabuf feedback callbacks
@@ -1753,7 +2268,7 @@ pub const Backend = struct {
     fn dmabufFeedbackFormatTable(data: ?*anyopaque, feedback: ?*c.zwp_linux_dmabuf_feedback_v1, fd: i32, size: u32) callconv(.c) void {
         _ = data;
         _ = feedback;
-        defer std.posix.close(fd);
+        defer core.unix.close(fd);
 
         // Map format table into memory
         const map_ptr = c.mmap(null, size, c.PROT_READ, c.MAP_PRIVATE, fd, 0);
@@ -1851,6 +2366,44 @@ pub const Backend = struct {
     }
 };
 
+const fractional_listener = c.wp_fractional_scale_v1_listener{
+    .preferred_scale = Backend.fractionalScalePreferred,
+};
+
+fn openFirstRenderNode() i32 {
+    var index: u32 = 128;
+    while (index < 136) : (index += 1) {
+        var buf: [32]u8 = undefined;
+        const path = std.fmt.bufPrint(&buf, "/dev/dri/renderD{d}", .{index}) catch continue;
+        const fd = core.unix.open(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0) catch continue;
+        return fd;
+    }
+    return -1;
+}
+
+test "openFirstRenderNode returns a live fd or reports none" {
+    const fd = openFirstRenderNode();
+    if (fd < 0) return;
+    defer core.unix.close(fd);
+    try std.testing.expect(fd >= 0);
+}
+
+fn findThemeCursor(theme: *c.wl_cursor_theme, name: [:0]const u8) ?*c.wl_cursor {
+    if (c.wl_cursor_theme_get_cursor(theme, name.ptr)) |found| return found;
+    return c.wl_cursor_theme_get_cursor(theme, "left_ptr");
+}
+
+fn removeOutputReference(outputs: *std.ArrayList(*Output), removed: *Output) void {
+    var index: usize = 0;
+    while (index < outputs.items.len) {
+        if (outputs.items[index] != removed) {
+            index += 1;
+            continue;
+        }
+        _ = outputs.swapRemove(index);
+    }
+}
+
 const testing = core.testing;
 
 // Tests
@@ -1883,6 +2436,36 @@ test "Backend - output creation" {
     defer backend_impl.deinit();
 
     try testing.expectEqual(@as(usize, 0), backend_impl.outputs.items.len);
+}
+
+test "Backend - nested output close removes every owned reference" {
+    const backends = [_]backend.ImplementationOptions{
+        .{ .backend_type = .wayland, .request_mode = .if_available },
+    };
+    var coordinator = try backend.Coordinator.create(testing.allocator, &backends, .{});
+    defer coordinator.deinit();
+    var backend_impl = try Backend.create(testing.allocator, coordinator);
+    defer backend_impl.deinit();
+
+    const out = try Output.create(testing.allocator, "close-test", backend_impl);
+    try backend_impl.outputs.append(testing.allocator, out);
+    try backend_impl.idle_callbacks.append(testing.allocator, out);
+    try backend_impl.idle_callbacks.append(testing.allocator, out);
+    backend_impl.focused_output = out;
+
+    try testing.expect(out.destroy());
+    try testing.expectEqual(@as(usize, 0), backend_impl.outputs.items.len);
+    try testing.expectEqual(@as(usize, 0), backend_impl.idle_callbacks.items.len);
+    try testing.expectNull(backend_impl.focused_output);
+}
+
+test "Wayland SHM anonymous file has requested length" {
+    const size: usize = 4097;
+    const fd = try createAnonymousFile(size);
+    defer core.unix.close(fd);
+
+    const file = std.Io.File{ .handle = fd, .flags = .{ .nonblocking = false } };
+    try testing.expectEqual(@as(u64, size), try file.length(std.Options.debug_io));
 }
 
 test "Backend - initial state" {
@@ -1984,7 +2567,7 @@ test "Output - frame scheduling states" {
     try testing.expectFalse(out.needs_frame);
     try testing.expectFalse(out.frame_scheduled);
     try testing.expectFalse(out.frame_scheduled_while_waiting);
-    try testing.expectFalse(out.ready_for_frame_callback);
+    try testing.expectFalse(out.frame_callback != null);
 
     // Schedule a frame
     out.scheduleFrame(.unknown);
@@ -2494,7 +3077,8 @@ test "Output - buffer caching in wlBufferFromBuffer" {
     try testing.expectEqual(@as(usize, 1), out.buffers.items.len);
     try testing.expectEqual(mock_buffer1.base.ptr, wl_buf1.buffer.base.ptr);
 
-    // Second call with same buffer should return cached version
+    // A released buffer with matching properties should be reused.
+    wl_buf1.pending_release = false;
     const wl_buf1_cached = try out.wlBufferFromBuffer(mock_buffer1);
     try testing.expectEqual(@as(usize, 1), out.buffers.items.len);
     try testing.expectEqual(wl_buf1, wl_buf1_cached);
@@ -2506,6 +3090,33 @@ test "Output - buffer caching in wlBufferFromBuffer" {
 
     // Verify they're different buffers
     try testing.expectNotEqual(wl_buf1, wl_buf2); // Pointer comparison is fine with expect
+}
+
+test "pointer kinematics first sample has zero velocity" {
+    const motion = PointerKinematics.compute(.{}, 12, 8, 100);
+    try testing.expectEqual(@as(f64, 12), motion.x);
+    try testing.expectEqual(@as(f64, 8), motion.y);
+    try testing.expectEqual(@as(f64, 0), motion.speed);
+    try testing.expectEqualStrings("still", motion.heading());
+}
+
+test "pointer kinematics reports delta speed and heading" {
+    const prev = PointerSample{ .x = 10, .y = 10, .time_ms = 1000, .valid = true };
+    const right = PointerKinematics.compute(prev, 40, 10, 1100);
+    try testing.expectEqual(@as(f64, 30), right.dx);
+    try testing.expectEqual(@as(u32, 100), right.dt_ms);
+    try testing.expectEqual(@as(f64, 300), right.speed);
+    try testing.expectEqualStrings("right", right.heading());
+
+    const down = PointerKinematics.compute(prev, 10, 25, 1050);
+    try testing.expectEqual(@as(f64, 15), down.dy);
+    try testing.expectEqualStrings("down", down.heading());
+}
+
+test "pointer kinematics ignores zero and stale intervals" {
+    const prev = PointerSample{ .x = 4, .y = 4, .time_ms = 50, .valid = true };
+    try testing.expectEqual(@as(f64, 0), PointerKinematics.compute(prev, 20, 4, 50).speed);
+    try testing.expectEqual(@as(f64, 0), PointerKinematics.compute(prev, 20, 4, 2051).speed);
 }
 
 test "Backend - pointer axis state tracking" {

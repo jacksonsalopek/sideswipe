@@ -38,7 +38,6 @@ pub const Allocator = struct {
         // Initialize GBM device
         self.gbm_device = gbm.gbm_create_device(drm_fd);
         if (self.gbm_device == null) {
-            alloc.destroy(self);
             return error.GbmDeviceCreationFailed;
         }
 
@@ -142,14 +141,12 @@ const GBMBuffer = struct {
     const Self = @This();
 
     pub fn init(alloc: std.mem.Allocator, bo: *gbm.struct_gbm_bo, drm_fd: i32) !*Self {
+        errdefer gbm.gbm_bo_destroy(bo);
         const self = try alloc.create(Self);
         errdefer alloc.destroy(self);
 
         // Extract DMA-BUF attributes from GBM BO
-        const dmabuf_attrs = extractDMABUFAttrs(bo) catch |err| {
-            alloc.destroy(self);
-            return err;
-        };
+        const dmabuf_attrs = try extractDMABUFAttrs(bo);
 
         self.* = .{
             .base = buffer.Buffer.init(alloc),
@@ -168,7 +165,7 @@ const GBMBuffer = struct {
         // Close DMA-BUF file descriptors
         for (self.dmabuf_attrs.fds) |fd| {
             if (fd >= 0) {
-                std.posix.close(fd);
+                core.unix.close(fd);
             }
         }
 
@@ -251,6 +248,8 @@ const GBMBuffer = struct {
 
 /// Extract DMA-BUF attributes from GBM buffer object
 fn extractDMABUFAttrs(bo: *gbm.struct_gbm_bo) !buffer.DMABUFAttrs {
+    const plane_count = gbm.gbm_bo_get_plane_count(bo);
+    if (plane_count <= 0 or plane_count > 4) return error.InvalidPlaneCount;
     var attrs: buffer.DMABUFAttrs = .{
         .success = true,
         .size = Vector2D.init(
@@ -259,7 +258,7 @@ fn extractDMABUFAttrs(bo: *gbm.struct_gbm_bo) !buffer.DMABUFAttrs {
         ),
         .format = gbm.gbm_bo_get_format(bo),
         .modifier = gbm.gbm_bo_get_modifier(bo),
-        .planes = @intCast(gbm.gbm_bo_get_plane_count(bo)),
+        .planes = @intCast(plane_count),
         .fds = [_]i32{-1} ** 4,
         .strides = [_]u32{0} ** 4,
         .offsets = [_]u32{0} ** 4,
@@ -273,7 +272,7 @@ fn extractDMABUFAttrs(bo: *gbm.struct_gbm_bo) !buffer.DMABUFAttrs {
             // Clean up already opened FDs
             var j: usize = 0;
             while (j < i) : (j += 1) {
-                std.posix.close(attrs.fds[j]);
+                core.unix.close(attrs.fds[j]);
             }
             return error.FailedToExportDMABUF;
         }

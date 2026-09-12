@@ -57,14 +57,14 @@ pub const ChangeEvent = struct {
 // Callback functions for C libraries
 
 /// Libseat seat enable/disable callback
-fn libseatHandleEnable(seat: ?*libseat, user_data: ?*anyopaque) callconv(.C) void {
+fn libseatHandleEnable(seat: ?*libseat, user_data: ?*anyopaque) callconv(.c) void {
     _ = seat;
     const session: *Type = @ptrCast(@alignCast(user_data orelse return));
     session.active = true;
     session.onReady();
 }
 
-fn libseatHandleDisable(seat: ?*libseat, user_data: ?*anyopaque) callconv(.C) void {
+fn libseatHandleDisable(seat: ?*libseat, user_data: ?*anyopaque) callconv(.c) void {
     const handle = seat orelse return;
     const session: *Type = @ptrCast(@alignCast(user_data orelse return));
     session.active = false;
@@ -74,7 +74,7 @@ fn libseatHandleDisable(seat: ?*libseat, user_data: ?*anyopaque) callconv(.C) vo
 }
 
 /// Libinput open_restricted callback
-fn libinputOpenRestricted(path: [*c]const u8, flags: c_int, user_data: ?*anyopaque) callconv(.C) c_int {
+fn libinputOpenRestricted(path: [*c]const u8, flags: c_int, user_data: ?*anyopaque) callconv(.c) c_int {
     const session: *Type = @ptrCast(@alignCast(user_data orelse return -1));
     const handle = session.libseat_handle orelse return -1;
 
@@ -90,7 +90,7 @@ fn libinputOpenRestricted(path: [*c]const u8, flags: c_int, user_data: ?*anyopaq
 }
 
 /// Libinput close_restricted callback
-fn libinputCloseRestricted(fd: c_int, user_data: ?*anyopaque) callconv(.C) void {
+fn libinputCloseRestricted(fd: c_int, user_data: ?*anyopaque) callconv(.c) void {
     const session: *Type = @ptrCast(@alignCast(user_data orelse return));
     const handle = session.libseat_handle orelse return;
 
@@ -126,10 +126,10 @@ pub const Device = struct {
 
     pub fn deinit(self: *Self) void {
         if (self.fd >= 0) {
-            posix.close(self.fd);
+            core.unix.close(self.fd);
         }
         if (self.render_node_fd >= 0) {
-            posix.close(self.render_node_fd);
+            core.unix.close(self.render_node_fd);
         }
         self.allocator.free(self.path);
         self.allocator.destroy(self);
@@ -198,7 +198,7 @@ pub const LibinputDevice = struct {
             .session = sess,
             .name = name,
             .allocator = allocator,
-            .tablet_tools = std.ArrayList(*input.ITabletTool){},
+            .tablet_tools = std.ArrayList(*input.ITabletTool).empty,
         };
 
         return self;
@@ -275,6 +275,7 @@ pub const Type = struct {
     udev_monitor: ?*udev_monitor = null,
     libseat_handle: ?*libseat = null,
     libinput_handle: ?*libinput = null,
+    input_manager: ?input.Manager = null,
 
     // Event signals
     signal_ready: Signal(void),
@@ -289,6 +290,7 @@ pub const Type = struct {
     signal_touch_up: Signal(TouchUpEvent),
     signal_touch_motion: Signal(TouchMotionEvent),
     signal_touch_cancel: Signal(TouchCancelEvent),
+    signal_input_event: Signal(input.Event),
 
     const Self = @This();
 
@@ -299,8 +301,8 @@ pub const Type = struct {
         self.* = .{
             .allocator = allocator,
             .seat_name = "", // Will be set during initialization
-            .session_devices = std.ArrayList(*Device){},
-            .libinput_devices = std.ArrayList(*LibinputDevice){},
+            .session_devices = std.ArrayList(*Device).empty,
+            .libinput_devices = std.ArrayList(*LibinputDevice).empty,
             .signal_ready = Signal(void).init(allocator),
             .signal_device_change = Signal(ChangeEvent).init(allocator),
             .signal_keyboard_key = Signal(KeyboardKeyEvent).init(allocator),
@@ -313,6 +315,7 @@ pub const Type = struct {
             .signal_touch_up = Signal(TouchUpEvent).init(allocator),
             .signal_touch_motion = Signal(TouchMotionEvent).init(allocator),
             .signal_touch_cancel = Signal(TouchCancelEvent).init(allocator),
+            .signal_input_event = Signal(input.Event).init(allocator),
         };
 
         return self;
@@ -332,6 +335,10 @@ pub const Type = struct {
         self.signal_touch_up.deinit();
         self.signal_touch_motion.deinit();
         self.signal_touch_cancel.deinit();
+        self.signal_input_event.deinit();
+
+        if (self.input_manager) |*manager| manager.deinit();
+        self.input_manager = null;
 
         // Clean up libinput devices
         for (self.libinput_devices.items) |device| {
@@ -418,13 +425,17 @@ pub const Type = struct {
         if (c.libinput_udev_assign_seat(session.libinput_handle, seat_name_cstr) != 0) {
             return error.LibinputAssignSeatFailed;
         }
+        session.input_manager = input.Manager.fromContext(
+            allocator,
+            @ptrCast(session.libinput_handle.?),
+        );
 
         return session;
     }
 
     /// Get file descriptors that need polling
     pub fn pollFds(self: *Self, allocator: std.mem.Allocator) ![]PollFd {
-        var fds = std.ArrayList(PollFd){};
+        var fds = std.ArrayList(PollFd).empty;
 
         // Add libseat fd
         if (self.libseat_handle) |handle| {
@@ -554,13 +565,56 @@ pub const Type = struct {
     }
 
     fn dispatchLibinputEvents(self: *Self) void {
-        const handle = self.libinput_handle orelse return;
+        const manager = if (self.input_manager) |*active| active else return;
+        manager.processEvents() catch return;
+        while (manager.event_queue.pop()) |event| self.emitInputEvent(event);
+        manager.finishDispatch();
+    }
 
-        _ = c.libinput_dispatch(handle);
-
-        while (c.libinput_get_event(handle)) |event| {
-            defer _ = c.libinput_event_destroy(event);
-            self.handleLibinputEvent(event);
+    fn emitInputEvent(self: *Self, event: input.Event) void {
+        self.signal_input_event.emit(event);
+        switch (event) {
+            .keyboard_key => |value| self.signal_keyboard_key.emit(.{
+                .time_msec = @truncate(value.time_usec / std.time.us_per_ms),
+                .key = value.key,
+                .state = @enumFromInt(@intFromEnum(value.state)),
+            }),
+            .pointer_motion => |value| self.signal_pointer_motion.emit(.{
+                .time_msec = @truncate(value.time_usec / std.time.us_per_ms),
+                .delta_x = value.delta_x,
+                .delta_y = value.delta_y,
+            }),
+            .pointer_motion_absolute => |value| self.signal_pointer_motion_absolute.emit(.{
+                .time_msec = @truncate(value.time_usec / std.time.us_per_ms),
+                .x = value.x,
+                .y = value.y,
+            }),
+            .pointer_button => |value| self.signal_pointer_button.emit(.{
+                .time_msec = @truncate(value.time_usec / std.time.us_per_ms),
+                .button = value.button,
+                .state = @enumFromInt(@intFromEnum(value.state)),
+            }),
+            .touch_down => |value| self.signal_touch_down.emit(.{
+                .time_msec = @truncate(value.time_usec / std.time.us_per_ms),
+                .touch_id = value.slot,
+                .x = value.x,
+                .y = value.y,
+            }),
+            .touch_up => |value| self.signal_touch_up.emit(.{
+                .time_msec = @truncate(value.time_usec / std.time.us_per_ms),
+                .touch_id = value.slot,
+            }),
+            .touch_motion => |value| self.signal_touch_motion.emit(.{
+                .time_msec = @truncate(value.time_usec / std.time.us_per_ms),
+                .touch_id = value.slot,
+                .x = value.x,
+                .y = value.y,
+            }),
+            .touch_cancel => |value| self.signal_touch_cancel.emit(.{
+                .time_msec = @truncate(value.time_usec / std.time.us_per_ms),
+                .touch_id = value.slot,
+            }),
+            else => {},
         }
     }
 
@@ -866,6 +920,69 @@ test "Session - signals are initialized" {
     try testing.expectEqual(@as(usize, 0), sess.signal_keyboard_key.listeners.items.len);
     try testing.expectEqual(@as(usize, 0), sess.signal_pointer_motion.listeners.items.len);
     try testing.expectEqual(@as(usize, 0), sess.signal_touch_down.listeners.items.len);
+    try testing.expectEqual(@as(usize, 0), sess.signal_input_event.listeners.items.len);
+}
+
+test "Session - M2 runtime path preserves extended input events and timestamps" {
+    var sess = try Type.init(testing.allocator);
+    defer sess.deinit();
+    var device = input.Device{
+        .name = "runtime",
+        .sysname = "event0",
+        .vendor = 1,
+        .product = 2,
+        .capabilities = .{ .gesture = true, .touch = true, .tablet_tool = true, .switch_device = true },
+        .libinput_device = undefined,
+        .allocator = testing.allocator,
+    };
+    const State = struct {
+        var count: usize = 0;
+        var last_time: u64 = 0;
+
+        fn callback(event: input.Event, _: ?*anyopaque) void {
+            count += 1;
+            last_time = switch (event) {
+                .gesture_swipe_update => |value| value.time_usec,
+                .touch_frame => |value| value.time_usec,
+                .tablet_tool_axis => |value| value.time_usec,
+                .switch_toggle => |value| value.time_usec,
+                else => last_time,
+            };
+        }
+    };
+    State.count = 0;
+    State.last_time = 0;
+    var listener = try sess.signal_input_event.listen(State.callback, null);
+    defer listener.deinit();
+
+    sess.emitInputEvent(.{ .gesture_swipe_update = .{
+        .device = &device,
+        .time_usec = 101,
+        .fingers = 3,
+        .delta_x = 12,
+        .delta_y = 0,
+        .cancelled = false,
+    } });
+    sess.emitInputEvent(.{ .touch_frame = .{ .device = &device, .time_usec = 102 } });
+    sess.emitInputEvent(.{ .tablet_tool_axis = .{
+        .device = &device,
+        .time_usec = 103,
+        .x = 0.5,
+        .y = 0.5,
+        .pressure = 0.5,
+        .tilt_x = 0,
+        .tilt_y = 0,
+        .rotation = 0,
+        .distance = 0,
+    } });
+    sess.emitInputEvent(.{ .switch_toggle = .{
+        .device = &device,
+        .time_usec = 104,
+        .switch_kind = .lid,
+        .state = .on,
+    } });
+    try testing.expectEqual(@as(usize, 4), State.count);
+    try testing.expectEqual(@as(u64, 104), State.last_time);
 }
 
 test "Session - keyboard signal emission" {

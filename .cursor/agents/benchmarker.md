@@ -106,9 +106,9 @@ result.print(logger);
 **Comparing results:**
 ```zig
 var buf: [4096]u8 = undefined;
-var stream = std.io.fixedBufferStream(&buf);
-try Result.compare(baseline, optimized, stream.writer());
-logger.info("{s}", .{stream.getWritten()});
+var writer: std.Io.Writer = .fixed(&buf);
+try Result.compare(baseline, optimized, &writer);
+logger.info("{s}", .{writer.buffered()});
 ```
 
 ### Step 4: Design Multiple Scenarios
@@ -281,9 +281,9 @@ fn benchmarkScenario(
     optimized.print(logger);
     
     var buf: [4096]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    try Result.compare(baseline, optimized, stream.writer());
-    logger.info("{s}", .{stream.getWritten()});
+    var writer: std.Io.Writer = .fixed(&buf);
+    try Result.compare(baseline, optimized, &writer);
+    logger.info("{s}", .{writer.buffered()});
 }
 ```
 

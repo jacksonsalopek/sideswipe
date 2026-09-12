@@ -196,10 +196,8 @@ pub fn runByName(allocator: std.mem.Allocator, name: []const u8, logger: *cli.Lo
 }
 
 /// Main entry point for benchmark executable
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
     // Initialize logger for benchmark output
     var logger = cli.Logger.init(allocator);
@@ -208,7 +206,7 @@ pub fn main() !void {
     logger.setEnableColor(true);
 
     // Parse command line arguments
-    var args = try std.process.argsWithAllocator(allocator);
+    var args = std.process.Args.Iterator.init(init.minimal.args);
     defer args.deinit();
 
     // Skip program name
@@ -280,14 +278,14 @@ test "AllocTracker - snapshot returns current stats" {
 
 test "Timer - basic timing" {
     var timer = try Timer.start();
-    std.time.sleep(1_000_000); // Sleep 1ms
+    try std.Options.debug_io.sleep(.fromNanoseconds(1_000_000), .awake); // Sleep 1ms
     const elapsed = timer.read();
     try testing.expect(elapsed >= 1_000_000); // At least 1ms
 }
 
 test "Timer - reset works" {
     var timer = try Timer.start();
-    std.time.sleep(1_000_000);
+    try std.Options.debug_io.sleep(.fromNanoseconds(1_000_000), .awake);
     timer.reset();
     const elapsed = timer.read();
     try testing.expect(elapsed < 1_000_000); // Should be much less
@@ -322,10 +320,10 @@ test "Result - compare calculates improvements" {
     };
 
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    try Result.compare(baseline, optimized, stream.writer());
+    var writer: std.Io.Writer = .fixed(&buf);
+    try Result.compare(baseline, optimized, &writer);
 
-    const output = stream.getWritten();
+    const output = writer.buffered();
     try testing.expect(std.mem.indexOf(u8, output, "faster") != null);
     try testing.expect(std.mem.indexOf(u8, output, "fewer") != null);
 }

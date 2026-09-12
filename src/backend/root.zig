@@ -3,6 +3,7 @@
 pub const allocator = @import("allocator.zig");
 pub const attachment = @import("attachment.zig");
 pub const buffer = @import("buffer.zig");
+pub const cursor = @import("cursor.zig");
 pub const drm = @import("drm.zig");
 pub const egl_formats = @import("egl_formats.zig");
 pub const gbm = @import("gbm.zig");
@@ -32,6 +33,7 @@ test {
     _ = @import("attachment.zig");
     _ = backend_impl; // Test backend.zig via re-export
     _ = @import("buffer.zig");
+    _ = @import("cursor.zig");
     _ = @import("drm.zig");
     _ = @import("egl_formats.zig");
     _ = @import("gbm.zig");

@@ -13,12 +13,12 @@ pub const Env = struct {
     var trace_value: ?bool = null;
 
     pub fn enabled(env: string) bool {
-        const val = std.posix.getenv(env) orelse return false;
+        const val = core.env.get(env) orelse return false;
         return std.mem.eql(u8, val, "1");
     }
 
     pub fn explicitlyDisabled(env: string) bool {
-        const val = std.posix.getenv(env) orelse return false;
+        const val = core.env.get(env) orelse return false;
         return std.mem.eql(u8, val, "0");
     }
 
@@ -109,7 +109,7 @@ test "Env.isTrace - not set" {
     // Test when SIDESWIPE_TRACE is not set (default case)
     // Note: Since trace_value is cached, this test should run first
     // or we need to ensure SIDESWIPE_TRACE is unset
-    const was_set = std.posix.getenv("SIDESWIPE_TRACE") != null;
+    const was_set = core.env.get("SIDESWIPE_TRACE") != null;
     if (was_set) {
         // Skip this test if SIDESWIPE_TRACE is already set in the environment
         return error.SkipZigTest;

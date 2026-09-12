@@ -339,15 +339,15 @@ const entries = [_]Timing{
 /// Lookup VIC timing by code (O(log n) binary search)
 pub fn lookup(vic: u8) ?Timing {
     if (vic == 0) return null;
-    
+
     // Binary search
     var left: usize = 0;
     var right: usize = entries.len;
-    
+
     while (left < right) {
         const mid = left + (right - left) / 2;
         const entry_vic = entries[mid].vic;
-        
+
         if (entry_vic == vic) {
             return entries[mid];
         } else if (entry_vic < vic) {
@@ -356,7 +356,7 @@ pub fn lookup(vic: u8) ?Timing {
             right = mid;
         }
     }
-    
+
     return null;
 }
 
