@@ -49,6 +49,9 @@ pub const Primitive = union(enum) {
         time_usec: u64,
         delta: f64,
     };
+
+    /// Maps a 0.2 pinch Δscale onto one 120-unit column-width step.
+    pub const pinch_zoom_units: f64 = 600;
 };
 
 pub const Config = struct {
@@ -142,7 +145,8 @@ pub const Recognizer = struct {
         const duration = elapsed(self.started_usec, time_usec);
         if (duration > self.config.flick_usec) return .unrecognized;
         if (distance(self.origin, self.current) <= self.config.dead_zone) return .unrecognized;
-        const direction = coneDirection(self.delta(), self.config.cone_degrees) orelse
+        const direction = self.direction orelse
+            coneDirection(self.delta(), self.config.cone_degrees) orelse
             return .unrecognized;
         return .{ .recognized = .{ .flick = .{
             .time_usec = time_usec,
@@ -239,8 +243,15 @@ pub const Mouse = struct {
         };
     }
 
+    /// Compiled default is `BTN_MIDDLE` hold (250 ms / 6 px).
     pub fn defaultShellButton() u32 {
         return Button.middle;
+    }
+
+    /// Device capabilities do not override the compiled default. `BTN_SIDE` and
+    /// `BTN_EXTRA` are explicit `MouseConfig.shell_button` overrides only.
+    pub fn resolveShellButton(_: bool, _: bool) u32 {
+        return defaultShellButton();
     }
 
     pub fn button(
@@ -284,14 +295,17 @@ pub const Mouse = struct {
         time_usec: u64,
         control: bool,
         over_tile_gap: bool,
-        delta: f64,
+        value: f64,
+        discrete: i32,
     ) Translation {
         if (!control) return .{};
         if (!self.recognizer.active() and !over_tile_gap) return .{};
+        const units = axisV120(value, discrete);
+        if (units == 0) return .{};
         return .{
             .consumed = true,
             .claimed = true,
-            .primitive = .{ .zoom = .{ .time_usec = time_usec, .delta = delta } },
+            .primitive = .{ .zoom = .{ .time_usec = time_usec, .delta = @floatFromInt(units) } },
         };
     }
 
@@ -361,6 +375,18 @@ pub const Mouse = struct {
     }
 };
 
+const v120_per_notch: i32 = 120;
+const wheel_degrees_per_notch: f64 = 15;
+
+/// Wheel v120: discrete notches, else degrees (~15°), else already-v120 values.
+pub fn axisV120(value: f64, discrete: i32) i32 {
+    if (discrete != 0) return discrete * v120_per_notch;
+    if (!std.math.isFinite(value) or value == 0) return 0;
+    if (@abs(value) >= @as(f64, @floatFromInt(v120_per_notch)))
+        return @intFromFloat(@trunc(value));
+    return @as(i32, @intFromFloat(@trunc(value / wheel_degrees_per_notch))) * v120_per_notch;
+}
+
 fn navigation(time_usec: u64, comptime tag: std.meta.Tag(Primitive)) Translation {
     const primitive: Primitive = switch (tag) {
         .back => .{ .back = .{ .time_usec = time_usec } },
@@ -419,6 +445,16 @@ test "recognizer rejects motion outside thirty degree cones" {
     try testing.expectEqual(State.tracking, recognizer.state);
 }
 
+test "recognizer keeps a locked axis through flick finish" {
+    var recognizer = Recognizer{};
+    try recognizer.begin(0, .{ .x = 0, .y = 0 });
+    try testing.expectNull(try recognizer.motion(1, .{ .x = 12, .y = 1 }));
+    try testing.expectEqual(@as(?Direction, .right), recognizer.direction);
+    try testing.expectNull(try recognizer.motion(2, .{ .x = 13, .y = 100 }));
+    const flick = try recognizer.finish(100_000);
+    try testing.expectEqual(Direction.right, flick.recognized.flick.direction);
+}
+
 test "recognizer flick threshold and timeout are inclusive" {
     var fast = Recognizer{};
     try fast.begin(0, .{ .x = 0, .y = 0 });
@@ -451,9 +487,38 @@ test "recognizer validates state time and coordinates" {
     try testing.expectNull(try recognizer.motion(9, .{ .x = 1, .y = 1 }));
 }
 
-test "mouse defaults to middle regardless of extra buttons" {
+test "mouse defaults to middle hold and ignores side extra capability" {
     try testing.expectEqual(Button.middle, Mouse.defaultShellButton());
     try testing.expectEqual(Button.middle, Mouse.init(.{}).config.shell_button);
+    try testing.expectEqual(@as(u64, 250_000), Mouse.init(.{}).config.gesture.hold_usec);
+    try testing.expectEqual(@as(f64, 6), Mouse.init(.{}).config.gesture.dead_zone);
+    try testing.expectEqual(Button.middle, Mouse.resolveShellButton(true, true));
+    try testing.expectEqual(Button.middle, Mouse.resolveShellButton(true, false));
+    try testing.expectEqual(Button.middle, Mouse.resolveShellButton(false, true));
+    try testing.expectEqual(Button.middle, Mouse.resolveShellButton(false, false));
+    try testing.expectEqual(Button.middle, Mouse.init(.{ .shell_button = Button.middle }).config.shell_button);
+}
+
+test "mouse honors an explicit hold duration override" {
+    var mouse = Mouse.init(.{ .gesture = .{ .hold_usec = 400_000 } });
+    _ = try mouse.button(0, .{}, Button.middle, .pressed);
+    try testing.expectNull((try mouse.tick(250_000)).primitive);
+    const hold = (try mouse.tick(400_000)).primitive.?;
+    try testing.expectEqual(std.meta.Tag(Primitive).hold, std.meta.activeTag(hold));
+}
+
+test "mouse side and extra are explicit overrides only" {
+    var side = Mouse.init(.{ .shell_button = Button.side });
+    const side_press = try side.button(10, .{ .x = 1, .y = 2 }, Button.side, .pressed);
+    try testing.expect(side_press.consumed);
+    try testing.expectFalse((try side.button(11, .{}, Button.middle, .pressed)).consumed);
+
+    var extra = Mouse.init(.{ .shell_button = Button.extra });
+    const extra_press = try extra.button(10, .{ .x = 1, .y = 2 }, Button.extra, .pressed);
+    try testing.expect(extra_press.consumed);
+    try testing.expectNull(extra_press.replay_press);
+    const extra_release = try extra.button(20, .{ .x = 1, .y = 2 }, Button.extra, .released);
+    try testing.expectEqual(@as(u64, 10), extra_release.replay_press.?.time_usec);
 }
 
 test "mouse defers and replays click with original timestamp" {
@@ -496,7 +561,7 @@ test "mouse slow move release completes drag without click replay" {
 test "mouse hold release updates hover before completion" {
     var mouse = Mouse.init(.{});
     _ = try mouse.button(0, .{}, Button.middle, .pressed);
-    _ = try mouse.tick(400_000);
+    _ = try mouse.tick(250_000);
 
     const release = try mouse.button(500_000, .{ .x = 72, .y = 0 }, Button.middle, .released);
     try testing.expectEqual(std.meta.Tag(Primitive).hover, std.meta.activeTag(release.primitive.?));
@@ -543,13 +608,26 @@ test "mouse back forward and zoom obey gesture guards" {
     const back = try mouse.button(1, .{}, Button.back, .pressed);
     try testing.expectEqual(std.meta.Tag(Primitive).back, std.meta.activeTag(back.primitive.?));
     try testing.expect((try mouse.button(2, .{}, Button.back, .released)).consumed);
-    const passthrough = mouse.axis(2, true, false, 120);
+    const passthrough = mouse.axis(2, true, false, 15, 1);
     try testing.expectFalse(passthrough.consumed);
-    const gap_zoom = mouse.axis(3, true, true, -120);
+    const gap_zoom = mouse.axis(3, true, true, -15, 0);
     try testing.expectEqual(@as(f64, -120), gap_zoom.primitive.?.zoom.delta);
     _ = try mouse.button(4, .{}, Button.middle, .pressed);
-    const held_zoom = mouse.axis(5, true, false, 120);
+    const held_zoom = mouse.axis(5, true, false, 15, 1);
     try testing.expect(held_zoom.consumed);
-    const guarded_back = try mouse.button(6, .{}, Button.back, .pressed);
+    const crumb = mouse.axis(6, true, false, 7, 0);
+    try testing.expectFalse(crumb.consumed);
+    const guarded_back = try mouse.button(7, .{}, Button.back, .pressed);
     try testing.expectFalse(guarded_back.consumed);
+}
+
+test "axis v120 maps a wheel notch and ignores crumbs" {
+    try testing.expectEqual(@as(i32, 120), axisV120(15, 0));
+    try testing.expectEqual(@as(i32, 120), axisV120(15, 1));
+    try testing.expectEqual(@as(i32, -120), axisV120(-15, 0));
+    try testing.expectEqual(@as(i32, 240), axisV120(30, 0));
+    try testing.expectEqual(@as(i32, 120), axisV120(120, 0));
+    try testing.expectEqual(@as(i32, 0), axisV120(7, 0));
+    try testing.expectEqual(@as(i32, 0), axisV120(0, 0));
+    try testing.expectEqual(@as(i32, 0), axisV120(std.math.nan(f64), 0));
 }

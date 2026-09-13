@@ -4,7 +4,7 @@ pub const allocator = @import("allocator.zig");
 pub const attachment = @import("attachment.zig");
 pub const buffer = @import("buffer.zig");
 pub const cursor = @import("cursor.zig");
-pub const drm = @import("drm.zig");
+pub const drm = @import("drm/root.zig");
 pub const egl_formats = @import("egl_formats.zig");
 pub const gbm = @import("gbm.zig");
 pub const input = @import("input.zig");
@@ -15,6 +15,7 @@ pub const renderer = @import("renderer.zig");
 pub const session = @import("session.zig");
 pub const swapchain = @import("swapchain.zig");
 pub const util = @import("util.zig");
+pub const vulkan = @import("vulkan.zig");
 pub const wayland = @import("wayland.zig");
 
 // Re-export main backend types to avoid redundancy
@@ -34,7 +35,10 @@ test {
     _ = backend_impl; // Test backend.zig via re-export
     _ = @import("buffer.zig");
     _ = @import("cursor.zig");
-    _ = @import("drm.zig");
+    _ = @import("drm/root.zig");
+    _ = @import("drm/format.zig");
+    _ = @import("drm/fb.zig");
+    _ = @import("drm/output.zig");
     _ = @import("egl_formats.zig");
     _ = @import("gbm.zig");
     _ = @import("input.zig");
@@ -45,5 +49,6 @@ test {
     _ = @import("session.zig");
     _ = @import("swapchain.zig");
     _ = @import("util.zig");
+    _ = @import("vulkan.zig");
     _ = @import("wayland.zig");
 }

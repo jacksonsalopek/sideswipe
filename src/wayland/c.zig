@@ -11,5 +11,13 @@ pub const c = @cImport({
     @cInclude("viewporter-protocol.h");
     @cInclude("viewporter-client-protocol.h");
     @cInclude("fractional-scale-v1-protocol.h");
+    @cInclude("sideswipe-shell-v1-protocol.h");
+    @cInclude("xdg-dialog-v1-protocol.h");
+    @cInclude("xdg-decoration-unstable-v1-protocol.h");
+    @cInclude("color-management-v1-protocol.h");
+    @cInclude("color-representation-v1-protocol.h");
+    @cInclude("tearing-control-v1-protocol.h");
+    @cInclude("ext-session-lock-v1-protocol.h");
+    @cInclude("ext-idle-notify-v1-protocol.h");
     @cInclude("sys/stat.h");
 });

@@ -34,6 +34,8 @@ pub const ImplementationOptions = struct {
 pub const Options = struct {
     physical_input: bool = false,
     session_factory: *const fn (std.mem.Allocator) anyerror!*session.Type = session.Type.attempt,
+    parent_display: ?[:0]const u8 = null,
+    own_socket: []const u8 = "",
 };
 
 /// Poll file descriptor callback
@@ -106,6 +108,7 @@ pub const Coordinator = struct {
     primary_renderer: ?*renderer.Type = null,
     primary_drm_fd: i32 = -1,
     session: ?*session.Type = null,
+    session_paused: bool = false,
     ready: bool = false,
     idle_fd: i32 = -1,
     cached_poll_fds: []PollFd = &[_]PollFd{},
@@ -167,7 +170,10 @@ pub const Coordinator = struct {
     fn initializePhysicalInput(self: *Self) void {
         if (!self.options.physical_input) return;
         self.session = self.options.session_factory(self.allocator) catch |err| {
-            cli.log.warn("Physical input session unavailable: {}", .{err});
+            cli.log.warn(
+                "Physical input session unavailable: {}; native DRM cannot start without a session",
+                .{err},
+            );
             return;
         };
         self.poll_fds_dirty = true;
@@ -201,20 +207,23 @@ pub const Coordinator = struct {
 
     /// Create backend implementation by type
     fn createBackendByType(self: *Self, backend_type: Type) !Implementation {
-        const wayland_module = @import("wayland.zig");
+        const wayland = @import("wayland.zig");
 
         return switch (backend_type) {
             .wayland => blk: {
                 cli.log.debug("Attempting to create Wayland backend", .{});
-                const backend_ptr = wayland_module.Backend.create(self.allocator, self) catch {
+                const backend_ptr = wayland.Backend.create(self.allocator, self) catch {
                     cli.log.warn("Failed to create Wayland backend", .{});
                     return error.BackendNotImplemented;
                 };
                 break :blk backend_ptr.iface();
             },
             .drm => {
-                cli.log.debug("DRM backend not yet implemented", .{});
-                return error.BackendNotImplemented;
+                const drm = @import("drm/root.zig");
+                return drm.Backend.createImplementation(self) catch {
+                    cli.log.warn("DRM backend not available", .{});
+                    return error.BackendNotImplemented;
+                };
             },
             .headless => {
                 cli.log.debug("Headless backend not yet implemented", .{});
@@ -264,10 +273,12 @@ pub const Coordinator = struct {
     /// Start all backend implementations
     pub fn start(self: *Self) !bool {
         cli.log.debug("Starting the backend!", .{});
+        errdefer self.releaseSession();
 
         const started = try self.startImplementations();
         if (started == 0) {
             cli.log.crit("No backend could be opened", .{});
+            self.releaseSession();
             return false;
         }
 
@@ -278,6 +289,49 @@ pub const Coordinator = struct {
         self.poll_fds_dirty = true;
 
         return true;
+    }
+
+    fn releaseSession(self: *Self) void {
+        const sess = self.session orelse return;
+        self.abandonDrmSessionDevices();
+        sess.deinit();
+        self.session = null;
+        self.poll_fds_dirty = true;
+    }
+
+    fn abandonDrmSessionDevices(self: *Self) void {
+        self.forEachDrmBackend(abandonOneDrm);
+    }
+
+    /// Pause KMS on every DRM implementation (VT/seat disable).
+    pub fn pausePhysicalSession(self: *Self) void {
+        self.session_paused = true;
+        self.forEachDrmBackend(pauseOneDrm);
+    }
+
+    /// Resume KMS on every DRM implementation (VT/seat enable).
+    pub fn resumePhysicalSession(self: *Self) void {
+        self.session_paused = false;
+        self.forEachDrmBackend(resumeOneDrm);
+    }
+
+    fn forEachDrmBackend(self: *Self, func: *const fn (*@import("drm/root.zig").Backend) void) void {
+        for (self.implementations.items) |impl| {
+            if (impl.backendType() != .drm) continue;
+            func(@ptrCast(@alignCast(impl.base.ptr)));
+        }
+    }
+
+    fn abandonOneDrm(be: *@import("drm/root.zig").Backend) void {
+        be.abandonSessionDevice();
+    }
+
+    fn pauseOneDrm(be: *@import("drm/root.zig").Backend) void {
+        be.pauseForSeatDisable();
+    }
+
+    fn resumeOneDrm(be: *@import("drm/root.zig").Backend) void {
+        be.resumeForSeatEnable();
     }
 
     /// Start all backend implementations and return count of started backends
@@ -315,7 +369,7 @@ pub const Coordinator = struct {
     /// Initialize primary renderer and allocator from available DRM FDs
     fn initializeRendererAndAllocator(self: *Self) !void {
         for (self.implementations.items) |impl| {
-            const fd = impl.drmFd();
+            const fd = renderOrCardFd(impl);
             if (fd < 0) continue;
 
             const reopened_fd = self.reopenDrmNode(fd, true);
@@ -574,6 +628,12 @@ pub const Coordinator = struct {
     }
 };
 
+fn renderOrCardFd(impl: Implementation) i32 {
+    const render_fd = impl.drmRenderNodeFd();
+    if (render_fd >= 0) return render_fd;
+    return impl.drmFd();
+}
+
 const testing = core.testing;
 
 // Tests
@@ -664,6 +724,26 @@ test "Coordinator - physical input selection creates runtime session" {
 
     try testing.expect(coordinator.hasSession());
     try testing.expect((try coordinator.getPollFds()).len >= 1);
+}
+
+test "Coordinator - start without implementations releases session" {
+    const Factory = struct {
+        fn create(alloc: std.mem.Allocator) !*session.Type {
+            return session.Type.init(alloc);
+        }
+    };
+    const backends = [_]ImplementationOptions{
+        .{ .backend_type = .null, .request_mode = .if_available },
+    };
+    var coordinator = try Coordinator.create(testing.allocator, &backends, .{
+        .physical_input = true,
+        .session_factory = Factory.create,
+    });
+    defer coordinator.deinit();
+
+    try testing.expect(coordinator.hasSession());
+    try testing.expectEqual(false, try coordinator.start());
+    try testing.expectFalse(coordinator.hasSession());
 }
 
 test "Coordinator - physical input context failure remains graceful" {
@@ -759,6 +839,16 @@ test "Coordinator - instantiates wayland backend when WAYLAND_DISPLAY set" {
     try testing.expectEqual(Type.wayland, coordinator.implementations.items[0].backendType());
 }
 
+test "Coordinator - optional DRM without session stays empty" {
+    const backends = [_]ImplementationOptions{
+        .{ .backend_type = .drm, .request_mode = .if_available },
+    };
+    var coordinator = try Coordinator.create(testing.allocator, &backends, .{});
+    defer coordinator.deinit();
+
+    try testing.expectEqual(@as(usize, 0), coordinator.implementations.items.len);
+}
+
 test "Coordinator - handles unimplemented backends gracefully" {
     const backends = [_]ImplementationOptions{
         .{ .backend_type = .drm, .request_mode = .if_available },
@@ -786,6 +876,39 @@ test "Coordinator - mandatory backend failure propagates error" {
     try testing.expect(idle_fd >= 0);
     const status = std.posix.system.fcntl(idle_fd, std.posix.F.GETFD, @as(usize, 0));
     try testing.expectEqual(std.posix.E.BADF, std.posix.errno(status));
+}
+
+test "Coordinator - pause and resume with no implementations" {
+    const backends = [_]ImplementationOptions{
+        .{ .backend_type = .null, .request_mode = .if_available },
+    };
+    var coordinator = try Coordinator.create(testing.allocator, &backends, .{});
+    defer coordinator.deinit();
+
+    try testing.expectEqual(@as(usize, 0), coordinator.implementations.items.len);
+    coordinator.pausePhysicalSession();
+    try testing.expect(coordinator.session_paused);
+    coordinator.resumePhysicalSession();
+    try testing.expectFalse(coordinator.session_paused);
+}
+
+test "Coordinator - pause and resume with empty drm backend" {
+    const drm = @import("drm/root.zig");
+    const backends = [_]ImplementationOptions{
+        .{ .backend_type = .null, .request_mode = .if_available },
+    };
+    var coordinator = try Coordinator.create(testing.allocator, &backends, .{});
+    defer coordinator.deinit();
+
+    const be = try drm.Backend.fromGpu(testing.allocator, "/dev/dri/card0", coordinator, null);
+    try coordinator.implementations.append(testing.allocator, be.asInterface());
+
+    coordinator.pausePhysicalSession();
+    try testing.expect(coordinator.session_paused);
+    try testing.expect(be.seat_paused);
+    coordinator.resumePhysicalSession();
+    try testing.expectFalse(coordinator.session_paused);
+    try testing.expectFalse(be.seat_paused);
 }
 
 test "Coordinator - poll FDs cache invalidation" {
@@ -817,4 +940,18 @@ test "Coordinator - poll FDs cache invalidation" {
     // Next call should rebuild
     _ = try coordinator.getPollFds();
     try testing.expectFalse(coordinator.poll_fds_dirty);
+}
+
+test "renderOrCardFd - prefers an open render node" {
+    const drm = @import("drm/root.zig");
+    var be = try drm.Backend.fromGpu(testing.allocator, "/dev/dri/card0", null, null);
+    defer be.deinit();
+    const impl = be.asInterface();
+    try testing.expectEqual(@as(i32, -1), renderOrCardFd(impl));
+    be.render_node_fd = 11;
+    be.drm_fd = 7;
+    try testing.expectEqual(@as(i32, 11), renderOrCardFd(impl));
+    be.render_node_fd = -1;
+    try testing.expectEqual(@as(i32, 7), renderOrCardFd(impl));
+    be.drm_fd = -1;
 }

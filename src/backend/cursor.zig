@@ -1,6 +1,7 @@
 //! XCursor theme selection and scale-aware image sizing.
 
 const std = @import("std");
+const string = @import("core.string").string;
 const core = @import("core");
 const testing = core.testing;
 
@@ -8,10 +9,10 @@ pub const default_name = "default";
 pub const default_size: u32 = 24;
 
 pub const Spec = struct {
-    name: []const u8 = default_name,
+    name: string = default_name,
     size: u32 = default_size,
 
-    pub fn fromParts(name: ?[]const u8, size_text: ?[]const u8) Spec {
+    pub fn fromParts(name: ?string, size_text: ?string) Spec {
         return .{
             .name = nameOrDefault(name),
             .size = parseSize(size_text) orelse default_size,
@@ -60,13 +61,13 @@ pub fn logicalExtent(physical: u32, scale: f32) i32 {
     return @intFromFloat(@max(logical, 1));
 }
 
-fn nameOrDefault(name: ?[]const u8) []const u8 {
+fn nameOrDefault(name: ?string) string {
     const value = name orelse return default_name;
     if (value.len == 0) return default_name;
     return value;
 }
 
-fn parseSize(text: ?[]const u8) ?u32 {
+fn parseSize(text: ?string) ?u32 {
     const value = text orelse return null;
     const parsed = std.fmt.parseInt(u32, value, 10) catch return null;
     if (parsed == 0 or parsed > 256) return null;

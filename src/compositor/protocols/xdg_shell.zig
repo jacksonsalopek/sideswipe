@@ -19,6 +19,7 @@ pub const XdgSurface = struct {
     resource: ?*c.wl_resource = null,
     toplevel: ?*XdgToplevel = null, // Owned by this XdgSurface
     popup: ?*Popup = null,
+    pending_window_geometry: ?PopupGeometry = null,
     window_geometry: ?PopupGeometry = null,
     configured: bool = false,
     allocator: std.mem.Allocator,
@@ -29,6 +30,7 @@ pub const XdgSurface = struct {
             .surface = surface,
             .allocator = allocator,
         };
+        surface.commit_handler = applyCommittedGeometry;
         return self;
     }
 
@@ -37,6 +39,7 @@ pub const XdgSurface = struct {
         self.destroyRoleResources();
         self.surface.compositor.unmapToplevel(self.surface);
         self.surface.map_handler = null;
+        self.surface.commit_handler = null;
         self.surface.role_data = null;
         self.surface.xdg_surface_resource = null;
         self.allocator.destroy(self);
@@ -142,6 +145,15 @@ pub const XdgToplevel = struct {
     max_width: i32 = 0,
     max_height: i32 = 0,
     parent: ?*XdgToplevel = null,
+    is_dialog: bool = false,
+    modal: bool = false,
+    dialog_resource: ?*c.wl_resource = null,
+    decoration_resource: ?*c.wl_resource = null,
+    client_decoration_mode: ?u32 = null,
+    force_ssd: bool = false,
+    force_csd: bool = false,
+    maximized: bool = false,
+    fullscreen: bool = false,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, xdg_surface: *XdgSurface) !*XdgToplevel {
@@ -172,15 +184,16 @@ pub const XdgToplevel = struct {
     }
 
     pub fn sendConfigure(self: *XdgToplevel, width: i32, height: i32) void {
-        if (self.resource) |resource| {
-            // Create state array (empty for now)
-            var state = c.wl_array{
-                .size = 0,
-                .alloc = 0,
-                .data = null,
-            };
-            c.xdg_toplevel_send_configure(resource, width, height, &state);
-        }
+        const resource = self.resource orelse return;
+        var states = c.wl_array{
+            .size = 0,
+            .alloc = 0,
+            .data = null,
+        };
+        defer c.wl_array_release(&states);
+        appendToplevelState(&states, self.maximized, c.XDG_TOPLEVEL_STATE_MAXIMIZED);
+        appendToplevelState(&states, self.fullscreen, c.XDG_TOPLEVEL_STATE_FULLSCREEN);
+        c.xdg_toplevel_send_configure(resource, width, height, &states);
     }
 
     pub fn sendClose(self: *XdgToplevel) void {
@@ -195,6 +208,26 @@ fn requestToplevelClose(context: *anyopaque) void {
     toplevel.sendClose();
 }
 
+fn appendToplevelState(states: *c.wl_array, enabled: bool, value: u32) void {
+    if (!enabled) return;
+    const ptr = c.wl_array_add(states, @sizeOf(u32)) orelse return;
+    const slot: *u32 = @ptrCast(@alignCast(ptr));
+    slot.* = value;
+}
+
+/// Returns the `XdgToplevel` bound to an `xdg_toplevel` resource.
+pub fn toplevelFromResource(resource: ?*c.wl_resource) ?*XdgToplevel {
+    const item = resource orelse return null;
+    const payload: *XdgToplevelData = @ptrCast(@alignCast(c.wl_resource_get_user_data(item)));
+    return payload.toplevel;
+}
+
+/// Returns the `XdgToplevel` stored as resource user data (dialog/decoration).
+pub fn toplevelFromUserData(resource: ?*c.wl_resource) ?*XdgToplevel {
+    const item = resource orelse return null;
+    return @ptrCast(@alignCast(c.wl_resource_get_user_data(item)));
+}
+
 fn handleToplevelMap(surface: *Surface, mapped: bool) void {
     const xdg_surface: *XdgSurface = @ptrCast(@alignCast(surface.role_data orelse return));
     const toplevel = xdg_surface.toplevel orelse return;
@@ -202,16 +235,68 @@ fn handleToplevelMap(surface: *Surface, mapped: bool) void {
         surface.compositor.unmapToplevel(surface);
         return;
     }
-    surface.compositor.mapToplevel(surface, toplevel, configureMappedToplevel);
+    surface.compositor.mapToplevelWithHints(surface, toplevel, configureMappedToplevel, hintsOf(toplevel));
 }
 
 fn configureMappedToplevel(context: *anyopaque, width: i32, height: i32, serial: u32) void {
     const toplevel: *XdgToplevel = @ptrCast(@alignCast(context));
-    if (toplevel.width == width and toplevel.height == height) return;
     toplevel.width = width;
     toplevel.height = height;
+    if (toplevel.xdg_surface.surface.compositor.findToplevel(toplevel.xdg_surface.surface)) |entry| {
+        syncDecorationOverride(toplevel, entry);
+        toplevel.maximized = entry.maximized;
+        toplevel.fullscreen = entry.fullscreen;
+    }
     toplevel.sendConfigure(width, height);
+    @import("xdg_decoration.zig").sendMode(toplevel);
     toplevel.xdg_surface.sendConfigure(serial);
+}
+
+fn hintsOf(toplevel: *XdgToplevel) Compositor.ToplevelHints {
+    return .{
+        .parent = if (toplevel.parent) |parent| parent.xdg_surface.surface else null,
+        .is_dialog = toplevel.is_dialog,
+        .modal = toplevel.modal,
+        .app_id = toplevel.app_id,
+        .title = toplevel.title,
+        .min_size = .{ .width = toplevel.min_width, .height = toplevel.min_height },
+        .max_size = .{ .width = toplevel.max_width, .height = toplevel.max_height },
+        .window_geometry = if (toplevel.xdg_surface.window_geometry) |geo|
+            .{ .x = geo.x, .y = geo.y, .width = geo.width, .height = geo.height }
+        else
+            null,
+        .maximized = toplevel.maximized,
+        .fullscreen = toplevel.fullscreen,
+    };
+}
+
+fn requestRelayout(toplevel: *XdgToplevel) void {
+    toplevel.xdg_surface.surface.compositor.refreshToplevel(
+        toplevel.xdg_surface.surface,
+        hintsOf(toplevel),
+    );
+}
+
+fn syncDecorationOverride(toplevel: *XdgToplevel, entry: *Compositor.Toplevel) void {
+    if (entry.ssd_override) |forced| {
+        toplevel.force_ssd = forced;
+        toplevel.force_csd = !forced;
+        return;
+    }
+    toplevel.force_ssd = entry.ssd;
+    toplevel.force_csd = false;
+}
+
+fn applyCommittedGeometry(surface: *Surface) void {
+    const xdg_surface: *XdgSurface = @ptrCast(@alignCast(surface.role_data orelse return));
+    if (xdg_surface.pending_window_geometry) |geometry| {
+        xdg_surface.pending_window_geometry = null;
+        xdg_surface.window_geometry = geometry;
+        if (xdg_surface.toplevel) |toplevel| {
+            if (surface.mapped) requestRelayout(toplevel);
+        }
+    }
+    if (xdg_surface.popup != null) applyPopupGeometry(xdg_surface.popup.?);
 }
 
 // User data structures
@@ -602,7 +687,14 @@ fn popupResourceDestroy(resource: ?*c.wl_resource) callconv(.c) void {
 }
 
 fn sendPopupConfigure(popup: *Popup) void {
+    applyPopupGeometry(popup);
     const resource = popup.resource orelse return;
+    const geometry = popup.geometry;
+    c.xdg_popup_send_configure(resource, geometry.x, geometry.y, geometry.width, geometry.height);
+    popup.xdg_surface.sendConfigure(popup.xdg_surface.surface.compositor.nextSerial());
+}
+
+fn applyPopupGeometry(popup: *Popup) void {
     const geometry = popup.geometry;
     const parent_surface = if (popup.parent) |parent| parent.surface else null;
     const parent_x = if (parent_surface) |surface|
@@ -613,14 +705,13 @@ fn sendPopupConfigure(popup: *Popup) void {
         if (surface.scene_geometry) |parent_geometry| parent_geometry.y else 0
     else
         0;
+    const content = popup.xdg_surface.window_geometry orelse geometry;
     popup.xdg_surface.surface.scene_geometry = .{
-        .x = parent_x + geometry.x,
-        .y = parent_y + geometry.y,
-        .width = geometry.width,
-        .height = geometry.height,
+        .x = parent_x + geometry.x + content.x,
+        .y = parent_y + geometry.y + content.y,
+        .width = content.width,
+        .height = content.height,
     };
-    c.xdg_popup_send_configure(resource, geometry.x, geometry.y, geometry.width, geometry.height);
-    popup.xdg_surface.sendConfigure(popup.xdg_surface.surface.compositor.nextSerial());
 }
 
 var xdg_popup_implementation = [_]?*const anyopaque{
@@ -643,7 +734,7 @@ fn xdgSurfaceSetWindowGeometry(
         return;
     }
     const data: *XdgSurfaceData = @ptrCast(@alignCast(c.wl_resource_get_user_data(resource)));
-    data.xdg_surface.window_geometry = .{ .x = x, .y = y, .width = width, .height = height };
+    data.xdg_surface.pending_window_geometry = .{ .x = x, .y = y, .width = width, .height = height };
 }
 
 fn xdgSurfaceAckConfigure(
@@ -705,6 +796,7 @@ fn xdgToplevelSetParent(
     } else {
         data.toplevel.parent = null;
     }
+    requestRelayout(data.toplevel);
 }
 
 fn xdgToplevelSetTitle(
@@ -732,6 +824,7 @@ fn xdgToplevelSetTitle(
     if (toplevel.title) |t| {
         toplevel.xdg_surface.surface.compositor.logger.info("Toplevel window title: {s}", .{t});
     }
+    requestRelayout(toplevel);
 }
 
 fn xdgToplevelSetAppId(
@@ -759,6 +852,7 @@ fn xdgToplevelSetAppId(
     if (toplevel.app_id) |a| {
         toplevel.xdg_surface.surface.compositor.logger.info("Toplevel window app_id: {s}", .{a});
     }
+    requestRelayout(toplevel);
 }
 
 fn xdgToplevelShowWindowMenu(
@@ -775,7 +869,7 @@ fn xdgToplevelShowWindowMenu(
     _ = serial;
     _ = x;
     _ = y;
-    // Window menu stub
+    // W8: client show_window_menu is a no-op (no grab, no error, no menu).
 }
 
 fn xdgToplevelMove(
@@ -788,7 +882,7 @@ fn xdgToplevelMove(
     _ = resource;
     _ = seat;
     _ = serial;
-    // Move stub
+    // W8: client move is a no-op (no grab, no error, no action).
 }
 
 fn xdgToplevelResize(
@@ -803,7 +897,7 @@ fn xdgToplevelResize(
     _ = seat;
     _ = serial;
     _ = edges;
-    // Resize stub
+    // W8: client resize is a no-op (no grab, no error, no action).
 }
 
 fn xdgToplevelSetMaxSize(
@@ -817,6 +911,7 @@ fn xdgToplevelSetMaxSize(
     const data: *XdgToplevelData = @ptrCast(@alignCast(c.wl_resource_get_user_data(resource)));
     data.toplevel.max_width = width;
     data.toplevel.max_height = height;
+    requestRelayout(data.toplevel);
 }
 
 fn xdgToplevelSetMinSize(
@@ -830,6 +925,7 @@ fn xdgToplevelSetMinSize(
     const data: *XdgToplevelData = @ptrCast(@alignCast(c.wl_resource_get_user_data(resource)));
     data.toplevel.min_width = width;
     data.toplevel.min_height = height;
+    requestRelayout(data.toplevel);
 }
 
 fn xdgToplevelSetMaximized(
@@ -837,8 +933,9 @@ fn xdgToplevelSetMaximized(
     resource: ?*c.wl_resource,
 ) callconv(.c) void {
     _ = client;
-    _ = resource;
-    // Maximize stub
+    const data: *XdgToplevelData = @ptrCast(@alignCast(c.wl_resource_get_user_data(resource)));
+    data.toplevel.maximized = true;
+    requestRelayout(data.toplevel);
 }
 
 fn xdgToplevelUnsetMaximized(
@@ -846,8 +943,9 @@ fn xdgToplevelUnsetMaximized(
     resource: ?*c.wl_resource,
 ) callconv(.c) void {
     _ = client;
-    _ = resource;
-    // Unmaximize stub
+    const data: *XdgToplevelData = @ptrCast(@alignCast(c.wl_resource_get_user_data(resource)));
+    data.toplevel.maximized = false;
+    requestRelayout(data.toplevel);
 }
 
 fn xdgToplevelSetFullscreen(
@@ -856,9 +954,10 @@ fn xdgToplevelSetFullscreen(
     output: ?*c.wl_resource,
 ) callconv(.c) void {
     _ = client;
-    _ = resource;
     _ = output;
-    // Fullscreen stub
+    const data: *XdgToplevelData = @ptrCast(@alignCast(c.wl_resource_get_user_data(resource)));
+    data.toplevel.fullscreen = true;
+    requestRelayout(data.toplevel);
 }
 
 fn xdgToplevelUnsetFullscreen(
@@ -866,8 +965,9 @@ fn xdgToplevelUnsetFullscreen(
     resource: ?*c.wl_resource,
 ) callconv(.c) void {
     _ = client;
-    _ = resource;
-    // Unfullscreen stub
+    const data: *XdgToplevelData = @ptrCast(@alignCast(c.wl_resource_get_user_data(resource)));
+    data.toplevel.fullscreen = false;
+    requestRelayout(data.toplevel);
 }
 
 fn xdgToplevelSetMinimized(
@@ -875,8 +975,10 @@ fn xdgToplevelSetMinimized(
     resource: ?*c.wl_resource,
 ) callconv(.c) void {
     _ = client;
-    _ = resource;
-    // Minimize stub
+    const data: *XdgToplevelData = @ptrCast(@alignCast(c.wl_resource_get_user_data(resource)));
+    // W8: minimized is acknowledged with a configure that omits minimized.
+    data.toplevel.sendConfigure(data.toplevel.width, data.toplevel.height);
+    data.toplevel.xdg_surface.sendConfigure(data.toplevel.xdg_surface.surface.compositor.nextSerial());
 }
 
 var xdg_toplevel_implementation = [_]?*const anyopaque{
@@ -1072,6 +1174,8 @@ test "positioner resizes oversized popup to bounds" {
         .allocator = testing.allocator,
         .size = .{ .width = 1200, .height = 900 },
         .anchor_rect = .{ .x = 0, .y = 0, .width = 1, .height = 1 },
+        .anchor = c.XDG_POSITIONER_ANCHOR_TOP_LEFT,
+        .gravity = c.XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT,
         .constraint_adjustment = c.XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_RESIZE_X | c.XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_RESIZE_Y,
     };
     const geometry = constrainPositioner(positioner, .{ .x = 0, .y = 0, .width = 1000, .height = 800 });
@@ -1119,6 +1223,51 @@ test "destroyed toplevel resource clears owner and parent references" {
     try testing.expectNull(child_toplevel.parent);
     child_xdg.deinit();
     parent_xdg.deinit();
+}
+
+test "window geometry is honored for popup scene size" {
+    var fixture = try @import("../surface.zig").TestFixture.setup(testing.allocator);
+    defer fixture.cleanup();
+    const parent_surface = try fixture.compositor.createSurface();
+    const popup_surface = try fixture.compositor.createSurface();
+    const parent_xdg = try XdgSurface.init(testing.allocator, parent_surface);
+    const popup_xdg = try XdgSurface.init(testing.allocator, popup_surface);
+    try parent_surface.setRole(.xdg_toplevel, parent_xdg);
+    try popup_surface.setRole(.xdg_popup, popup_xdg);
+    parent_surface.scene_geometry = .{ .x = 100, .y = 50, .width = 400, .height = 300 };
+    popup_xdg.window_geometry = .{ .x = 2, .y = 4, .width = 80, .height = 60 };
+    const popup = try testing.allocator.create(Popup);
+    popup.* = .{
+        .allocator = testing.allocator,
+        .xdg_surface = popup_xdg,
+        .parent = parent_xdg,
+        .geometry = .{ .x = 10, .y = 20, .width = 90, .height = 70 },
+    };
+    popup_xdg.popup = popup;
+    sendPopupConfigure(popup);
+    try testing.expectEqual(@as(i32, 112), popup_surface.scene_geometry.?.x);
+    try testing.expectEqual(@as(i32, 74), popup_surface.scene_geometry.?.y);
+    try testing.expectEqual(@as(i32, 80), popup_surface.scene_geometry.?.width);
+    try testing.expectEqual(@as(i32, 60), popup_surface.scene_geometry.?.height);
+    popup.resource = null;
+    popup_xdg.popup = null;
+    popup.deinit();
+    popup_xdg.deinit();
+    parent_xdg.deinit();
+}
+
+test "XdgSurface - window geometry applies on commit" {
+    var fixture = try @import("../surface.zig").TestFixture.setup(testing.allocator);
+    defer fixture.cleanup();
+    const surface = try fixture.compositor.createSurface();
+    const xdg_surface = try XdgSurface.init(testing.allocator, surface);
+    try surface.setRole(.xdg_toplevel, xdg_surface);
+    xdg_surface.pending_window_geometry = .{ .x = 1, .y = 2, .width = 80, .height = 60 };
+    applyCommittedGeometry(surface);
+    try testing.expectEqual(@as(i32, 80), xdg_surface.window_geometry.?.width);
+    try testing.expectEqual(@as(i32, 60), xdg_surface.window_geometry.?.height);
+    try testing.expectEqual(@as(?PopupGeometry, null), xdg_surface.pending_window_geometry);
+    xdg_surface.deinit();
 }
 
 test "XdgToplevel - sendClose emits the protocol close event" {

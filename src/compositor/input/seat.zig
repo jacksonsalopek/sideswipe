@@ -3,8 +3,12 @@ const core = @import("core");
 const wayland = @import("wayland");
 const c = wayland.c;
 const Surface = @import("../surface.zig").Surface;
+const Role = @import("../surface.zig").Role;
 const FocusStack = @import("focus.zig").Stack(*Surface);
 const gesture = @import("gesture.zig");
+const trackpad = @import("trackpad.zig");
+const touchscreen = @import("touch.zig");
+const accelerators = @import("accelerators.zig");
 
 const xkb = @cImport({
     @cInclude("stdlib.h");
@@ -33,6 +37,12 @@ pub const KeyState = enum(u32) {
     pressed = c.WL_KEYBOARD_KEY_STATE_PRESSED,
 };
 
+pub const KeyResult = enum {
+    forwarded,
+    ignored,
+    quit,
+};
+
 pub const Grab = struct {
     active: bool = false,
     constraints_suspended: bool = false,
@@ -52,6 +62,13 @@ pub const ConstraintControl = struct {
     userdata: ?*anyopaque = null,
     pause: ?*const fn (?*anyopaque) void = null,
     restore: ?*const fn (?*anyopaque) void = null,
+};
+
+const TimerKind = enum {
+    none,
+    mouse,
+    pad,
+    touch,
 };
 
 const DeferredMotion = struct {
@@ -91,12 +108,20 @@ pub const Type = struct {
     pointer_surface_x: f64 = 0,
     pointer_surface_y: f64 = 0,
     grab: Grab = .{},
+    overlay_held: bool = false,
     constraint_control: ConstraintControl = .{},
     mouse: gesture.Mouse,
+    pad: trackpad.Translator,
+    touch: touchscreen.Translator = .{},
+    session_locked: bool = false,
+    ring_focus_visible: bool = false,
+    last_activity_msec: u64 = 0,
+    touch_delivered: bool = false,
     input_timebase: Timebase = .{},
     deferred_target: ?*Surface = null,
     deferred_motion: std.ArrayList(DeferredMotion) = .empty,
     gesture_timer: ?*c.wl_event_source = null,
+    timer_kind: TimerKind = .none,
     gesture_userdata: ?*anyopaque = null,
     gesture_handler: ?*const fn (?*anyopaque, gesture.Primitive) void = null,
     focus_sync_userdata: ?*anyopaque = null,
@@ -135,6 +160,7 @@ pub const Type = struct {
             .display = display,
             .focus_stack = FocusStack.init(allocator),
             .mouse = .{},
+            .pad = trackpad.Translator.init(.{}),
             .xkb_context = context,
             .xkb_keymap = keymap,
             .xkb_state = state,
@@ -207,6 +233,11 @@ pub const Type = struct {
     }
 
     pub fn motionAbsolute(self: *Self, surfaces: []const *Surface, time: u32, x: f64, y: f64) void {
+        self.noteActivity(time);
+        if (self.session_locked) {
+            self.deliverLockedMotion(surfaces, time, x, y);
+            return;
+        }
         self.pointer_x = x;
         self.pointer_y = y;
         const translated = self.mouse.motion(self.input_timebase.usec(time), .{ .x = x, .y = y }) catch {
@@ -222,12 +253,28 @@ pub const Type = struct {
             self.dispatchTranslation(translated);
             return;
         }
+        if (self.grab.active) {
+            self.dispatchPrimitive(.{ .hover = .{
+                .time_usec = self.input_timebase.usec(time),
+                .point = .{ .x = x, .y = y },
+            } });
+            return;
+        }
         self.setPointerHit(hitTest(surfaces, x, y));
         const surface = self.pointer_focus orelse return;
         self.sendPointerMotion(surface, time);
     }
 
     pub fn button(self: *Self, time: u32, button_code: u32, state: ButtonState) void {
+        self.noteActivity(time);
+        if (self.session_locked) {
+            self.deliverLockedButton(time, button_code, state);
+            return;
+        }
+        if (self.overlayOwnsShellButton(button_code)) {
+            self.handleOverlayShellButton(time, state);
+            return;
+        }
         const translated = self.mouse.button(
             self.input_timebase.usec(time),
             .{ .x = self.pointer_x, .y = self.pointer_y },
@@ -241,6 +288,10 @@ pub const Type = struct {
             self.dispatchTranslation(translated);
             if (button_code == self.mouse.config.shell_button and state == .released)
                 self.finishGestureGrab();
+            return;
+        }
+        if (self.grab.active) {
+            self.handleOverlayButton(time, button_code, state);
             return;
         }
         self.deliverButton(time, button_code, state);
@@ -268,12 +319,11 @@ pub const Type = struct {
         self.constraint_control = control;
     }
 
+    /// Applies the compiled default (`BTN_MIDDLE`). Does not change an in-flight gesture.
     pub fn selectShellButton(self: *Self, has_side: bool, has_extra: bool) void {
-        _ = has_side;
-        _ = has_extra;
         if (self.mouse.recognizer.active()) return;
         self.mouse = gesture.Mouse.init(.{
-            .shell_button = gesture.Mouse.defaultShellButton(),
+            .shell_button = gesture.Mouse.resolveShellButton(has_side, has_extra),
             .gesture = self.mouse.config.gesture,
         });
     }
@@ -286,12 +336,24 @@ pub const Type = struct {
             return error.GestureTimerFailed;
     }
 
+    /// Re-runs hit-test when the current pointer target became input-inert.
+    pub fn repickIfInert(self: *Self, surfaces: []const *Surface) void {
+        const current = self.pointer_focus orelse return;
+        if (!current.input_inert) return;
+        self.setPointerHit(hitTest(surfaces, self.pointer_x, self.pointer_y));
+    }
+
     fn deliverButton(self: *Self, time: u32, button_code: u32, state: ButtonState) void {
         const surface = self.pointer_focus orelse return;
+        if (surface.input_inert) {
+            self.setPointerFocus(null);
+            return;
+        }
         self.deliverButtonTo(surface, time, button_code, state);
     }
 
     fn deliverButtonTo(self: *Self, surface: *Surface, time: u32, button_code: u32, state: ButtonState) void {
+        if (surface.input_inert) return;
         if (state == .pressed and self.popup_grab != null and !isPopup(self.pointer_focus)) {
             c.xdg_popup_send_popup_done(self.popup_grab);
             self.popup_grab = null;
@@ -309,21 +371,55 @@ pub const Type = struct {
         if (button_code != self.mouse.config.shell_button or state != .pressed) return;
         self.deferred_target = self.pointer_focus;
         self.deferred_motion.clearRetainingCapacity();
-        if (self.gesture_timer) |source|
-            _ = c.wl_event_source_timer_update(source, @intCast(self.mouse.config.gesture.hold_usec / 1000));
+        self.armHoldTimer(self.mouse.config.gesture.hold_usec, .mouse);
+    }
+
+    fn handleOverlayButton(self: *Self, time: u32, button_code: u32, state: ButtonState) void {
+        if (state != .pressed) return;
+        if (button_code != gesture.Button.back) return;
+        self.dispatchPrimitive(.{ .back = .{ .time_usec = self.input_timebase.usec(time) } });
+    }
+
+    fn overlayOwnsShellButton(self: *const Self, button_code: u32) bool {
+        return self.overlay_held and
+            button_code == self.mouse.config.shell_button and
+            !self.mouse.recognizer.active();
+    }
+
+    fn handleOverlayShellButton(self: *Self, time: u32, state: ButtonState) void {
+        if (state != .released) return;
+        self.dispatchPrimitive(.{ .release = .{ .time_usec = self.input_timebase.usec(time) } });
+    }
+
+    /// Begins the I5 compositor grab for the overlay lifetime.
+    pub fn claimOverlay(self: *Self) void {
+        self.overlay_held = true;
+        self.claimGesture();
+    }
+
+    /// Ends the overlay grab after the ring closes, if no mouse sequence remains.
+    pub fn releaseOverlay(self: *Self) void {
+        self.overlay_held = false;
+        if (self.mouse.recognizer.active()) return;
+        self.finishGestureGrab();
     }
 
     fn dispatchTranslation(self: *Self, translated: gesture.Translation) void {
-        if (translated.replay_press != null and translated.replay_release != null)
-            self.replayDeferred(translated.replay_press.?, translated.replay_release.?);
+        if (translated.replay_press != null and translated.replay_release != null) {
+            if (self.overlay_held) {
+                self.clearDeferred();
+            } else {
+                self.replayDeferred(translated.replay_press.?, translated.replay_release.?);
+            }
+        }
         if (translated.primitive) |primitive| self.dispatchPrimitive(primitive);
         if (translated.completion) |completion| self.dispatchPrimitive(completion);
     }
 
     fn dispatchPrimitive(self: *Self, primitive: gesture.Primitive) void {
         switch (primitive) {
-            .back => self.back(),
-            .forward => self.forward(),
+            .back => if (!self.grab.active) self.back(),
+            .forward => if (!self.grab.active) self.forward(),
             else => {},
         }
         if (self.gesture_handler) |handler| handler(self.gesture_userdata, primitive);
@@ -345,17 +441,23 @@ pub const Type = struct {
         axis_kind: Axis,
         value: f64,
         discrete: i32,
+        over_tile_gap: bool,
     ) void {
+        self.noteActivity(time);
+        if (self.session_locked) return;
+        if (self.feedFingerSwipe(time, source, axis_kind, value)) return;
         const translated = self.mouse.axis(
             self.input_timebase.usec(time),
             self.controlActive(),
-            false,
+            over_tile_gap,
             value,
+            discrete,
         );
         if (translated.consumed) {
             self.dispatchTranslation(translated);
             return;
         }
+        if (self.grab.active) return;
         const surface = self.pointer_focus orelse return;
         for (self.pointers.items) |pointer| {
             if (!sameClient(pointer.resource, surface)) continue;
@@ -363,20 +465,37 @@ pub const Type = struct {
         }
     }
 
-    pub fn key(self: *Self, time: u32, key_code: u32, state: KeyState) void {
-        const surface = self.keyboard_focus orelse return;
+    pub fn key(self: *Self, time: u32, key_code: u32, state: KeyState) KeyResult {
+        self.noteActivity(time);
         const direction: xkb.xkb_key_direction = if (state == .pressed)
             xkb.XKB_KEY_DOWN
         else
             xkb.XKB_KEY_UP;
         _ = xkb.xkb_state_update_key(self.xkb_state, key_code + 8, direction);
+        if (self.isQuitChord(key_code, state)) return .quit;
+        if (self.session_locked) return self.keyLocked(time, key_code, state);
+        if (self.dispatchAccelerator(time, key_code, state)) return .ignored;
+        if (self.grab.active) return .ignored;
 
+        const surface = self.keyboard_focus orelse return .ignored;
         const serial = c.wl_display_next_serial(self.display);
         for (self.keyboards.items) |keyboard| {
             if (!sameClient(keyboard.resource, surface)) continue;
             c.wl_keyboard_send_key(keyboard.resource, serial, time, key_code, @intFromEnum(state));
             self.sendModifiers(keyboard.resource, serial);
         }
+        return .forwarded;
+    }
+
+    fn isQuitChord(self: *const Self, key_code: u32, state: KeyState) bool {
+        if (state != .pressed) return false;
+        const sym = xkb.xkb_state_key_get_one_sym(self.xkb_state, key_code + 8);
+        if (sym != xkb.XKB_KEY_q and sym != xkb.XKB_KEY_Q) return false;
+        return self.modActive(xkb.XKB_MOD_NAME_SHIFT) and self.modActive(xkb.XKB_MOD_NAME_LOGO);
+    }
+
+    fn modActive(self: *const Self, name: [*:0]const u8) bool {
+        return xkb.xkb_state_mod_name_is_active(self.xkb_state, name, xkb.XKB_STATE_MODS_EFFECTIVE) > 0;
     }
 
     pub fn modifiers(
@@ -395,6 +514,11 @@ pub const Type = struct {
             0,
             group,
         );
+        if (self.session_locked) {
+            self.sendModifiersToLock(depressed, latched, locked, group);
+            return;
+        }
+        if (self.grab.active) return;
         const surface = self.keyboard_focus orelse return;
         const serial = c.wl_display_next_serial(self.display);
         for (self.keyboards.items) |keyboard| {
@@ -403,7 +527,53 @@ pub const Type = struct {
         }
     }
 
+    pub fn setViewport(self: *Self, width: f64, height: f64) void {
+        self.touch.viewport = .{ .width = width, .height = height };
+    }
+
+    pub fn trackpadSwipeBegin(self: *Self, time: u32, fingers: u32) void {
+        self.armHoldTimer(self.pad.config.second_hold_usec, .pad);
+        self.dispatchPad(self.pad.swipeBegin(self.input_timebase.usec(time), fingers));
+    }
+
+    pub fn trackpadSwipeUpdate(self: *Self, time: u32, delta_x: f64, delta_y: f64) void {
+        self.dispatchPad(self.pad.swipeUpdate(self.input_timebase.usec(time), delta_x, delta_y));
+    }
+
+    pub fn trackpadSwipeEnd(self: *Self, time: u32, cancelled: bool) void {
+        self.dispatchPad(self.pad.swipeEnd(self.input_timebase.usec(time), cancelled));
+    }
+
+    pub fn trackpadPinchBegin(self: *Self, time: u32, scale: f64) void {
+        self.dispatchPad(self.pad.pinchBegin(self.input_timebase.usec(time), scale));
+    }
+
+    pub fn trackpadPinchUpdate(self: *Self, time: u32, scale: f64) void {
+        self.dispatchPad(self.pad.pinchUpdate(self.input_timebase.usec(time), scale));
+    }
+
+    pub fn trackpadPinchEnd(self: *Self, time: u32, cancelled: bool) void {
+        self.dispatchPad(self.pad.pinchEnd(self.input_timebase.usec(time), cancelled));
+    }
+
+    pub fn trackpadHoldBegin(self: *Self, time: u32, fingers: u32) void {
+        self.armHoldTimer(self.pad.config.second_hold_usec, .pad);
+        self.dispatchPad(self.pad.holdBegin(self.input_timebase.usec(time), fingers));
+    }
+
+    pub fn trackpadHoldEnd(self: *Self, time: u32, cancelled: bool) void {
+        self.dispatchPad(self.pad.holdEnd(self.input_timebase.usec(time), cancelled));
+    }
+
     pub fn touchDown(self: *Self, surfaces: []const *Surface, time: u32, id: i32, x: f64, y: f64) void {
+        self.noteActivity(time);
+        if (self.session_locked) {
+            self.deliverLockedTouchDown(surfaces, time, id, x, y);
+            return;
+        }
+        const translated = self.touch.down(self.input_timebase.usec(time), id, .{ .x = x, .y = y }) catch return;
+        self.armHoldTimer(self.touch.config.gesture.hold_usec, .touch);
+        if (self.takeTouch(translated)) return;
         const target = hitTest(surfaces, x, y) orelse return;
         const surface = target.surface;
         self.touch_focus = surface;
@@ -421,9 +591,16 @@ pub const Type = struct {
                 fixed(target.local_y),
             );
         }
+        self.touch_delivered = true;
     }
 
     pub fn touchUp(self: *Self, time: u32, id: i32) void {
+        if (self.session_locked) {
+            self.deliverLockedTouchUp(time, id);
+            return;
+        }
+        const translated = self.touch.up(self.input_timebase.usec(time), id) catch return;
+        if (self.takeTouch(translated)) return;
         const surface = self.touch_focus orelse return;
         const serial = c.wl_display_next_serial(self.display);
         for (self.touches.items) |touch| {
@@ -433,6 +610,12 @@ pub const Type = struct {
     }
 
     pub fn touchMotion(self: *Self, time: u32, id: i32, x: f64, y: f64) void {
+        if (self.session_locked) {
+            self.deliverLockedTouchMotion(time, id, x, y);
+            return;
+        }
+        const translated = self.touch.motion(self.input_timebase.usec(time), id, .{ .x = x, .y = y }) catch return;
+        if (self.takeTouch(translated)) return;
         const surface = self.touch_focus orelse return;
         const local = localPoint(surface, x, y);
         for (self.touches.items) |touch| {
@@ -450,6 +633,8 @@ pub const Type = struct {
     }
 
     pub fn touchCancel(self: *Self) void {
+        self.touch.cancel();
+        self.touch_delivered = false;
         const surface = self.touch_focus orelse return;
         for (self.touches.items) |touch| {
             if (!sameClient(touch.resource, surface)) continue;
@@ -459,8 +644,24 @@ pub const Type = struct {
     }
 
     pub fn activate(self: *Self, surface: *Surface) void {
+        if (surface.input_inert) return;
         self.focus_stack.push(surface) catch return;
         self.setKeyboardFocus(surface);
+    }
+
+    pub fn dropUnlockedFocus(self: *Self) void {
+        if (self.pointer_focus) |surface| {
+            if (surface.role != .session_lock) self.setPointerFocus(null);
+        }
+        if (self.keyboard_focus) |surface| {
+            if (surface.role != .session_lock) self.setKeyboardFocus(null);
+        }
+        if (self.touch_focus) |surface| {
+            if (surface.role != .session_lock) {
+                self.touch_focus = null;
+                self.touch_delivered = false;
+            }
+        }
     }
 
     pub fn back(self: *Self) void {
@@ -512,6 +713,9 @@ pub const Type = struct {
     }
 
     fn setKeyboardFocus(self: *Self, next: ?*Surface) void {
+        if (next) |surface| {
+            if (surface.input_inert) return;
+        }
         if (self.keyboard_focus == next) return;
         if (self.keyboard_focus) |old| self.sendKeyboardLeave(old);
         self.keyboard_focus = next;
@@ -575,11 +779,182 @@ pub const Type = struct {
     }
 
     fn controlActive(self: *const Self) bool {
-        return xkb.xkb_state_mod_name_is_active(
-            self.xkb_state,
-            xkb.XKB_MOD_NAME_CTRL,
-            xkb.XKB_STATE_MODS_EFFECTIVE,
-        ) > 0;
+        return self.modActive(xkb.XKB_MOD_NAME_CTRL);
+    }
+
+    fn noteActivity(self: *Self, time: u32) void {
+        self.last_activity_msec = time;
+    }
+
+    fn dispatchAccelerator(self: *Self, time: u32, key_code: u32, state: KeyState) bool {
+        const pressed = state == .pressed;
+        const sym = xkb.xkb_state_key_get_one_sym(self.xkb_state, key_code + 8);
+        const extra = self.modActive(xkb.XKB_MOD_NAME_SHIFT) or self.modActive(xkb.XKB_MOD_NAME_CTRL);
+        const result = accelerators.resolve(
+            self.modActive(xkb.XKB_MOD_NAME_LOGO),
+            extra,
+            pressed,
+            sym,
+            self.input_timebase.usec(time),
+        ) orelse return false;
+        if (result.stub) return true;
+        if (result.focus_visible) self.ring_focus_visible = true;
+        self.dispatchPrimitive(result.primitive);
+        return true;
+    }
+
+    fn dispatchPad(self: *Self, result: anyerror!gesture.Translation) void {
+        const translated = result catch return;
+        if (self.session_locked) return;
+        if (!translated.consumed) return;
+        self.applyTranslatorClaim(translated);
+        if (isHold(translated)) self.ring_focus_visible = true;
+        self.dispatchTranslation(translated);
+        if (self.pad.mode == .primed) self.armHoldTimer(self.pad.config.tap_prime_usec, .pad);
+    }
+
+    fn takeTouch(self: *Self, translated: gesture.Translation) bool {
+        const overlay = isHold(translated);
+        if ((translated.consumed or overlay) and self.touch_delivered)
+            self.cancelDeliveredTouch();
+        if (translated.primitive) |primitive| self.pinTouchZoom(primitive);
+        self.applyTranslatorClaim(translated);
+        self.dispatchTranslation(translated);
+        return translated.consumed or overlay;
+    }
+
+    fn applyTranslatorClaim(self: *Self, translated: gesture.Translation) void {
+        if (isHold(translated)) {
+            self.claimGesture();
+            return;
+        }
+        if (translated.claimed) self.finishGestureGrab();
+    }
+
+    fn pinTouchZoom(self: *Self, primitive: gesture.Primitive) void {
+        if (primitive != .zoom) return;
+        const point = self.touch.centroid();
+        self.pointer_x = point.x;
+        self.pointer_y = point.y;
+    }
+
+    fn feedFingerSwipe(self: *Self, time: u32, source: AxisSource, axis_kind: Axis, value: f64) bool {
+        if (source != .finger or axis_kind != .horizontal) {
+            self.endFingerSwipe(time);
+            return false;
+        }
+        const usec = self.input_timebase.usec(time);
+        if (self.pad.mode != .swipe or self.pad.fingers != 2)
+            self.dispatchPad(self.pad.swipeBegin(usec, 2));
+        if (value == 0) {
+            self.dispatchPad(self.pad.swipeEnd(usec, false));
+            return true;
+        }
+        self.dispatchPad(self.pad.swipeUpdate(usec, value, 0));
+        return true;
+    }
+
+    fn endFingerSwipe(self: *Self, time: u32) void {
+        if (self.pad.mode != .swipe or self.pad.fingers != 2) return;
+        self.dispatchPad(self.pad.swipeEnd(self.input_timebase.usec(time), false));
+    }
+
+    fn deliverLockedMotion(self: *Self, surfaces: []const *Surface, time: u32, x: f64, y: f64) void {
+        self.pointer_x = x;
+        self.pointer_y = y;
+        self.setPointerHit(hitTestLock(surfaces, x, y));
+        const surface = self.pointer_focus orelse return;
+        self.sendPointerMotion(surface, time);
+    }
+
+    fn deliverLockedButton(self: *Self, time: u32, button_code: u32, state: ButtonState) void {
+        self.deliverButton(time, button_code, state);
+    }
+
+    fn keyLocked(self: *Self, time: u32, key_code: u32, state: KeyState) KeyResult {
+        const surface = self.keyboard_focus orelse return .ignored;
+        if (surface.role != .session_lock) return .ignored;
+        self.sendKey(surface, time, key_code, state);
+        return .forwarded;
+    }
+
+    fn sendKey(self: *Self, surface: *Surface, time: u32, key_code: u32, state: KeyState) void {
+        const serial = c.wl_display_next_serial(self.display);
+        for (self.keyboards.items) |keyboard| {
+            if (!sameClient(keyboard.resource, surface)) continue;
+            c.wl_keyboard_send_key(keyboard.resource, serial, time, key_code, @intFromEnum(state));
+            self.sendModifiers(keyboard.resource, serial);
+        }
+    }
+
+    fn sendModifiersToLock(self: *Self, depressed: u32, latched: u32, locked: u32, group: u32) void {
+        const surface = self.keyboard_focus orelse return;
+        if (surface.role != .session_lock) return;
+        const serial = c.wl_display_next_serial(self.display);
+        for (self.keyboards.items) |keyboard| {
+            if (!sameClient(keyboard.resource, surface)) continue;
+            c.wl_keyboard_send_modifiers(keyboard.resource, serial, depressed, latched, locked, group);
+        }
+    }
+
+    fn deliverLockedTouchDown(self: *Self, surfaces: []const *Surface, time: u32, id: i32, x: f64, y: f64) void {
+        const target = hitTestLock(surfaces, x, y) orelse return;
+        const surface = target.surface;
+        self.touch_focus = surface;
+        self.activate(surface);
+        const serial = c.wl_display_next_serial(self.display);
+        for (self.touches.items) |touch| {
+            if (!sameClient(touch.resource, surface)) continue;
+            c.wl_touch_send_down(
+                touch.resource,
+                serial,
+                time,
+                surface.resource,
+                id,
+                fixed(target.local_x),
+                fixed(target.local_y),
+            );
+        }
+        self.touch_delivered = true;
+    }
+
+    fn deliverLockedTouchUp(self: *Self, time: u32, id: i32) void {
+        const surface = self.touch_focus orelse return;
+        if (surface.role != .session_lock) return;
+        const serial = c.wl_display_next_serial(self.display);
+        for (self.touches.items) |touch| {
+            if (!sameClient(touch.resource, surface)) continue;
+            c.wl_touch_send_up(touch.resource, serial, time, id);
+        }
+    }
+
+    fn deliverLockedTouchMotion(self: *Self, time: u32, id: i32, x: f64, y: f64) void {
+        const surface = self.touch_focus orelse return;
+        if (surface.role != .session_lock) return;
+        const local = localPoint(surface, x, y);
+        for (self.touches.items) |touch| {
+            if (!sameClient(touch.resource, surface)) continue;
+            c.wl_touch_send_motion(touch.resource, time, id, fixed(local.x), fixed(local.y));
+        }
+    }
+
+    fn cancelDeliveredTouch(self: *Self) void {
+        const surface = self.touch_focus orelse {
+            self.touch_delivered = false;
+            return;
+        };
+        for (self.touches.items) |client| {
+            if (!sameClient(client.resource, surface)) continue;
+            c.wl_touch_send_cancel(client.resource);
+        }
+        self.touch_delivered = false;
+        self.touch_focus = null;
+    }
+
+    fn armHoldTimer(self: *Self, hold_usec: u64, kind: TimerKind) void {
+        self.timer_kind = kind;
+        if (self.gesture_timer) |source|
+            _ = c.wl_event_source_timer_update(source, @intCast(hold_usec / std.time.us_per_ms));
     }
 
     fn deferMotion(self: *Self, time: u32, x: f64, y: f64) void {
@@ -643,11 +1018,12 @@ pub const Type = struct {
 
     fn finishGestureGrab(self: *Self) void {
         if (self.gesture_timer) |source| _ = c.wl_event_source_timer_update(source, 0);
+        self.clearDeferred();
+        if (self.overlay_held) return;
         if (self.grab.active) {
             if (self.constraint_control.restore) |restore| restore(self.constraint_control.userdata);
         }
         self.grab.end();
-        self.clearDeferred();
     }
 
     fn cancelGesture(self: *Self) void {
@@ -696,11 +1072,22 @@ pub const Hit = struct {
 };
 
 pub fn hitTest(surfaces: []const *Surface, x: f64, y: f64) ?Hit {
+    return hitTestRole(surfaces, x, y, null);
+}
+
+fn hitTestLock(surfaces: []const *Surface, x: f64, y: f64) ?Hit {
+    return hitTestRole(surfaces, x, y, .session_lock);
+}
+
+fn hitTestRole(surfaces: []const *Surface, x: f64, y: f64, role: ?Role) ?Hit {
     var index = surfaces.len;
     while (index > 0) {
         index -= 1;
         const surface = surfaces[index];
-        if (surface.parent != null or !surface.mapped or surface.role == .cursor) continue;
+        if (role) |want| {
+            if (surface.role != want) continue;
+        }
+        if (skipsPointer(surface)) continue;
         const geometry = surface.scene_geometry orelse continue;
         if (!inside(x, y, geometry.x, geometry.y, geometry.width, geometry.height)) continue;
         const local_x = x - @as(f64, @floatFromInt(geometry.x));
@@ -708,6 +1095,11 @@ pub fn hitTest(surfaces: []const *Surface, x: f64, y: f64) ?Hit {
         return hitTree(surface, local_x, local_y, 0);
     }
     return null;
+}
+
+fn skipsPointer(surface: *const Surface) bool {
+    return surface.input_inert or surface.parent != null or !surface.mapped or
+        surface.role == .cursor or surface.role == .shell;
 }
 
 fn hitTree(surface: *Surface, x: f64, y: f64, depth: usize) ?Hit {
@@ -804,11 +1196,44 @@ fn sendAxis(
 
 fn gestureTimer(data: ?*anyopaque) callconv(.c) i32 {
     const seat: *Type = @ptrCast(@alignCast(data orelse return 0));
+    const kind = seat.timer_kind;
+    seat.timer_kind = .none;
+    switch (kind) {
+        .none => {},
+        .mouse => tickMouseHold(seat),
+        .pad => seat.dispatchPad(seat.pad.tick(padDeadline(seat))),
+        .touch => tickTouchHold(seat),
+    }
+    return 0;
+}
+
+fn tickMouseHold(seat: *Type) void {
     const deadline = seat.mouse.recognizer.started_usec + seat.mouse.config.gesture.hold_usec;
-    const translated = seat.mouse.tick(deadline) catch return 0;
+    const translated = seat.mouse.tick(deadline) catch return;
     if (translated.claimed) seat.claimGesture();
     seat.dispatchTranslation(translated);
-    return 0;
+}
+
+fn tickTouchHold(seat: *Type) void {
+    const hold = seat.touch.tick(touchDeadline(seat)) orelse return;
+    _ = seat.takeTouch(hold);
+}
+
+fn padDeadline(seat: *const Type) u64 {
+    if (seat.pad.mode == .primed)
+        return seat.pad.primed_usec + seat.pad.config.tap_prime_usec;
+    if (seat.pad.mode == .second_down)
+        return seat.pad.second_started_usec + seat.pad.config.second_hold_usec;
+    return seat.pad.recognizer.started_usec +% seat.pad.config.second_hold_usec;
+}
+
+fn touchDeadline(seat: *const Type) u64 {
+    return seat.touch.holdDeadline();
+}
+
+fn isHold(translated: gesture.Translation) bool {
+    const primitive = translated.primitive orelse return false;
+    return primitive == .hold;
 }
 
 fn toMsec(time_usec: u64) u32 {
@@ -835,6 +1260,244 @@ test "Grab - suspends and restores constraints" {
     grab.end();
     try testing.expectFalse(grab.active);
     try testing.expectFalse(grab.constraints_suspended);
+}
+
+test "Seat - Super+Shift+Q quits without a focused client" {
+    var runtime = try wayland.test_setup.RuntimeDir.setup(testing.allocator);
+    defer runtime.cleanup();
+    var server = try wayland.Server.init(testing.allocator, null);
+    defer server.deinit();
+    var seat = try Type.init(testing.allocator, server.getDisplay());
+    defer seat.deinit();
+
+    try testing.expectEqual(KeyResult.ignored, seat.key(1, evdev_left_meta, .pressed));
+    try testing.expectEqual(KeyResult.ignored, seat.key(2, evdev_left_shift, .pressed));
+    try testing.expectEqual(KeyResult.quit, seat.key(3, evdev_q, .pressed));
+}
+
+test "Seat - Q and Super+Q are not the quit chord" {
+    var runtime = try wayland.test_setup.RuntimeDir.setup(testing.allocator);
+    defer runtime.cleanup();
+    var server = try wayland.Server.init(testing.allocator, null);
+    defer server.deinit();
+    var seat = try Type.init(testing.allocator, server.getDisplay());
+    defer seat.deinit();
+
+    try testing.expectEqual(KeyResult.ignored, seat.key(1, evdev_q, .pressed));
+    try testing.expectEqual(KeyResult.ignored, seat.key(2, evdev_q, .released));
+    try testing.expectEqual(KeyResult.ignored, seat.key(3, evdev_left_meta, .pressed));
+    try testing.expectEqual(KeyResult.ignored, seat.key(4, evdev_q, .pressed));
+}
+
+const evdev_q: u32 = 16;
+const evdev_left_shift: u32 = 42;
+const evdev_left_meta: u32 = 125;
+const evdev_left_ctrl: u32 = 29;
+const evdev_left: u32 = 105;
+const evdev_escape: u32 = 1;
+
+test "Seat - Super+Left and Escape emit I8 primitives" {
+    var runtime = try wayland.test_setup.RuntimeDir.setup(testing.allocator);
+    defer runtime.cleanup();
+    var server = try wayland.Server.init(testing.allocator, null);
+    defer server.deinit();
+    var seat = try Type.init(testing.allocator, server.getDisplay());
+    defer seat.deinit();
+
+    const Probe = struct {
+        var last: ?gesture.Primitive = null;
+        fn handle(_: ?*anyopaque, primitive: gesture.Primitive) void {
+            last = primitive;
+        }
+    };
+    Probe.last = null;
+    seat.setGestureHandler(null, Probe.handle);
+    _ = seat.key(1, evdev_left_meta, .pressed);
+    _ = seat.key(2, evdev_left, .pressed);
+    try testing.expectEqual(gesture.Direction.left, Probe.last.?.flick.direction);
+
+    Probe.last = null;
+    _ = seat.key(3, evdev_escape, .pressed);
+    try testing.expectEqual(std.meta.Tag(gesture.Primitive).back, std.meta.activeTag(Probe.last.?));
+}
+
+test "Seat - session lock drops keys including I8" {
+    var runtime = try wayland.test_setup.RuntimeDir.setup(testing.allocator);
+    defer runtime.cleanup();
+    var server = try wayland.Server.init(testing.allocator, null);
+    defer server.deinit();
+    var seat = try Type.init(testing.allocator, server.getDisplay());
+    defer seat.deinit();
+
+    const Probe = struct {
+        var last: ?gesture.Primitive = null;
+        fn handle(_: ?*anyopaque, primitive: gesture.Primitive) void {
+            last = primitive;
+        }
+    };
+    Probe.last = null;
+    seat.setGestureHandler(null, Probe.handle);
+    seat.session_locked = true;
+    _ = seat.key(1, evdev_left_meta, .pressed);
+    try testing.expectEqual(KeyResult.ignored, seat.key(2, evdev_left, .pressed));
+    try testing.expectEqual(@as(?gesture.Primitive, null), Probe.last);
+}
+
+test "Seat - selectShellButton keeps middle regardless of side extra" {
+    var runtime = try wayland.test_setup.RuntimeDir.setup(testing.allocator);
+    defer runtime.cleanup();
+    var server = try wayland.Server.init(testing.allocator, null);
+    defer server.deinit();
+    var seat = try Type.init(testing.allocator, server.getDisplay());
+    defer seat.deinit();
+
+    seat.selectShellButton(false, false);
+    try testing.expectEqual(gesture.Button.middle, seat.mouse.config.shell_button);
+    seat.selectShellButton(false, true);
+    try testing.expectEqual(gesture.Button.middle, seat.mouse.config.shell_button);
+    seat.selectShellButton(true, true);
+    try testing.expectEqual(gesture.Button.middle, seat.mouse.config.shell_button);
+
+    seat.button(1, gesture.Button.middle, .pressed);
+    seat.selectShellButton(false, true);
+    try testing.expectEqual(gesture.Button.middle, seat.mouse.config.shell_button);
+    seat.button(2, gesture.Button.middle, .released);
+}
+
+test "Seat - overlay claimed during middle press does not replay" {
+    var runtime = try wayland.test_setup.RuntimeDir.setup(testing.allocator);
+    defer runtime.cleanup();
+    var server = try wayland.Server.init(testing.allocator, null);
+    defer server.deinit();
+    var seat = try Type.init(testing.allocator, server.getDisplay());
+    defer seat.deinit();
+
+    seat.button(1, gesture.Button.middle, .pressed);
+    try testing.expect(seat.mouse.recognizer.active());
+    seat.claimOverlay();
+    seat.button(2, gesture.Button.middle, .released);
+
+    try testing.expect(seat.grab.active);
+    try testing.expect(seat.overlay_held);
+    try testing.expectNull(seat.deferred_target);
+    try testing.expectEqual(@as(usize, 0), seat.deferred_motion.items.len);
+}
+
+test "Seat - overlay-held shell click does not end grab or replay" {
+    var runtime = try wayland.test_setup.RuntimeDir.setup(testing.allocator);
+    defer runtime.cleanup();
+    var server = try wayland.Server.init(testing.allocator, null);
+    defer server.deinit();
+    var seat = try Type.init(testing.allocator, server.getDisplay());
+    defer seat.deinit();
+
+    const Probe = struct {
+        var last: ?gesture.Primitive = null;
+        fn handle(_: ?*anyopaque, primitive: gesture.Primitive) void {
+            last = primitive;
+        }
+    };
+    Probe.last = null;
+    seat.setGestureHandler(null, Probe.handle);
+    seat.claimOverlay();
+    try testing.expect(seat.grab.active);
+    try testing.expectFalse(seat.mouse.recognizer.active());
+
+    seat.button(1, gesture.Button.middle, .pressed);
+    try testing.expectFalse(seat.mouse.recognizer.active());
+    try testing.expectEqual(@as(?*Surface, null), seat.deferred_target);
+    seat.button(2, gesture.Button.middle, .released);
+
+    try testing.expect(seat.grab.active);
+    try testing.expect(seat.overlay_held);
+    try testing.expectEqual(std.meta.Tag(gesture.Primitive).release, std.meta.activeTag(Probe.last.?));
+    try testing.expectEqual(@as(usize, 0), seat.deferred_motion.items.len);
+    try testing.expectEqual(@as(?*Surface, null), seat.keyboard_focus);
+}
+
+test "Seat - overlay grab swallows client buttons and closes on back" {
+    var runtime = try wayland.test_setup.RuntimeDir.setup(testing.allocator);
+    defer runtime.cleanup();
+    var server = try wayland.Server.init(testing.allocator, null);
+    defer server.deinit();
+    var seat = try Type.init(testing.allocator, server.getDisplay());
+    defer seat.deinit();
+
+    const Probe = struct {
+        var last: ?gesture.Primitive = null;
+        fn handle(_: ?*anyopaque, primitive: gesture.Primitive) void {
+            last = primitive;
+        }
+    };
+    Probe.last = null;
+    seat.setGestureHandler(null, Probe.handle);
+    seat.claimOverlay();
+    seat.button(1, gesture.Button.side, .pressed);
+    try testing.expectEqual(@as(?gesture.Primitive, null), Probe.last);
+    try testing.expect(seat.grab.active);
+
+    seat.button(2, gesture.Button.back, .pressed);
+    try testing.expectEqual(std.meta.Tag(gesture.Primitive).back, std.meta.activeTag(Probe.last.?));
+    try testing.expect(seat.grab.active);
+}
+
+test "Seat - middle button starts a shell sequence" {
+    var runtime = try wayland.test_setup.RuntimeDir.setup(testing.allocator);
+    defer runtime.cleanup();
+    var server = try wayland.Server.init(testing.allocator, null);
+    defer server.deinit();
+    var seat = try Type.init(testing.allocator, server.getDisplay());
+    defer seat.deinit();
+
+    seat.button(1, gesture.Button.middle, .pressed);
+    try testing.expect(seat.mouse.recognizer.active());
+    try testing.expectFalse(seat.grab.active);
+}
+
+test "Seat - side button is not a default shell sequence" {
+    var runtime = try wayland.test_setup.RuntimeDir.setup(testing.allocator);
+    defer runtime.cleanup();
+    var server = try wayland.Server.init(testing.allocator, null);
+    defer server.deinit();
+    var seat = try Type.init(testing.allocator, server.getDisplay());
+    defer seat.deinit();
+
+    seat.button(1, gesture.Button.side, .pressed);
+    try testing.expectFalse(seat.mouse.recognizer.active());
+    try testing.expectFalse(seat.grab.active);
+}
+
+test "Seat - ctrl wheel over tile gap emits zoom" {
+    var runtime = try wayland.test_setup.RuntimeDir.setup(testing.allocator);
+    defer runtime.cleanup();
+    var server = try wayland.Server.init(testing.allocator, null);
+    defer server.deinit();
+    var seat = try Type.init(testing.allocator, server.getDisplay());
+    defer seat.deinit();
+
+    const Probe = struct {
+        var last: ?gesture.Primitive = null;
+        fn handle(_: ?*anyopaque, primitive: gesture.Primitive) void {
+            last = primitive;
+        }
+    };
+    Probe.last = null;
+    seat.setGestureHandler(null, Probe.handle);
+    _ = seat.key(1, evdev_left_ctrl, .pressed);
+    seat.axis(2, .wheel, .vertical, 15, 1, true);
+    try testing.expectEqual(@as(f64, 120), Probe.last.?.zoom.delta);
+
+    Probe.last = null;
+    seat.axis(3, .wheel, .vertical, 15, 0, true);
+    try testing.expectEqual(@as(f64, 120), Probe.last.?.zoom.delta);
+
+    Probe.last = null;
+    seat.axis(4, .wheel, .vertical, 7, 0, true);
+    try testing.expectEqual(@as(?gesture.Primitive, null), Probe.last);
+
+    Probe.last = null;
+    seat.axis(5, .wheel, .vertical, 15, 1, false);
+    try testing.expectEqual(@as(?gesture.Primitive, null), Probe.last);
 }
 
 test "Seat - creates an xkbcommon keymap" {
@@ -948,6 +1611,34 @@ test "Seat - hit test chooses topmost subsurface and local coordinates" {
     try testing.expectNull(hitTest(&.{&root}, 99, 210));
 }
 
+test "Seat - hit test skips mapped shell overlays" {
+    var tile: Surface = undefined;
+    var overlay: Surface = undefined;
+    tile.mapped = true;
+    tile.role = .xdg_toplevel;
+    tile.parent = null;
+    tile.scene_geometry = .{ .x = 0, .y = 0, .width = 200, .height = 200 };
+    tile.children = .empty;
+    tile.current.input_region = .empty;
+    tile.current.input_region_infinite = true;
+    tile.current.viewport.destination = null;
+    tile.current.width = 200;
+    tile.current.height = 200;
+    overlay.mapped = true;
+    overlay.role = .shell;
+    overlay.parent = null;
+    overlay.scene_geometry = .{ .x = 0, .y = 0, .width = 200, .height = 200 };
+    overlay.children = .empty;
+    overlay.current.input_region = .empty;
+    overlay.current.input_region_infinite = true;
+    overlay.current.viewport.destination = null;
+    overlay.current.width = 200;
+    overlay.current.height = 200;
+
+    const hit = hitTest(&.{ &tile, &overlay }, 10, 10).?;
+    try testing.expectEqual(&tile, hit.surface);
+}
+
 test "Seat - hit test honors committed input regions and local coordinates" {
     var root: Surface = undefined;
     root.mapped = true;
@@ -1030,4 +1721,101 @@ test "Seat - nested input regions preserve stacking and local coordinates" {
     try testing.expectEqual(&upper, upper_hit.surface);
     try testing.expectEqual(@as(f64, 15), upper_hit.local_x);
     try testing.expectEqual(@as(f64, 15), upper_hit.local_y);
+}
+
+test "Seat - pad hold marks ring origin as the pointer" {
+    var runtime = try wayland.test_setup.RuntimeDir.setup(testing.allocator);
+    defer runtime.cleanup();
+    var server = try wayland.Server.init(testing.allocator, null);
+    defer server.deinit();
+    var seat = try Type.init(testing.allocator, server.getDisplay());
+    defer seat.deinit();
+
+    seat.pointer_x = 140;
+    seat.pointer_y = 90;
+    seat.trackpadHoldBegin(0, 3);
+    seat.trackpadHoldEnd(80, false);
+    seat.trackpadHoldBegin(100, 3);
+    seat.trackpadHoldEnd(400, false);
+    try testing.expect(seat.ring_focus_visible);
+}
+
+test "Seat - three-finger flick does not leave a grab" {
+    var runtime = try wayland.test_setup.RuntimeDir.setup(testing.allocator);
+    defer runtime.cleanup();
+    var server = try wayland.Server.init(testing.allocator, null);
+    defer server.deinit();
+    var seat = try Type.init(testing.allocator, server.getDisplay());
+    defer seat.deinit();
+
+    seat.trackpadSwipeBegin(1, 3);
+    seat.trackpadSwipeUpdate(2, 80, 0);
+    seat.trackpadSwipeEnd(3, false);
+    try testing.expectFalse(seat.grab.active);
+    try testing.expectEqual(KeyResult.ignored, seat.key(4, evdev_q, .pressed));
+}
+
+test "Seat - late second tap after prime window is not a hold" {
+    var runtime = try wayland.test_setup.RuntimeDir.setup(testing.allocator);
+    defer runtime.cleanup();
+    var server = try wayland.Server.init(testing.allocator, null);
+    defer server.deinit();
+    var seat = try Type.init(testing.allocator, server.getDisplay());
+    defer seat.deinit();
+
+    const Probe = struct {
+        var last: ?gesture.Primitive = null;
+        fn handle(_: ?*anyopaque, primitive: gesture.Primitive) void {
+            last = primitive;
+        }
+    };
+    Probe.last = null;
+    seat.setGestureHandler(null, Probe.handle);
+    seat.trackpadHoldBegin(0, 3);
+    seat.trackpadHoldEnd(80, false);
+    seat.trackpadHoldBegin(600, 3);
+    seat.trackpadHoldEnd(900, false);
+    try testing.expectEqual(@as(?gesture.Primitive, null), Probe.last);
+    try testing.expectFalse(seat.grab.active);
+}
+
+test "Seat - lock surfaces receive pointer and keys" {
+    var runtime = try wayland.test_setup.RuntimeDir.setup(testing.allocator);
+    defer runtime.cleanup();
+    var server = try wayland.Server.init(testing.allocator, null);
+    defer server.deinit();
+    var seat = try Type.init(testing.allocator, server.getDisplay());
+    defer seat.deinit();
+
+    var lock_surf: Surface = undefined;
+    lock_surf.mapped = true;
+    lock_surf.role = .session_lock;
+    lock_surf.parent = null;
+    lock_surf.scene_geometry = .{ .x = 0, .y = 0, .width = 200, .height = 200 };
+    lock_surf.children = .empty;
+    lock_surf.resource = null;
+    lock_surf.current.input_region = .empty;
+    lock_surf.current.input_region_infinite = true;
+    lock_surf.current.viewport.destination = null;
+    lock_surf.current.width = 200;
+    lock_surf.current.height = 200;
+
+    var client: Surface = undefined;
+    client.mapped = true;
+    client.role = .xdg_toplevel;
+    client.parent = null;
+    client.scene_geometry = .{ .x = 0, .y = 0, .width = 200, .height = 200 };
+    client.children = .empty;
+    client.resource = null;
+    client.current.input_region = .empty;
+    client.current.input_region_infinite = true;
+    client.current.viewport.destination = null;
+    client.current.width = 200;
+    client.current.height = 200;
+
+    seat.session_locked = true;
+    seat.motionAbsolute(&.{ &client, &lock_surf }, 1, 20, 20);
+    try testing.expectEqual(&lock_surf, seat.pointer_focus.?);
+    seat.activate(&lock_surf);
+    try testing.expectEqual(KeyResult.forwarded, seat.key(2, evdev_q, .pressed));
 }

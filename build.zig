@@ -42,6 +42,11 @@ fn generateVicTable(b: *std.Build, target: std.Build.ResolvedTarget, core_cli_mo
     return &gen_vic.step;
 }
 
+fn linkFonts(mod: *std.Build.Module) void {
+    mod.linkSystemLibrary("freetype2", .{});
+    mod.linkSystemLibrary("fontconfig", .{});
+}
+
 /// Resolves the wayland-protocols data directory.
 /// Prefers `pkg-config wayland-protocols --variable=pkgdatadir`,
 /// falls back to the conventional `/usr/share/wayland-protocols`.
@@ -85,6 +90,14 @@ const protocol_specs = [_]ProtocolSpec{
     .{ .xml_rel = "staging/xdg-activation/xdg-activation-v1.xml", .out_base = "xdg-activation-v1-protocol" },
     .{ .xml_rel = "stable/viewporter/viewporter.xml", .out_base = "viewporter-protocol" },
     .{ .xml_rel = "staging/fractional-scale/fractional-scale-v1.xml", .out_base = "fractional-scale-v1-protocol" },
+    .{ .xml_rel = "sideswipe-shell-v1.xml", .out_base = "sideswipe-shell-v1-protocol" },
+    .{ .xml_rel = "staging/xdg-dialog/xdg-dialog-v1.xml", .out_base = "xdg-dialog-v1-protocol" },
+    .{ .xml_rel = "unstable/xdg-decoration/xdg-decoration-unstable-v1.xml", .out_base = "xdg-decoration-unstable-v1-protocol" },
+    .{ .xml_rel = "staging/color-management/color-management-v1.xml", .out_base = "color-management-v1-protocol" },
+    .{ .xml_rel = "staging/color-representation/color-representation-v1.xml", .out_base = "color-representation-v1-protocol" },
+    .{ .xml_rel = "staging/tearing-control/tearing-control-v1.xml", .out_base = "tearing-control-v1-protocol" },
+    .{ .xml_rel = "staging/ext-session-lock/ext-session-lock-v1.xml", .out_base = "ext-session-lock-v1-protocol" },
+    .{ .xml_rel = "staging/ext-idle-notify/ext-idle-notify-v1.xml", .out_base = "ext-idle-notify-v1-protocol" },
 };
 
 fn generateProtocolOutputs(
@@ -205,6 +218,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .link_libc = true,
     });
+    core_mod.addImport("core.string", core_string_mod);
+    core_cli_mod.addImport("core.string", core_string_mod);
 
     const core_math_mod = b.addModule("core.math", .{
         .root_source_file = b.path("src/core/math/root.zig"),
@@ -258,6 +273,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "core", .module = core_mod },
             .{ .name = "core.os", .module = core_os_mod },
+            .{ .name = "core.string", .module = core_string_mod },
         },
     });
 
@@ -272,6 +288,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "core.cli", .module = core_cli_mod },
             .{ .name = "core.string", .module = core_string_mod },
             .{ .name = "core.math", .module = core_math_mod },
+            .{ .name = "core.display", .module = core_display_mod },
             .{ .name = "ipc", .module = ipc_mod },
         },
     });
@@ -282,6 +299,7 @@ pub fn build(b: *std.Build) void {
     backend_mod.linkSystemLibrary("gbm", .{});
     backend_mod.linkSystemLibrary("EGL", .{});
     backend_mod.linkSystemLibrary("GLESv2", .{});
+    backend_mod.linkSystemLibrary("vulkan", .{});
     backend_mod.linkSystemLibrary("libudev", .{});
     backend_mod.linkSystemLibrary("libseat", .{});
     backend_mod.linkSystemLibrary("wayland-client", .{});
@@ -311,6 +329,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "core", .module = core_mod },
             .{ .name = "core.cli", .module = core_cli_mod },
+            .{ .name = "core.string", .module = core_string_mod },
             .{ .name = "core.math", .module = core_math_mod },
             .{ .name = "wayland", .module = wayland_mod },
             .{ .name = "backend", .module = backend_mod },
@@ -319,6 +338,7 @@ pub fn build(b: *std.Build) void {
     compositor_mod.addIncludePath(b.path("protocols"));
     compositor_mod.linkSystemLibrary("wayland-server", .{});
     compositor_mod.linkSystemLibrary("xkbcommon", .{});
+    linkFonts(compositor_mod);
 
     // Wayland protocol sources
     const xdg_shell_c = addProtocolObject(b, target, optimize, generate_protocols, "xdg-shell-protocol", "protocols/xdg-shell-protocol.c");
@@ -326,6 +346,14 @@ pub fn build(b: *std.Build) void {
     const activation_c = addProtocolObject(b, target, optimize, generate_protocols, "xdg-activation-protocol", "protocols/xdg-activation-v1-protocol.c");
     const viewporter_c = addProtocolObject(b, target, optimize, generate_protocols, "viewporter-protocol", "protocols/viewporter-protocol.c");
     const fractional_scale_c = addProtocolObject(b, target, optimize, generate_protocols, "fractional-scale-protocol", "protocols/fractional-scale-v1-protocol.c");
+    const xdg_dialog_c = addProtocolObject(b, target, optimize, generate_protocols, "xdg-dialog-protocol", "protocols/xdg-dialog-v1-protocol.c");
+    const xdg_decoration_c = addProtocolObject(b, target, optimize, generate_protocols, "xdg-decoration-protocol", "protocols/xdg-decoration-unstable-v1-protocol.c");
+    const sideswipe_shell_c = addProtocolObject(b, target, optimize, generate_protocols, "sideswipe-shell-protocol", "protocols/sideswipe-shell-v1-protocol.c");
+    const color_management_c = addProtocolObject(b, target, optimize, generate_protocols, "color-management-protocol", "protocols/color-management-v1-protocol.c");
+    const color_representation_c = addProtocolObject(b, target, optimize, generate_protocols, "color-representation-protocol", "protocols/color-representation-v1-protocol.c");
+    const tearing_control_c = addProtocolObject(b, target, optimize, generate_protocols, "tearing-control-protocol", "protocols/tearing-control-v1-protocol.c");
+    const session_lock_c = addProtocolObject(b, target, optimize, generate_protocols, "ext-session-lock-protocol", "protocols/ext-session-lock-v1-protocol.c");
+    const idle_notify_c = addProtocolObject(b, target, optimize, generate_protocols, "ext-idle-notify-protocol", "protocols/ext-idle-notify-v1-protocol.c");
 
     // Main executable
     const exe = b.addExecutable(.{
@@ -350,13 +378,23 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addObject(activation_c);
     exe.root_module.addObject(viewporter_c);
     exe.root_module.addObject(fractional_scale_c);
+    exe.root_module.addObject(sideswipe_shell_c);
+    exe.root_module.addObject(xdg_dialog_c);
+    exe.root_module.addObject(xdg_decoration_c);
+    exe.root_module.addObject(color_management_c);
+    exe.root_module.addObject(color_representation_c);
+    exe.root_module.addObject(tearing_control_c);
+    exe.root_module.addObject(session_lock_c);
+    exe.root_module.addObject(idle_notify_c);
     exe.root_module.linkSystemLibrary("xkbcommon", .{});
+    linkFonts(exe.root_module);
     exe.root_module.linkSystemLibrary("libdrm", .{});
     exe.root_module.linkSystemLibrary("libinput", .{});
     exe.root_module.linkSystemLibrary("pixman-1", .{});
     exe.root_module.linkSystemLibrary("gbm", .{});
     exe.root_module.linkSystemLibrary("EGL", .{});
     exe.root_module.linkSystemLibrary("GLESv2", .{});
+    exe.root_module.linkSystemLibrary("vulkan", .{});
     exe.root_module.linkSystemLibrary("libudev", .{});
     exe.root_module.linkSystemLibrary("libseat", .{});
     exe.root_module.linkSystemLibrary("wayland-client", .{});
@@ -372,6 +410,39 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    const ring_geometry_mod = b.createModule(.{
+        .root_source_file = b.path("src/compositor/ring_geometry.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "core", .module = core_mod },
+        },
+    });
+
+    const shell_exe = b.addExecutable(.{
+        .name = "sideswipe-shell",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/shell/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "core", .module = core_mod },
+                .{ .name = "core.cli", .module = core_cli_mod },
+                .{ .name = "ring_geometry", .module = ring_geometry_mod },
+            },
+        }),
+    });
+    shell_exe.root_module.addIncludePath(b.path("protocols"));
+    shell_exe.root_module.addObject(sideswipe_shell_c);
+    shell_exe.root_module.addObject(dmabuf_c);
+    shell_exe.root_module.addObject(viewporter_c);
+    shell_exe.root_module.linkSystemLibrary("wayland-client", .{});
+    shell_exe.root_module.link_libc = true;
+    shell_exe.step.dependOn(generate_protocols);
+    b.installArtifact(shell_exe);
+
+    const shell_step = b.step("shell", "Build the privileged shell client");
+    shell_step.dependOn(&b.addInstallArtifact(shell_exe, .{}).step);
+
     // Run step
     const run_step = b.step("run", "Run the app");
     const run_cmd = b.addRunArtifact(exe);
@@ -381,6 +452,16 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }
+
+    const run_nested_step = b.step("run-nested", "Run the compositor nested with the privileged shell attached");
+    const run_nested = b.addRunArtifact(exe);
+    run_nested.addArg("--backend");
+    run_nested.setEnvironmentVariable("SIDESWIPE_SHELL", b.getInstallPath(.bin, "sideswipe-shell"));
+    run_nested.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_nested.addArgs(args);
+    }
+    run_nested_step.dependOn(&run_nested.step);
 
     // Test suite
     const test_step = b.step("test", "Run tests");
@@ -392,12 +473,30 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .imports = &.{
+                .{ .name = "core.string", .module = core_string_mod },
+            },
         }),
     });
     core_tests.root_module.linkSystemLibrary("pixman-1", .{});
     core_tests.root_module.link_libc = true;
     const run_core_tests = b.addRunArtifact(core_tests);
     test_step.dependOn(&run_core_tests.step);
+
+    const core_config_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core/config.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "core.string", .module = core_string_mod },
+            },
+        }),
+    });
+    core_config_tests.root_module.link_libc = true;
+    const run_core_config_tests = b.addRunArtifact(core_config_tests);
+    test_step.dependOn(&run_core_config_tests.step);
 
     // Test core.math module
     const core_math_tests = b.addTest(.{
@@ -502,6 +601,9 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .imports = &.{
+                .{ .name = "core.string", .module = core_string_mod },
+            },
         }),
     });
     core_cli_tests.root_module.link_libc = true;
@@ -547,6 +649,9 @@ pub fn build(b: *std.Build) void {
     backend_tests.root_module.addObject(activation_c);
     backend_tests.root_module.addObject(viewporter_c);
     backend_tests.root_module.addObject(fractional_scale_c);
+    backend_tests.root_module.addObject(sideswipe_shell_c);
+    backend_tests.root_module.addObject(xdg_dialog_c);
+    backend_tests.root_module.addObject(xdg_decoration_c);
     backend_tests.step.dependOn(generate_protocols);
     backend_tests.root_module.linkSystemLibrary("libdrm", .{});
     backend_tests.root_module.linkSystemLibrary("libinput", .{});
@@ -554,6 +659,7 @@ pub fn build(b: *std.Build) void {
     backend_tests.root_module.linkSystemLibrary("gbm", .{});
     backend_tests.root_module.linkSystemLibrary("EGL", .{});
     backend_tests.root_module.linkSystemLibrary("GLESv2", .{});
+    backend_tests.root_module.linkSystemLibrary("vulkan", .{});
     backend_tests.root_module.linkSystemLibrary("libudev", .{});
     backend_tests.root_module.linkSystemLibrary("libseat", .{});
     backend_tests.root_module.linkSystemLibrary("wayland-client", .{});
@@ -577,6 +683,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "core", .module = core_mod },
                 .{ .name = "core.os", .module = core_os_mod },
+                .{ .name = "core.string", .module = core_string_mod },
             },
         }),
     });
@@ -600,6 +707,9 @@ pub fn build(b: *std.Build) void {
     wayland_tests.root_module.addObject(xdg_shell_c);
     wayland_tests.root_module.addObject(viewporter_c);
     wayland_tests.root_module.addObject(fractional_scale_c);
+    wayland_tests.root_module.addObject(sideswipe_shell_c);
+    wayland_tests.root_module.addObject(xdg_dialog_c);
+    wayland_tests.root_module.addObject(xdg_decoration_c);
     wayland_tests.step.dependOn(generate_protocols);
     wayland_tests.root_module.linkSystemLibrary("wayland-server", .{});
     wayland_tests.root_module.link_libc = true;
@@ -616,6 +726,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "core", .module = core_mod },
                 .{ .name = "core.cli", .module = core_cli_mod },
+                .{ .name = "core.string", .module = core_string_mod },
                 .{ .name = "core.math", .module = core_math_mod },
                 .{ .name = "wayland", .module = wayland_mod },
                 .{ .name = "backend", .module = backend_mod },
@@ -628,8 +739,17 @@ pub fn build(b: *std.Build) void {
     compositor_tests.root_module.addObject(activation_c);
     compositor_tests.root_module.addObject(viewporter_c);
     compositor_tests.root_module.addObject(fractional_scale_c);
+    compositor_tests.root_module.addObject(xdg_dialog_c);
+    compositor_tests.root_module.addObject(xdg_decoration_c);
+    compositor_tests.root_module.addObject(sideswipe_shell_c);
+    compositor_tests.root_module.addObject(color_management_c);
+    compositor_tests.root_module.addObject(color_representation_c);
+    compositor_tests.root_module.addObject(tearing_control_c);
+    compositor_tests.root_module.addObject(session_lock_c);
+    compositor_tests.root_module.addObject(idle_notify_c);
     compositor_tests.step.dependOn(generate_protocols);
     compositor_tests.root_module.linkSystemLibrary("xkbcommon", .{});
+    linkFonts(compositor_tests.root_module);
     compositor_tests.root_module.linkSystemLibrary("wayland-server", .{});
     compositor_tests.root_module.linkSystemLibrary("libdrm", .{});
     compositor_tests.root_module.linkSystemLibrary("libinput", .{});
@@ -637,6 +757,7 @@ pub fn build(b: *std.Build) void {
     compositor_tests.root_module.linkSystemLibrary("gbm", .{});
     compositor_tests.root_module.linkSystemLibrary("EGL", .{});
     compositor_tests.root_module.linkSystemLibrary("GLESv2", .{});
+    compositor_tests.root_module.linkSystemLibrary("vulkan", .{});
     compositor_tests.root_module.linkSystemLibrary("libudev", .{});
     compositor_tests.root_module.linkSystemLibrary("libseat", .{});
     compositor_tests.root_module.linkSystemLibrary("wayland-client", .{});
@@ -644,6 +765,29 @@ pub fn build(b: *std.Build) void {
     compositor_tests.root_module.link_libc = true;
     const run_compositor_tests = b.addRunArtifact(compositor_tests);
     test_step.dependOn(&run_compositor_tests.step);
+
+    const shell_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/shell/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "core", .module = core_mod },
+                .{ .name = "core.cli", .module = core_cli_mod },
+                .{ .name = "ring_geometry", .module = ring_geometry_mod },
+            },
+        }),
+    });
+    shell_tests.root_module.addIncludePath(b.path("protocols"));
+    shell_tests.root_module.addObject(sideswipe_shell_c);
+    shell_tests.root_module.addObject(dmabuf_c);
+    shell_tests.root_module.addObject(viewporter_c);
+    shell_tests.step.dependOn(generate_protocols);
+    shell_tests.root_module.linkSystemLibrary("wayland-client", .{});
+    shell_tests.root_module.link_libc = true;
+    const run_shell_tests = b.addRunArtifact(shell_tests);
+    test_step.dependOn(&run_shell_tests.step);
 
     // Test a specific file with module access
     const test_file_step = b.step("test-file", "Run tests for a specific file with module access");
@@ -675,13 +819,23 @@ pub fn build(b: *std.Build) void {
         file_tests.root_module.addObject(activation_c);
         file_tests.root_module.addObject(viewporter_c);
         file_tests.root_module.addObject(fractional_scale_c);
+        file_tests.root_module.addObject(xdg_dialog_c);
+        file_tests.root_module.addObject(xdg_decoration_c);
+        file_tests.root_module.addObject(sideswipe_shell_c);
+        file_tests.root_module.addObject(color_management_c);
+        file_tests.root_module.addObject(color_representation_c);
+        file_tests.root_module.addObject(tearing_control_c);
+        file_tests.root_module.addObject(session_lock_c);
+        file_tests.root_module.addObject(idle_notify_c);
         file_tests.root_module.linkSystemLibrary("xkbcommon", .{});
+        linkFonts(file_tests.root_module);
         file_tests.root_module.linkSystemLibrary("libdrm", .{});
         file_tests.root_module.linkSystemLibrary("libinput", .{});
         file_tests.root_module.linkSystemLibrary("pixman-1", .{});
         file_tests.root_module.linkSystemLibrary("gbm", .{});
         file_tests.root_module.linkSystemLibrary("EGL", .{});
         file_tests.root_module.linkSystemLibrary("GLESv2", .{});
+        file_tests.root_module.linkSystemLibrary("vulkan", .{});
         file_tests.root_module.linkSystemLibrary("libudev", .{});
         file_tests.root_module.linkSystemLibrary("libseat", .{});
         file_tests.root_module.linkSystemLibrary("wayland-client", .{});
@@ -731,6 +885,7 @@ pub fn build(b: *std.Build) void {
     benchmark_exe.root_module.linkSystemLibrary("gbm", .{});
     benchmark_exe.root_module.linkSystemLibrary("EGL", .{});
     benchmark_exe.root_module.linkSystemLibrary("GLESv2", .{});
+    benchmark_exe.root_module.linkSystemLibrary("vulkan", .{});
     benchmark_exe.root_module.linkSystemLibrary("libudev", .{});
     benchmark_exe.root_module.linkSystemLibrary("libseat", .{});
     benchmark_exe.root_module.linkSystemLibrary("wayland-client", .{});

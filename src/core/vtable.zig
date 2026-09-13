@@ -2,6 +2,7 @@
 //! Provides utilities for creating type-erased interfaces similar to C++ virtual classes
 
 const std = @import("std");
+const string = @import("core.string").string;
 
 /// Generic interface wrapper with vtable pattern
 ///
@@ -31,12 +32,12 @@ pub fn Interface(comptime VTableType: type) type {
 
 /// Create a common device interface with standard get_libinput_handle, get_name, and deinit methods
 /// This is useful for input device interfaces that share the same basic structure
-pub fn DeviceInterface(comptime name: []const u8) type {
+pub fn DeviceInterface(comptime name: string) type {
     _ = name; // For future use in error messages
 
     const VTableDef = struct {
         get_libinput_handle: *const fn (ptr: *anyopaque) ?*anyopaque,
-        get_name: *const fn (ptr: *anyopaque) []const u8,
+        get_name: *const fn (ptr: *anyopaque) string,
         deinit: *const fn (ptr: *anyopaque) void,
     };
 
@@ -56,7 +57,7 @@ pub fn DeviceInterface(comptime name: []const u8) type {
             return self.base.vtable.get_libinput_handle(self.base.ptr);
         }
 
-        pub fn getName(self: Self) []const u8 {
+        pub fn getName(self: Self) string {
             return self.base.vtable.get_name(self.base.ptr);
         }
 

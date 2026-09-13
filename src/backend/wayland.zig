@@ -2,6 +2,7 @@
 //! Provides compositor-hosted backend using Wayland protocol
 
 const std = @import("std");
+const string = @import("core.string").string;
 const core = @import("core");
 const cli = @import("core.cli");
 const math = @import("core.math");
@@ -70,7 +71,7 @@ const PointerKinematics = struct {
         return .{ .x = x, .y = y, .dx = 0, .dy = 0, .distance = 0, .dt_ms = 0, .speed = 0 };
     }
 
-    fn heading(self: PointerKinematics) []const u8 {
+    fn heading(self: PointerKinematics) string {
         if (self.distance < 0.01) return "still";
         if (@abs(self.dx) >= @abs(self.dy)) {
             return if (self.dx >= 0) "right" else "left";
@@ -156,7 +157,7 @@ pub const Buffer = struct {
     }
 
     fn createFromDmabuf(self: *Self) !void {
-        const dmabuf = self.backend.wayland_state.dmabuf orelse {
+        const dmabuf = self.backend.state.dmabuf orelse {
             cli.log.warn("Wayland Backend: DMA-BUF protocol not available", .{});
             return;
         };
@@ -211,7 +212,7 @@ pub const Buffer = struct {
     }
 
     fn createFromShm(self: *Self) !void {
-        const shm = self.backend.wayland_state.shm orelse {
+        const shm = self.backend.state.shm orelse {
             cli.log.warn("Wayland Backend: SHM protocol not available", .{});
             return;
         };
@@ -350,7 +351,7 @@ fn createAnonymousFile(size: usize) !i32 {
 
 /// Wayland output implementation
 pub const Output = struct {
-    name: []const u8,
+    name: string,
     backend: *Backend,
     allocator: std.mem.Allocator,
     state: output.State,
@@ -390,7 +391,7 @@ pub const Output = struct {
         userdata: ?*anyopaque,
     };
 
-    pub fn create(allocator: std.mem.Allocator, name: []const u8, be: *Backend) !*Self {
+    pub fn create(allocator: std.mem.Allocator, name: string, be: *Backend) !*Self {
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
 
@@ -406,7 +407,7 @@ pub const Output = struct {
         };
 
         // Create Wayland surface
-        if (be.wayland_state.compositor) |compositor| {
+        if (be.state.compositor) |compositor| {
             self.surface = c.wl_compositor_create_surface(compositor);
             if (self.surface == null) {
                 cli.log.err("Failed to create wl_surface for output {s}", .{name});
@@ -415,16 +416,16 @@ pub const Output = struct {
         }
 
         self.bindFractionalScale(be);
-        if (be.wayland_state.viewporter) |viewporter| {
+        if (be.state.viewporter) |viewporter| {
             self.viewport = c.wp_viewporter_get_viewport(viewporter, self.surface);
         }
         self.initXdgSurface(be);
 
         // Create cursor surface
-        if (be.wayland_state.compositor) |compositor| {
+        if (be.state.compositor) |compositor| {
             self.cursor_surface = c.wl_compositor_create_surface(compositor);
         }
-        if (be.wayland_state.viewporter) |viewporter| {
+        if (be.state.viewporter) |viewporter| {
             if (self.cursor_surface) |cursor_surf| {
                 self.cursor_viewport = c.wp_viewporter_get_viewport(viewporter, cursor_surf);
             }
@@ -434,7 +435,7 @@ pub const Output = struct {
     }
 
     fn bindFractionalScale(self: *Self, be: *Backend) void {
-        const manager = be.wayland_state.fractional_scale_manager orelse return;
+        const manager = be.state.fractional_scale_manager orelse return;
         const surf = self.surface orelse return;
         self.fractional = c.wp_fractional_scale_manager_v1_get_fractional_scale(manager, surf);
         const fractional = self.fractional orelse return;
@@ -442,7 +443,7 @@ pub const Output = struct {
     }
 
     fn initXdgSurface(self: *Self, be: *Backend) void {
-        const xdg = be.wayland_state.xdg_wm_base orelse {
+        const xdg = be.state.xdg_wm_base orelse {
             cli.log.err("xdg_wm_base not available for output {s}", .{self.name});
             return;
         };
@@ -558,7 +559,7 @@ pub const Output = struct {
         c.wl_surface_commit(surf);
 
         // Flush display to ensure all requests are sent to parent compositor
-        const display = self.backend.wayland_state.display orelse {
+        const display = self.backend.state.display orelse {
             cli.log.err("Output {s}: No backend display for flushing", .{self.name});
             return false;
         };
@@ -652,7 +653,7 @@ pub const Output = struct {
         const attrs = buf.dmabuf();
 
         // Create cursor wl_buffer
-        if (self.backend.wayland_state.dmabuf) |dmabuf| {
+        if (self.backend.state.dmabuf) |dmabuf| {
             const params = c.zwp_linux_dmabuf_v1_create_params(dmabuf);
             if (params == null) return false;
 
@@ -909,6 +910,28 @@ pub const Output = struct {
         self.destroy_event_userdata = userdata;
     }
 
+    pub fn clearFrameCallback(self: *Self) void {
+        self.frame_event_callback = null;
+        self.frame_event_userdata = null;
+        self.clearConfigureCallback();
+    }
+
+    pub fn clearDestroyCallback(self: *Self) void {
+        self.destroy_event_callback = null;
+        self.destroy_event_userdata = null;
+        self.clearConfigureCallback();
+    }
+
+    fn clearConfigureCallback(self: *Self) void {
+        self.configure_callback = null;
+        self.configure_userdata = null;
+    }
+
+    pub fn invokeFrame(self: *Self) void {
+        const callback = self.frame_event_callback orelse return;
+        callback(self.frame_event_userdata);
+    }
+
     fn detachCallbacks(self: *Self) DestroyEvent {
         const detached: DestroyEvent = .{
             .callback = self.destroy_event_callback,
@@ -1045,8 +1068,11 @@ pub const Output = struct {
             .schedule_frame = scheduleFrameFn,
             .get_gamma_size = getGammaSizeFn,
             .get_degamma_size = getDeGammaSizeFn,
+            .set_buffer = setBufferFn,
             .destroy = destroyFn,
             .deinit = deinitFn,
+            .clear_frame_callback = clearFrameCallbackFn,
+            .clear_destroy_callback = clearDestroyCallbackFn,
         });
     }
 
@@ -1110,6 +1136,11 @@ pub const Output = struct {
         return self.getDeGammaSize();
     }
 
+    fn setBufferFn(ptr: *anyopaque, buf: buffer.Interface) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.state.setBuffer(buf);
+    }
+
     fn destroyFn(ptr: *anyopaque) bool {
         const self: *Self = @ptrCast(@alignCast(ptr));
         return self.destroy();
@@ -1119,6 +1150,16 @@ pub const Output = struct {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.deinit();
     }
+
+    fn clearFrameCallbackFn(ptr: *anyopaque) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.clearFrameCallback();
+    }
+
+    fn clearDestroyCallbackFn(ptr: *anyopaque) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.clearDestroyCallback();
+    }
 };
 
 /// Wayland keyboard wrapper
@@ -1126,7 +1167,7 @@ pub const Keyboard = struct {
     wl_keyboard: *c.wl_keyboard,
     backend: *Backend,
     allocator: std.mem.Allocator,
-    name: []const u8 = "wl_keyboard",
+    name: string = "wl_keyboard",
     repeat_rate: i32 = 25,
     repeat_delay: i32 = 600,
 
@@ -1147,7 +1188,7 @@ pub const Keyboard = struct {
         self.allocator.destroy(self);
     }
 
-    pub fn getName(self: *const Self) []const u8 {
+    pub fn getName(self: *const Self) string {
         return self.name;
     }
 };
@@ -1157,7 +1198,7 @@ pub const Pointer = struct {
     wl_pointer: *c.wl_pointer,
     backend: *Backend,
     allocator: std.mem.Allocator,
-    name: []const u8 = "wl_pointer",
+    name: string = "wl_pointer",
 
     const Self = @This();
 
@@ -1176,7 +1217,7 @@ pub const Pointer = struct {
         self.allocator.destroy(self);
     }
 
-    pub fn getName(self: *const Self) []const u8 {
+    pub fn getName(self: *const Self) string {
         return self.name;
     }
 };
@@ -1219,7 +1260,7 @@ pub const Backend = struct {
     input_userdata: ?*anyopaque = null,
 
     // Wayland state
-    wayland_state: struct {
+    state: struct {
         display: ?*c.wl_display = null,
         registry: ?*c.wl_registry = null,
         seat: ?*c.wl_seat = null,
@@ -1240,7 +1281,7 @@ pub const Backend = struct {
     // DRM state
     drm_state: struct {
         fd: i32 = -1,
-        node_name: ?[]const u8 = null,
+        node_name: ?string = null,
     } = .{},
 
     // Poll FDs
@@ -1302,7 +1343,7 @@ pub const Backend = struct {
         }
         self.host_outputs.deinit(self.allocator);
 
-        if (self.wayland_state.fractional_scale_manager) |manager| {
+        if (self.state.fractional_scale_manager) |manager| {
             c.wp_fractional_scale_manager_v1_destroy(manager);
         }
 
@@ -1311,36 +1352,36 @@ pub const Backend = struct {
         }
         self.dmabuf_formats.deinit(self.allocator);
 
-        if (self.wayland_state.dmabuf_feedback) |feedback| {
+        if (self.state.dmabuf_feedback) |feedback| {
             c.zwp_linux_dmabuf_feedback_v1_destroy(feedback);
         }
-        if (self.wayland_state.viewporter) |viewporter| c.wp_viewporter_destroy(viewporter);
+        if (self.state.viewporter) |viewporter| c.wp_viewporter_destroy(viewporter);
 
-        if (self.wayland_state.dmabuf) |dmabuf| {
+        if (self.state.dmabuf) |dmabuf| {
             c.zwp_linux_dmabuf_v1_destroy(dmabuf);
         }
 
-        if (self.wayland_state.shm) |shm| {
+        if (self.state.shm) |shm| {
             c.wl_shm_destroy(shm);
         }
 
-        if (self.wayland_state.xdg_wm_base) |xdg| {
+        if (self.state.xdg_wm_base) |xdg| {
             c.xdg_wm_base_destroy(xdg);
         }
 
-        if (self.wayland_state.compositor) |comp| {
+        if (self.state.compositor) |comp| {
             c.wl_compositor_destroy(comp);
         }
 
-        if (self.wayland_state.seat) |seat| {
+        if (self.state.seat) |seat| {
             c.wl_seat_destroy(seat);
         }
 
-        if (self.wayland_state.registry) |reg| {
+        if (self.state.registry) |reg| {
             c.wl_registry_destroy(reg);
         }
 
-        if (self.wayland_state.display) |disp| {
+        if (self.state.display) |disp| {
             c.wl_display_disconnect(disp);
         }
 
@@ -1376,7 +1417,7 @@ pub const Backend = struct {
     }
 
     fn ensureCursorTheme(self: *Self) ?*c.wl_cursor_theme {
-        const shm = self.wayland_state.shm orelse return null;
+        const shm = self.state.shm orelse return null;
         const spec = cursor.Spec.fromEnv();
         const size = cursor.pixelSize(spec.size, self.host_scale);
         if (self.cursor_theme) |theme| {
@@ -1415,30 +1456,30 @@ pub const Backend = struct {
         const interface_name = std.mem.span(interface);
 
         if (std.mem.eql(u8, interface_name, "wl_compositor")) {
-            self.wayland_state.compositor = @ptrCast(c.wl_registry_bind(reg, name, &c.wl_compositor_interface, @min(version, 4)));
+            self.state.compositor = @ptrCast(c.wl_registry_bind(reg, name, &c.wl_compositor_interface, @min(version, 4)));
             cli.log.debug("Bound wl_compositor", .{});
         } else if (std.mem.eql(u8, interface_name, "wl_seat")) {
-            self.wayland_state.seat = @ptrCast(c.wl_registry_bind(reg, name, &c.wl_seat_interface, @min(version, 7)));
+            self.state.seat = @ptrCast(c.wl_registry_bind(reg, name, &c.wl_seat_interface, @min(version, 7)));
             self.initSeat();
             cli.log.debug("Bound wl_seat", .{});
         } else if (std.mem.eql(u8, interface_name, "xdg_wm_base")) {
-            self.wayland_state.xdg_wm_base = @ptrCast(c.wl_registry_bind(reg, name, &c.xdg_wm_base_interface, @min(version, 2)));
+            self.state.xdg_wm_base = @ptrCast(c.wl_registry_bind(reg, name, &c.xdg_wm_base_interface, @min(version, 2)));
             self.initShell();
             cli.log.debug("Bound xdg_wm_base", .{});
         } else if (std.mem.eql(u8, interface_name, "wl_shm")) {
-            self.wayland_state.shm = @ptrCast(c.wl_registry_bind(reg, name, &c.wl_shm_interface, @min(version, 1)));
+            self.state.shm = @ptrCast(c.wl_registry_bind(reg, name, &c.wl_shm_interface, @min(version, 1)));
             cli.log.debug("Bound wl_shm", .{});
         } else if (std.mem.eql(u8, interface_name, "zwp_linux_dmabuf_v1")) {
-            self.wayland_state.dmabuf = @ptrCast(c.wl_registry_bind(reg, name, &c.zwp_linux_dmabuf_v1_interface, @min(version, 4)));
+            self.state.dmabuf = @ptrCast(c.wl_registry_bind(reg, name, &c.zwp_linux_dmabuf_v1_interface, @min(version, 4)));
             _ = self.initDmabuf() catch {
-                self.wayland_state.dmabuf_failed = true;
+                self.state.dmabuf_failed = true;
             };
             cli.log.debug("Bound zwp_linux_dmabuf_v1", .{});
         } else if (std.mem.eql(u8, interface_name, "wp_viewporter")) {
-            self.wayland_state.viewporter = @ptrCast(c.wl_registry_bind(reg, name, &c.wp_viewporter_interface, @min(version, 1)));
+            self.state.viewporter = @ptrCast(c.wl_registry_bind(reg, name, &c.wp_viewporter_interface, @min(version, 1)));
             cli.log.debug("Bound wp_viewporter", .{});
         } else if (std.mem.eql(u8, interface_name, "wp_fractional_scale_manager_v1")) {
-            self.wayland_state.fractional_scale_manager = @ptrCast(c.wl_registry_bind(
+            self.state.fractional_scale_manager = @ptrCast(c.wl_registry_bind(
                 reg,
                 name,
                 &c.wp_fractional_scale_manager_v1_interface,
@@ -1482,11 +1523,32 @@ pub const Backend = struct {
 
     pub fn start(self: *Self) bool {
         cli.log.debug("Starting Wayland backend", .{});
+        const display_name = resolveParentDisplay(
+            self.coordinator.options.parent_display,
+            core.env.get("WAYLAND_DISPLAY"),
+            self.coordinator.options.own_socket,
+        ) orelse {
+            cli.log.err("Failed to connect to Wayland display: no parent compositor", .{});
+            return false;
+        };
+        return self.startWithParent(display_name);
+    }
 
-        // Connect to Wayland display
-        self.wayland_state.display = c.wl_display_connect(null);
-        if (self.wayland_state.display == null) {
-            cli.log.err("Failed to connect to Wayland display", .{});
+    fn disconnectParent(self: *Self) void {
+        if (self.state.registry) |reg| {
+            c.wl_registry_destroy(reg);
+            self.state.registry = null;
+        }
+        if (self.state.display) |disp| {
+            c.wl_display_disconnect(disp);
+            self.state.display = null;
+        }
+    }
+
+    fn startWithParent(self: *Self, display_name: [:0]const u8) bool {
+        self.state.display = c.wl_display_connect(display_name.ptr);
+        if (self.state.display == null) {
+            cli.log.err("Failed to connect to Wayland display {s}", .{display_name});
             return false;
         }
 
@@ -1494,53 +1556,49 @@ pub const Backend = struct {
         const desktop_name = if (xdg_desktop) |name| name else "unknown";
         cli.log.debug("Connected to Wayland compositor: {s}", .{desktop_name});
 
-        // Get registry
-        self.wayland_state.registry = c.wl_display_get_registry(self.wayland_state.display.?);
-        if (self.wayland_state.registry == null) {
+        self.state.registry = c.wl_display_get_registry(self.state.display.?);
+        if (self.state.registry == null) {
             cli.log.err("Failed to get Wayland registry", .{});
+            self.disconnectParent();
             return false;
         }
 
-        // Setup registry listener
         const listener = c.wl_registry_listener{
             .global = registryHandleGlobal,
             .global_remove = registryHandleGlobalRemove,
         };
-        _ = c.wl_registry_add_listener(self.wayland_state.registry.?, &listener, self);
+        _ = c.wl_registry_add_listener(self.state.registry.?, &listener, self);
+        if (c.wl_display_roundtrip(self.state.display.?) < 0) {
+            cli.log.err("Wayland display roundtrip failed", .{});
+            self.disconnectParent();
+            return false;
+        }
 
-        // Do roundtrip to process registry events
-        _ = c.wl_display_roundtrip(self.wayland_state.display.?);
-
-        // Initialize poll FD for Wayland display events
-        const fd = c.wl_display_get_fd(self.wayland_state.display.?);
+        const fd = c.wl_display_get_fd(self.state.display.?);
         self.poll_fds[0] = .{
             .fd = fd,
             .callback = dispatchCallback,
         };
-        if (self.coordinator.primary_renderer == null) {
-            self.coordinator.primary_renderer = renderer.Type.createNested(
-                self.allocator,
-                @ptrCast(self.wayland_state.display.?),
-            ) catch |err| {
-                cli.log.warn("Nested DMA-BUF renderer unavailable: {}", .{err});
-                self.attachRenderNode();
-                return true;
-            };
-        }
+        self.ensureNestedRenderer();
         self.attachRenderNode();
-
         return true;
+    }
+
+    fn ensureNestedRenderer(self: *Self) void {
+        if (self.coordinator.primary_renderer != null) return;
+        self.coordinator.primary_renderer = renderer.Type.createNested(
+            self.allocator,
+            @ptrCast(self.state.display.?),
+        ) catch |err| {
+            cli.log.warn("Nested DMA-BUF renderer unavailable: {}", .{err});
+            return;
+        };
     }
 
     fn attachRenderNode(self: *Self) void {
         if (self.drm_state.fd >= 0) return;
-        if (self.coordinator.primary_renderer) |rend| {
-            if (rend.openDeviceNode()) |fd| {
-                self.drm_state.fd = fd;
-                cli.log.info("Nested DRM render node fd={d}", .{fd});
-                return;
-            }
-        }
+        if (self.tryAttachRendererNode()) return;
+
         const fd = openFirstRenderNode();
         if (fd < 0) {
             cli.log.warn("No DRM render node available for client DMA-BUF feedback", .{});
@@ -1550,6 +1608,14 @@ pub const Backend = struct {
         cli.log.info("Fallback DRM render node fd={d}", .{fd});
     }
 
+    fn tryAttachRendererNode(self: *Self) bool {
+        const rend = self.coordinator.primary_renderer orelse return false;
+        const fd = rend.openDeviceNode() orelse return false;
+        self.drm_state.fd = fd;
+        cli.log.info("Nested DRM render node fd={d}", .{fd});
+        return true;
+    }
+
     /// Callback for poll FD events
     fn dispatchCallback() void {
         // Note: This is a workaround since we can't pass self pointer in callback
@@ -1557,7 +1623,7 @@ pub const Backend = struct {
     }
 
     pub fn pollFds(self: *Self) []const backend.PollFd {
-        if (self.wayland_state.display == null) return &[_]backend.PollFd{};
+        if (self.state.display == null) return &[_]backend.PollFd{};
         return &self.poll_fds;
     }
 
@@ -1580,7 +1646,7 @@ pub const Backend = struct {
         };
 
         // Do a full roundtrip to ensure XDG configure event is received and processed
-        const display = self.wayland_state.display orelse return;
+        const display = self.state.display orelse return;
         _ = c.wl_display_roundtrip(display);
         self.applyThemeCursor();
 
@@ -1596,7 +1662,7 @@ pub const Backend = struct {
 
     /// Dispatch pending events from the parent Wayland compositor
     pub fn dispatchEvents(self: *Self) void {
-        const display = self.wayland_state.display orelse return;
+        const display = self.state.display orelse return;
 
         // Prepare to read events
         if (c.wl_display_prepare_read(display) != 0) {
@@ -1617,7 +1683,7 @@ pub const Backend = struct {
 
     /// Register backend with server event loop for automatic event dispatch
     pub fn registerWithEventLoop(self: *Self, event_loop_handle: *anyopaque) void {
-        const display = self.wayland_state.display orelse {
+        const display = self.state.display orelse {
             cli.log.err("Cannot register backend: no display", .{});
             return;
         };
@@ -1644,7 +1710,7 @@ pub const Backend = struct {
     /// Event loop callback for Wayland display events
     fn waylandDisplayCallback(fd: i32, mask: u32, data: ?*anyopaque) callconv(.c) i32 {
         const self: *Backend = @ptrCast(@alignCast(data orelse return 0));
-        const display = self.wayland_state.display orelse return 0;
+        const display = self.state.display orelse return 0;
 
         cli.log.trace("Wayland event callback fired (fd={d} mask=0x{x})", .{ fd, mask });
 
@@ -1692,7 +1758,7 @@ pub const Backend = struct {
         return 1;
     }
 
-    pub fn createOutput(self: *Self, name: ?[]const u8) !void {
+    pub fn createOutput(self: *Self, name: ?string) !void {
         const output_name = if (name) |n| n else blk: {
             self.last_output_id += 1;
             var buf: [64]u8 = undefined;
@@ -2187,9 +2253,9 @@ pub const Backend = struct {
     fn touchHandleOrientation(_: ?*anyopaque, _: ?*c.wl_touch, _: i32, _: c.wl_fixed_t) callconv(.c) void {}
 
     fn initSeat(self: *Self) void {
-        if (self.wayland_state.seat == null) return;
+        if (self.state.seat == null) return;
 
-        const seat = self.wayland_state.seat.?;
+        const seat = self.state.seat.?;
         const listener = c.wl_seat_listener{
             .capabilities = seatHandleCapabilities,
             .name = seatHandleName,
@@ -2198,9 +2264,9 @@ pub const Backend = struct {
     }
 
     fn initShell(self: *Self) void {
-        if (self.wayland_state.xdg_wm_base == null) return;
+        if (self.state.xdg_wm_base == null) return;
 
-        const xdg = self.wayland_state.xdg_wm_base.?;
+        const xdg = self.state.xdg_wm_base.?;
         const listener = c.xdg_wm_base_listener{
             .ping = xdgWmBasePing,
         };
@@ -2215,11 +2281,11 @@ pub const Backend = struct {
     }
 
     fn initDmabuf(self: *Self) !bool {
-        const dmabuf = self.wayland_state.dmabuf orelse return false;
+        const dmabuf = self.state.dmabuf orelse return false;
 
         // Setup dmabuf feedback for format enumeration
-        self.wayland_state.dmabuf_feedback = c.zwp_linux_dmabuf_v1_get_default_feedback(dmabuf);
-        if (self.wayland_state.dmabuf_feedback) |feedback| {
+        self.state.dmabuf_feedback = c.zwp_linux_dmabuf_v1_get_default_feedback(dmabuf);
+        if (self.state.dmabuf_feedback) |feedback| {
             const listener = c.zwp_linux_dmabuf_feedback_v1_listener{
                 .done = dmabufFeedbackDone,
                 .format_table = dmabufFeedbackFormatTable,
@@ -2370,6 +2436,26 @@ const fractional_listener = c.wp_fractional_scale_v1_listener{
     .preferred_scale = Backend.fractionalScalePreferred,
 };
 
+/// Returns true when `name` is a parent compositor socket that is not this process.
+pub fn isUsableParentDisplay(name: ?string, own_socket: string) bool {
+    const display = name orelse return false;
+    if (display.len == 0) return false;
+    return !std.mem.eql(u8, std.fs.path.basename(display), std.fs.path.basename(own_socket));
+}
+
+/// Nested mode is only safe when a distinct parent compositor socket exists.
+pub fn shouldStartNested(want_nested: bool, parent_display: ?string, own_socket: string) bool {
+    if (!want_nested) return false;
+    return isUsableParentDisplay(parent_display, own_socket);
+}
+
+/// Prefers an explicit parent display, then `WAYLAND_DISPLAY`, and rejects our own socket.
+pub fn resolveParentDisplay(configured: ?[:0]const u8, env_display: ?[:0]const u8, own_socket: string) ?[:0]const u8 {
+    const name = configured orelse env_display orelse return null;
+    if (!isUsableParentDisplay(name, own_socket)) return null;
+    return name;
+}
+
 fn openFirstRenderNode() i32 {
     var index: u32 = 128;
     while (index < 136) : (index += 1) {
@@ -2407,6 +2493,65 @@ fn removeOutputReference(outputs: *std.ArrayList(*Output), removed: *Output) voi
 const testing = core.testing;
 
 // Tests
+test "shouldStartNested - requires a distinct parent compositor" {
+    try testing.expect(!shouldStartNested(false, "wayland-1", "wayland-0"));
+    try testing.expect(!shouldStartNested(true, null, "wayland-0"));
+    try testing.expect(!shouldStartNested(true, "wayland-0", "wayland-0"));
+    try testing.expect(shouldStartNested(true, "wayland-1", "wayland-0"));
+}
+
+test "isUsableParentDisplay - rejects missing empty and own socket" {
+    try testing.expect(!isUsableParentDisplay(null, "wayland-0"));
+    try testing.expect(!isUsableParentDisplay("", "wayland-0"));
+    try testing.expect(!isUsableParentDisplay("wayland-0", "wayland-0"));
+    try testing.expect(!isUsableParentDisplay("/run/user/1000/wayland-0", "wayland-0"));
+    try testing.expect(!isUsableParentDisplay("wayland-0", "/run/user/1000/wayland-0"));
+    try testing.expect(isUsableParentDisplay("wayland-1", "wayland-0"));
+    try testing.expect(isUsableParentDisplay("/run/user/1000/wayland-1", "wayland-0"));
+}
+
+test "resolveParentDisplay - prefers configured then env and rejects self" {
+    try testing.expectEqualStrings("wayland-1", resolveParentDisplay("wayland-1", "wayland-0", "wayland-2").?);
+    try testing.expectEqualStrings("wayland-0", resolveParentDisplay(null, "wayland-0", "wayland-1").?);
+    try testing.expect(resolveParentDisplay(null, null, "wayland-0") == null);
+    try testing.expect(resolveParentDisplay("wayland-0", "wayland-1", "wayland-0") == null);
+    try testing.expect(resolveParentDisplay("/run/user/1000/wayland-0", "wayland-1", "wayland-0") == null);
+}
+
+test "Backend - start refuses own socket without connecting" {
+    const backends = [_]backend.ImplementationOptions{
+        .{ .backend_type = .wayland, .request_mode = .if_available },
+    };
+    var coordinator = try backend.Coordinator.create(testing.allocator, &backends, .{
+        .parent_display = "wayland-0",
+        .own_socket = "wayland-0",
+    });
+    defer coordinator.deinit();
+
+    var backend_impl = try Backend.create(testing.allocator, coordinator);
+    defer backend_impl.deinit();
+
+    try testing.expect(!backend_impl.start());
+    try testing.expect(backend_impl.state.display == null);
+}
+
+test "Backend - start refuses empty parent display" {
+    const backends = [_]backend.ImplementationOptions{
+        .{ .backend_type = .wayland, .request_mode = .if_available },
+    };
+    var coordinator = try backend.Coordinator.create(testing.allocator, &backends, .{
+        .parent_display = "",
+        .own_socket = "wayland-1",
+    });
+    defer coordinator.deinit();
+
+    var backend_impl = try Backend.create(testing.allocator, coordinator);
+    defer backend_impl.deinit();
+
+    try testing.expect(!backend_impl.start());
+    try testing.expect(backend_impl.state.display == null);
+}
+
 test "Backend - creation and cleanup" {
     const backends = [_]backend.ImplementationOptions{
         .{ .backend_type = .wayland, .request_mode = .if_available },
@@ -2700,6 +2845,48 @@ test "Output - test commit" {
 
     // Wayland doesn't have test commits, should always return true
     try testing.expect(out.testCommit());
+}
+
+fn markProbeFlag(userdata: ?*anyopaque) void {
+    const flag: *bool = @ptrCast(@alignCast(userdata orelse return));
+    flag.* = true;
+}
+
+test "Output - clearCallbacks is safe when no callback was set" {
+    const backends = [_]backend.ImplementationOptions{
+        .{ .backend_type = .wayland, .request_mode = .if_available },
+    };
+    var coordinator = try backend.Coordinator.create(testing.allocator, &backends, .{});
+    defer coordinator.deinit();
+    var backend_impl = try Backend.create(testing.allocator, coordinator);
+    defer backend_impl.deinit();
+    var out = try Output.create(testing.allocator, "clear-unset", backend_impl);
+    defer out.deinit();
+
+    out.iface().clearCallbacks();
+    out.invokeFrame();
+}
+
+test "Output - clearCallbacks drops frame and destroy userdata" {
+    const backends = [_]backend.ImplementationOptions{
+        .{ .backend_type = .wayland, .request_mode = .if_available },
+    };
+    var coordinator = try backend.Coordinator.create(testing.allocator, &backends, .{});
+    defer coordinator.deinit();
+    var backend_impl = try Backend.create(testing.allocator, coordinator);
+    defer backend_impl.deinit();
+    const out = try Output.create(testing.allocator, "clear-probe", backend_impl);
+    try backend_impl.outputs.append(testing.allocator, out);
+
+    var frame_fired = false;
+    var destroy_fired = false;
+    out.setFrameCallback(markProbeFlag, &frame_fired);
+    out.setDestroyCallback(markProbeFlag, &destroy_fired);
+    out.iface().clearCallbacks();
+    out.invokeFrame();
+    try testing.expect(out.destroy());
+    try testing.expect(!frame_fired);
+    try testing.expect(!destroy_fired);
 }
 
 test "Output - VTable interface and methods" {

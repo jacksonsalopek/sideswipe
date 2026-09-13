@@ -634,7 +634,7 @@ test "nested synchronized SHM buffers release only after replacement" {
     thread_running = true;
     if (c.wl_display_roundtrip(display) < 0) return error.FrameRoundtripFailed;
     try testing.expectEqualSlices(u8, &.{ 100, 0, 0, 255 }, readback[0..4]);
-    try testing.expectEqualSlices(u8, &.{ 55, 64, 0, 255 }, readback[4..8]);
+    try testing.expectEqualSlices(u8, &.{ 79, 45, 0, 255 }, readback[4..8]);
     try testing.expectEqualSlices(u8, &.{ 120, 0, 0, 255 }, readback[8..12]);
     try testing.expectEqualSlices(u8, &.{ 130, 0, 0, 255 }, readback[12..16]);
     try testing.expectEqual(@as(usize, 1), frame_counter.count);

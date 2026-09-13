@@ -9,22 +9,28 @@ const compositor = @import("compositor");
 /// Signal handlers cannot capture context, so we need a global reference.
 var global_server: ?*wayland.Server = null;
 var global_logger: ?*cli.Logger = null;
+var event_loop_running = std.atomic.Value(bool).init(false);
 const Signal = @TypeOf(std.posix.SIG.INT);
+
+fn signalName(sig: Signal) []const u8 {
+    return switch (sig) {
+        std.posix.SIG.INT => "SIGINT",
+        std.posix.SIG.TERM => "SIGTERM",
+        else => "UNKNOWN",
+    };
+}
 
 /// Signal handler for SIGINT and SIGTERM.
 /// Terminates the server event loop, allowing cleanup to proceed.
 fn handleSignal(sig: Signal) callconv(.c) void {
     if (global_logger) |logger| {
-        const sig_name: []const u8 = switch (sig) {
-            std.posix.SIG.INT => "SIGINT",
-            std.posix.SIG.TERM => "SIGTERM",
-            else => "UNKNOWN",
-        };
-        logger.info("Received {s}, shutting down...", .{sig_name});
+        logger.info("Received {s}, shutting down...", .{signalName(sig)});
     }
-
     if (global_server) |srv| {
         srv.terminate();
+    }
+    if (!event_loop_running.load(.seq_cst)) {
+        std.c._exit(1);
     }
 }
 
@@ -48,22 +54,22 @@ fn tryInitializeBackend(
     logger: *cli.Logger,
     nested: bool,
     physical_input: bool,
+    parent_display: ?[:0]const u8,
+    own_socket: []const u8,
 ) ?*backend.Coordinator {
     logger.info("Initializing selected runtime backends...", .{});
 
     const backend_opts = [_]backend.ImplementationOptions{
         .{
-            .backend_type = if (nested) .wayland else .null,
+            .backend_type = selectedBackendType(nested, physical_input),
             .request_mode = .if_available,
         },
     };
 
-    if (nested and physical_input) {
-        logger.info("Ignoring --physical-input in nested Wayland mode", .{});
-    }
-
     const coord = backend.Coordinator.create(allocator, &backend_opts, .{
         .physical_input = physical_input and !nested,
+        .parent_display = parent_display,
+        .own_socket = own_socket,
     }) catch |err| {
         logger.warn("Failed to create backend coordinator: {}", .{err});
         logger.info("Continuing in display-server-only mode", .{});
@@ -75,7 +81,7 @@ fn tryInitializeBackend(
         break :blk false;
     };
 
-    if (!started and !coord.hasSession()) {
+    if (!started) {
         logger.warn("Backend failed to start", .{});
         logger.info("Continuing in display-server-only mode", .{});
         coord.deinit();
@@ -91,6 +97,56 @@ fn tryInitializeBackend(
 
     logger.info("Selected runtime backends initialized successfully", .{});
     return coord;
+}
+
+fn selectedBackendType(nested: bool, physical_input: bool) backend.Type {
+    if (nested) return .wayland;
+    if (physical_input) return .drm;
+    return .null;
+}
+
+fn startSelectedBackend(
+    allocator: std.mem.Allocator,
+    comp: *compositor.Compositor,
+    logger: *cli.Logger,
+    enable_backend: bool,
+    physical_input: bool,
+    parent_display: ?[:0]const u8,
+    own_socket: []const u8,
+) ?*backend.Coordinator {
+    const nested = backend.wayland.shouldStartNested(enable_backend, parent_display, own_socket);
+    const has_parent_display = backend.wayland.isUsableParentDisplay(parent_display, own_socket);
+    const has_parent = backend.drm.hasLiveParentCompositor(
+        has_parent_display,
+        core.env.get("XDG_SESSION_TYPE"),
+    );
+    const native = backend.drm.shouldStartNative(physical_input, has_parent);
+
+    if (enable_backend and !nested) {
+        logger.err("Nested backend requires a parent Wayland compositor", .{});
+        logger.info("WAYLAND_DISPLAY is unset or points at this process", .{});
+        logger.info("Continuing in display-server-only mode", .{});
+    }
+    if (physical_input and nested) {
+        logger.info("Ignoring --physical-input in nested Wayland mode", .{});
+    }
+    if (physical_input and has_parent and !nested) {
+        logger.err("Refusing native DRM while a parent compositor is running", .{});
+        logger.info("Switch to a TTY and unset WAYLAND_DISPLAY and XDG_SESSION_TYPE=wayland", .{});
+    }
+
+    if (nested) {
+        return tryInitializeBackend(allocator, comp, logger, true, false, parent_display, own_socket);
+    }
+    if (native) {
+        logger.info("Starting native DRM backend with physical input", .{});
+        return tryInitializeBackend(allocator, comp, logger, false, true, parent_display, own_socket);
+    }
+    if (!enable_backend and !physical_input) {
+        logger.info("Backend disabled - running in display-server-only mode", .{});
+        logger.info("Use --backend for nested Wayland or --physical-input for native DRM", .{});
+    }
+    return null;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -110,7 +166,7 @@ pub fn main(init: std.process.Init) !void {
     try parser.registerBoolOption("verbose", "v", "Enable verbose output");
     try parser.registerBoolOption("help", "h", "Show help message");
     try parser.registerBoolOption("backend", "b", "Enable backend for nested mode (Wayland)");
-    try parser.registerBoolOption("physical-input", "p", "Enable the physical libinput session");
+    try parser.registerBoolOption("physical-input", "p", "Enable native DRM and the physical libinput session");
     try parser.registerStringOption("output", "o", "Output file");
 
     // Try to parse, show help on error
@@ -187,11 +243,19 @@ pub fn main(init: std.process.Init) !void {
     try compositor.protocols.wl_subcompositor.register(comp);
     try compositor.protocols.xdg_activation.register(comp);
     try compositor.protocols.hidpi.register(comp);
-    logger.info("Registered core globals including fractional-scale and viewporter", .{});
+    try compositor.protocols.sideswipe_shell.register(comp);
+    try compositor.protocols.xdg_dialog.register(comp);
+    try compositor.protocols.xdg_decoration.register(comp);
+    try compositor.protocols.color.register(comp);
+    try compositor.protocols.tearing.register(comp);
+    try compositor.protocols.session_lock.register(comp);
+    try compositor.protocols.idle.register(comp);
+    logger.info("Registered core globals including fractional-scale, viewporter, dialog, decoration, and sideswipe_shell_v1", .{});
 
     // Initialize backend if requested
     const enable_backend = parser.getBool("backend") orelse false;
     const enable_physical_input = parser.getBool("physical-input") orelse false;
+    const parent_display = core.env.get("WAYLAND_DISPLAY");
     var coord: ?*backend.Coordinator = null;
     defer {
         comp.destroyClients();
@@ -199,24 +263,23 @@ pub fn main(init: std.process.Init) !void {
         if (coord) |c| c.deinit();
     }
 
-    if (enable_backend or enable_physical_input) {
-        coord = tryInitializeBackend(
-            allocator,
-            comp,
-            &logger,
-            enable_backend,
-            enable_physical_input,
-        );
-    } else {
-        logger.info("Backend disabled - running in display-server-only mode", .{});
-        logger.info("Use --backend flag to enable nested Wayland mode", .{});
-    }
+    coord = startSelectedBackend(
+        allocator,
+        comp,
+        &logger,
+        enable_backend,
+        enable_physical_input,
+        parent_display,
+        socket_name,
+    );
+
+    try compositor.protocols.sideswipe_shell.attach(comp);
 
     logger.info("Compositor ready!", .{});
     logger.info("Starting event loop...", .{});
-    logger.info("Press Ctrl+C to exit", .{});
+    logger.info("Press Super+Shift+Q or Ctrl+C to exit", .{});
 
-    // Run the main event loop
+    event_loop_running.store(true, .seq_cst);
     server.run();
 
     logger.info("Event loop terminated, cleaning up...", .{});

@@ -2,6 +2,7 @@
 //! Handles libseat, libinput, and udev integration for managing input devices and DRM cards
 
 const std = @import("std");
+const string = @import("core.string").string;
 const posix = std.posix;
 const core = @import("core");
 const cli = @import("core.cli");
@@ -54,22 +55,97 @@ pub const ChangeEvent = struct {
     } = .{},
 };
 
+/// True for primary DRM card nodes that belong to this session seat.
+pub fn isSessionKmsNode(devnode: string, id_seat: ?string, session_seat: string) bool {
+    if (!isCardNodeName(std.fs.path.basename(devnode))) return false;
+    if (session_seat.len == 0) return true;
+    return std.mem.eql(u8, id_seat orelse "seat0", session_seat);
+}
+
+/// Numeric id from DRM_CONNECTOR / CONNECTOR / sysattr, else sysname (`card0-DP-1`).
+pub fn parseUdevConnectorId(sysname: ?string, drm_connector: ?string, sysattr: ?string) u32 {
+    if (parseNumericConnectorId(drm_connector)) |id| return id;
+    if (parseNumericConnectorId(sysattr)) |id| return id;
+    return parseConnectorIdFromSysname(sysname orelse "") orelse 0;
+}
+
+/// Trailing type-id from a DRM connector sysname such as `card0-HDMI-A-1`.
+pub fn parseConnectorIdFromSysname(sysname: string) ?u32 {
+    if (!std.mem.startsWith(u8, sysname, "card")) return null;
+    const rest = sysname["card".len..];
+    const card_dash = std.mem.indexOfScalar(u8, rest, '-') orelse return null;
+    const card_digits = rest[0..card_dash];
+    if (card_digits.len == 0 or !allAsciiDigits(card_digits)) return null;
+    const suffix = rest[card_dash + 1 ..];
+    const type_dash = std.mem.lastIndexOfScalar(u8, suffix, '-') orelse return null;
+    const type_part = suffix[0..type_dash];
+    const id_part = suffix[type_dash + 1 ..];
+    if (type_part.len == 0) return null;
+    return parseNumericConnectorId(id_part);
+}
+
+pub fn parseNumericConnectorId(text: ?string) ?u32 {
+    const value = text orelse return null;
+    if (value.len == 0 or !allAsciiDigits(value)) return null;
+    return std.fmt.parseInt(u32, value, 10) catch null;
+}
+
+fn udevOptionalSpan(ptr: [*c]const u8) ?string {
+    if (ptr == null) return null;
+    const text = std.mem.span(ptr);
+    if (text.len == 0) return null;
+    return text;
+}
+
+fn udevChangeConnectorId(device: *udev_device) u32 {
+    return parseUdevConnectorId(
+        udevOptionalSpan(c.udev_device_get_sysname(device)),
+        udevConnectorProperty(device),
+        udevOptionalSpan(c.udev_device_get_sysattr_value(device, "id")),
+    );
+}
+
+fn udevConnectorProperty(device: *udev_device) ?string {
+    if (udevOptionalSpan(c.udev_device_get_property_value(device, "DRM_CONNECTOR"))) |value| return value;
+    return udevOptionalSpan(c.udev_device_get_property_value(device, "CONNECTOR"));
+}
+
+fn isCardNodeName(name: string) bool {
+    if (!std.mem.startsWith(u8, name, "card")) return false;
+    const digits = name["card".len..];
+    if (digits.len == 0) return false;
+    return allAsciiDigits(digits);
+}
+
+fn allAsciiDigits(text: string) bool {
+    for (text) |ch| {
+        if (!std.ascii.isDigit(ch)) return false;
+    }
+    return true;
+}
+
+fn udevSeatProperty(device: *udev_device) ?string {
+    const value = c.udev_device_get_property_value(device, "ID_SEAT") orelse return null;
+    return std.mem.span(value);
+}
+
+fn shouldDispatchSeatAfterOpen(has_handle: bool) bool {
+    return has_handle;
+}
+
 // Callback functions for C libraries
 
 /// Libseat seat enable/disable callback
 fn libseatHandleEnable(seat: ?*libseat, user_data: ?*anyopaque) callconv(.c) void {
     _ = seat;
     const session: *Type = @ptrCast(@alignCast(user_data orelse return));
-    session.active = true;
-    session.onReady();
+    session.handleSeatEnable();
 }
 
 fn libseatHandleDisable(seat: ?*libseat, user_data: ?*anyopaque) callconv(.c) void {
-    const handle = seat orelse return;
     const session: *Type = @ptrCast(@alignCast(user_data orelse return));
-    session.active = false;
-
-    // Disable all devices
+    session.handleSeatDisable();
+    const handle = seat orelse return;
     _ = c.libseat_disable_seat(handle);
 }
 
@@ -80,23 +156,57 @@ fn libinputOpenRestricted(path: [*c]const u8, flags: c_int, user_data: ?*anyopaq
 
     var device_id: c_int = undefined;
     const fd = c.libseat_open_device(handle, path, &device_id);
-
     if (fd < 0) return fd;
 
-    // Store device_id for later closing
-    // For now, just return the fd
-    _ = flags;
+    applySeatOpenFlags(fd, flags);
+
+    session.trackSeatDevice(fd, device_id) catch {
+        _ = c.libseat_close_device(handle, device_id);
+        return -1;
+    };
     return fd;
+}
+
+/// Map libinput open(2) flags to the posix bits we apply after libseat_open_device.
+fn seatOpenFlags(flags: c_int) posix.O {
+    const incoming: posix.O = @bitCast(@as(u32, @bitCast(flags)));
+    return .{
+        .CLOEXEC = incoming.CLOEXEC,
+        .NONBLOCK = incoming.NONBLOCK,
+    };
+}
+
+fn applySeatOpenFlags(fd: c_int, flags: c_int) void {
+    const wanted = seatOpenFlags(flags);
+    applyCloexecIfRequested(fd, wanted.CLOEXEC);
+    applyNonblockIfRequested(fd, wanted.NONBLOCK);
+}
+
+fn applyCloexecIfRequested(fd: c_int, enable: bool) void {
+    if (!enable) return;
+    const current = fcntlBits(fd, posix.F.GETFD, 0) orelse return;
+    _ = fcntlBits(fd, posix.F.SETFD, current | posix.FD_CLOEXEC);
+}
+
+fn applyNonblockIfRequested(fd: c_int, enable: bool) void {
+    if (!enable) return;
+    const current = fcntlBits(fd, posix.F.GETFL, 0) orelse return;
+    const bit = @as(u32, @bitCast(posix.O{ .NONBLOCK = true }));
+    _ = fcntlBits(fd, posix.F.SETFL, current | bit);
+}
+
+fn fcntlBits(fd: c_int, command: c_int, arg: usize) ?usize {
+    const result = posix.system.fcntl(fd, command, arg);
+    if (posix.errno(result) != .SUCCESS) return null;
+    return @intCast(result);
 }
 
 /// Libinput close_restricted callback
 fn libinputCloseRestricted(fd: c_int, user_data: ?*anyopaque) callconv(.c) void {
     const session: *Type = @ptrCast(@alignCast(user_data orelse return));
     const handle = session.libseat_handle orelse return;
-
-    // Find device_id for this fd and close it
-    // For simplicity, just close the fd directly
-    _ = c.libseat_close_device(handle, fd);
+    const device_id = session.untrackSeatDevice(fd) orelse return;
+    _ = c.libseat_close_device(handle, device_id);
 }
 
 /// Device (represents a DRM device opened through libseat)
@@ -104,14 +214,15 @@ pub const Device = struct {
     fd: i32 = -1,
     device_id: i32 = -1,
     dev: std.posix.dev_t = 0,
-    path: []const u8,
+    path: string,
     render_node_fd: i32 = -1,
+    claimed: bool = false,
     allocator: std.mem.Allocator,
     session: ?*Type = null,
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, sess: *Type, path: []const u8) !*Self {
+    pub fn init(allocator: std.mem.Allocator, sess: *Type, path: string) !*Self {
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
 
@@ -125,41 +236,73 @@ pub const Device = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        self.closeSeatFd();
         if (self.fd >= 0) {
             core.unix.close(self.fd);
+            self.fd = -1;
         }
         if (self.render_node_fd >= 0) {
             core.unix.close(self.render_node_fd);
+            self.render_node_fd = -1;
         }
         self.allocator.free(self.path);
         self.allocator.destroy(self);
+    }
+
+    fn closeSeatFd(self: *Self) void {
+        const sess = self.session orelse return;
+        const handle = sess.libseat_handle orelse return;
+        if (self.device_id < 0) return;
+        _ = c.libseat_close_device(handle, self.device_id);
+        self.device_id = -1;
+        self.fd = -1;
     }
 
     /// Check if device supports KMS (Kernel Mode Setting)
     pub fn supportsKms(self: *Self) bool {
         if (self.fd < 0) return false;
 
-        // Check if device has DRM capability
         const version = c.drmGetVersion(self.fd);
         if (version == null) return false;
         defer c.drmFreeVersion(version);
 
-        // Try to get DRM resources to verify KMS support
         const resources = c.drmModeGetResources(self.fd);
         if (resources == null) return false;
         defer c.drmModeFreeResources(resources);
 
-        // Device supports KMS if it has connectors and CRTCs
         return resources.*.count_connectors > 0 and resources.*.count_crtcs > 0;
     }
 
+    /// Open a DRM node through libseat.
+    pub fn open(allocator: std.mem.Allocator, sess: *Type, path: string) !*Self {
+        const handle = sess.libseat_handle orelse return error.NoSeat;
+        const path_z = try allocator.dupeZ(u8, path);
+        defer allocator.free(path_z);
+
+        var device_id: c_int = undefined;
+        const fd = c.libseat_open_device(handle, path_z.ptr, &device_id);
+        if (fd < 0) return error.OpenFailed;
+        errdefer _ = c.libseat_close_device(handle, device_id);
+
+        const self = try Self.init(allocator, sess, path);
+        self.fd = fd;
+        self.device_id = device_id;
+        return self;
+    }
+
     /// Open this device if it's a KMS device
-    pub fn openIfKms(allocator: std.mem.Allocator, sess: *Type, path: []const u8) !?*Self {
-        var device = try Self.init(allocator, sess, path);
+    pub fn openIfKms(allocator: std.mem.Allocator, sess: *Type, path: string) !?*Self {
+        for (sess.kms_devices.items) |existing| {
+            if (std.mem.eql(u8, existing.path, path)) return existing;
+        }
+
+        const device = Self.open(allocator, sess, path) catch return null;
         if (!device.supportsKms()) {
             device.deinit();
             return null;
         }
+        errdefer device.deinit();
+        try sess.kms_devices.append(sess.allocator, device);
         return device;
     }
 };
@@ -168,7 +311,7 @@ pub const Device = struct {
 pub const LibinputDevice = struct {
     device: *libinput_device,
     session: ?*Type = null,
-    name: []const u8,
+    name: string,
     allocator: std.mem.Allocator,
 
     // Input device interfaces (optional, depending on capabilities)
@@ -254,7 +397,7 @@ pub const LibinputDevice = struct {
 
 /// DRM card add event
 pub const AddDrmCardEvent = struct {
-    path: []const u8,
+    path: string,
 };
 
 /// Type manages seat, input, and device access
@@ -262,10 +405,11 @@ pub const Type = struct {
     allocator: std.mem.Allocator,
     active: bool = true,
     vt: u32 = 0, // 0 means unsupported
-    seat_name: []const u8,
+    seat_name: [:0]const u8,
 
-    // Session devices (DRM cards)
-    session_devices: std.ArrayList(*Device),
+    // KMS devices (DRM cards)
+    kms_devices: std.ArrayList(*Device),
+    seat_fds: std.ArrayList(SeatFd),
 
     // Libinput devices
     libinput_devices: std.ArrayList(*LibinputDevice),
@@ -291,6 +435,8 @@ pub const Type = struct {
     signal_touch_motion: Signal(TouchMotionEvent),
     signal_touch_cancel: Signal(TouchCancelEvent),
     signal_input_event: Signal(input.Event),
+    signal_seat_disable: Signal(void),
+    signal_seat_enable: Signal(void),
 
     const Self = @This();
 
@@ -301,7 +447,8 @@ pub const Type = struct {
         self.* = .{
             .allocator = allocator,
             .seat_name = "", // Will be set during initialization
-            .session_devices = std.ArrayList(*Device).empty,
+            .kms_devices = std.ArrayList(*Device).empty,
+            .seat_fds = std.ArrayList(SeatFd).empty,
             .libinput_devices = std.ArrayList(*LibinputDevice).empty,
             .signal_ready = Signal(void).init(allocator),
             .signal_device_change = Signal(ChangeEvent).init(allocator),
@@ -316,6 +463,8 @@ pub const Type = struct {
             .signal_touch_motion = Signal(TouchMotionEvent).init(allocator),
             .signal_touch_cancel = Signal(TouchCancelEvent).init(allocator),
             .signal_input_event = Signal(input.Event).init(allocator),
+            .signal_seat_disable = Signal(void).init(allocator),
+            .signal_seat_enable = Signal(void).init(allocator),
         };
 
         return self;
@@ -336,6 +485,8 @@ pub const Type = struct {
         self.signal_touch_motion.deinit();
         self.signal_touch_cancel.deinit();
         self.signal_input_event.deinit();
+        self.signal_seat_disable.deinit();
+        self.signal_seat_enable.deinit();
 
         if (self.input_manager) |*manager| manager.deinit();
         self.input_manager = null;
@@ -347,15 +498,19 @@ pub const Type = struct {
         self.libinput_devices.deinit(self.allocator);
 
         // Clean up session devices
-        for (self.session_devices.items) |device| {
+        for (self.kms_devices.items) |device| {
             device.deinit();
         }
-        self.session_devices.deinit(self.allocator);
+        self.kms_devices.deinit(self.allocator);
 
-        // Clean up external library handles
+        // libinput_unref closes devices via close_restricted, which uses seat_fds.
         if (self.libinput_handle) |handle| {
             _ = c.libinput_unref(handle);
+            self.libinput_handle = null;
         }
+        self.closeRemainingSeatDevices();
+        self.seat_fds.deinit(self.allocator);
+
         if (self.libseat_handle) |handle| {
             _ = c.libseat_close_seat(handle);
         }
@@ -392,7 +547,7 @@ pub const Type = struct {
         // Get seat name
         const seat_name_ptr = c.libseat_seat_name(session.libseat_handle);
         if (seat_name_ptr) |ptr| {
-            session.seat_name = try allocator.dupe(u8, std.mem.span(ptr));
+            session.seat_name = try allocator.dupeZ(u8, std.mem.span(ptr));
         }
 
         // Initialize udev
@@ -421,7 +576,7 @@ pub const Type = struct {
             return error.LibinputInitFailed;
         }
 
-        const seat_name_cstr = if (session.seat_name.len > 0) session.seat_name.ptr else "seat0";
+        const seat_name_cstr: [*:0]const u8 = if (session.seat_name.len > 0) session.seat_name.ptr else "seat0";
         if (c.libinput_udev_assign_seat(session.libinput_handle, seat_name_cstr) != 0) {
             return error.LibinputAssignSeatFailed;
         }
@@ -429,6 +584,10 @@ pub const Type = struct {
             allocator,
             @ptrCast(session.libinput_handle.?),
         );
+
+        if (shouldDispatchSeatAfterOpen(session.libseat_handle != null)) {
+            session.dispatchLibseatEvents();
+        }
 
         return session;
     }
@@ -477,6 +636,32 @@ pub const Type = struct {
         return c.libseat_switch_session(handle, @intCast(vt)) == 0;
     }
 
+    /// Remember the libseat device id that belongs to an opened fd.
+    fn trackSeatDevice(self: *Self, fd: i32, device_id: i32) !void {
+        try self.seat_fds.append(self.allocator, .{ .fd = fd, .device_id = device_id });
+    }
+
+    /// Forget an opened fd and return its libseat device id.
+    fn untrackSeatDevice(self: *Self, fd: i32) ?i32 {
+        for (self.seat_fds.items, 0..) |entry, index| {
+            if (entry.fd != fd) continue;
+            _ = self.seat_fds.swapRemove(index);
+            return entry.device_id;
+        }
+        return null;
+    }
+
+    fn closeRemainingSeatDevices(self: *Self) void {
+        const handle = self.libseat_handle orelse {
+            self.seat_fds.clearRetainingCapacity();
+            return;
+        };
+        for (self.seat_fds.items) |entry| {
+            _ = c.libseat_close_device(handle, entry.device_id);
+        }
+        self.seat_fds.clearRetainingCapacity();
+    }
+
     /// Called when session is ready
     pub fn onReady(self: *Self) void {
         self.enumerateExistingDrmDevices();
@@ -484,6 +669,45 @@ pub const Type = struct {
         // Emit ready signal to backend
         cli.log.debug("Session ready - emitting signal", .{});
         self.signal_ready.emit({});
+    }
+
+    /// Collect KMS devices for the current seat.
+    pub fn collectKmsDevices(self: *Self, allocator: std.mem.Allocator) ![]const *Device {
+        const udev_ctx = self.udev_handle orelse return error.UdevNotInitialized;
+        const enumerate = c.udev_enumerate_new(udev_ctx) orelse return error.UdevEnumerateFailed;
+        defer _ = c.udev_enumerate_unref(enumerate);
+
+        _ = c.udev_enumerate_add_match_subsystem(enumerate, "drm");
+        _ = c.udev_enumerate_add_match_sysname(enumerate, "card[0-9]*");
+        if (c.udev_enumerate_scan_devices(enumerate) != 0) return error.UdevScanFailed;
+
+        var devices = std.ArrayList(*Device).empty;
+        errdefer devices.deinit(allocator);
+
+        var entry = c.udev_enumerate_get_list_entry(enumerate);
+        while (entry != null) : (entry = c.udev_list_entry_get_next(entry)) {
+            self.collectKmsEntry(allocator, udev_ctx, entry, &devices) catch continue;
+        }
+        return devices.toOwnedSlice(allocator);
+    }
+
+    fn collectKmsEntry(
+        self: *Self,
+        allocator: std.mem.Allocator,
+        udev_ctx: *udev,
+        entry: ?*c.struct_udev_list_entry,
+        devices: *std.ArrayList(*Device),
+    ) !void {
+        const syspath = c.udev_list_entry_get_name(entry) orelse return;
+        const device = c.udev_device_new_from_syspath(udev_ctx, syspath) orelse return;
+        defer _ = c.udev_device_unref(device);
+
+        const devnode = c.udev_device_get_devnode(device) orelse return;
+        const path = std.mem.span(devnode);
+        if (!isSessionKmsNode(path, udevSeatProperty(device), self.seat_name)) return;
+
+        const opened = Device.openIfKms(allocator, self, path) catch return;
+        if (opened) |dev| try devices.append(allocator, dev);
     }
 
     /// Enumerate existing DRM devices via udev
@@ -509,8 +733,9 @@ pub const Type = struct {
         defer _ = c.udev_device_unref(device);
 
         const devnode = c.udev_device_get_devnode(device) orelse return;
-        const devnode_str = std.mem.span(devnode);
-        _ = Device.openIfKms(self.allocator, self, devnode_str) catch {};
+        const path = std.mem.span(devnode);
+        if (!isSessionKmsNode(path, udevSeatProperty(device), self.seat_name)) return;
+        _ = Device.openIfKms(self.allocator, self, path) catch {};
     }
 
     fn dispatchUdevEvents(self: *Self) void {
@@ -520,48 +745,95 @@ pub const Type = struct {
             const device = c.udev_monitor_receive_device(monitor) orelse break;
             defer _ = c.udev_device_unref(device);
 
-            const action_ptr = c.udev_device_get_action(device);
-            const devnode_ptr = c.udev_device_get_devnode(device);
-
-            if (action_ptr == null or devnode_ptr == null) continue;
-
+            const action_ptr = c.udev_device_get_action(device) orelse continue;
             const action = std.mem.span(action_ptr);
-            const devnode = std.mem.span(devnode_ptr);
+            const devnode = udevOptionalSpan(c.udev_device_get_devnode(device));
 
             if (std.mem.eql(u8, action, "add")) {
-                self.handleUdevAdd(devnode);
+                const path = devnode orelse continue;
+                self.handleUdevAdd(path);
             } else if (std.mem.eql(u8, action, "remove")) {
-                self.handleUdevRemove(devnode);
+                const path = devnode orelse continue;
+                self.handleUdevRemove(path);
             } else if (std.mem.eql(u8, action, "change")) {
-                self.handleUdevChange(devnode);
+                self.handleUdevChange(device);
             }
         }
     }
 
-    fn handleUdevAdd(self: *Self, devnode: []const u8) void {
+    fn handleUdevAdd(self: *Self, devnode: string) void {
+        if (!isSessionKmsNode(devnode, null, self.seat_name)) return;
         _ = Device.openIfKms(self.allocator, self, devnode) catch {};
     }
 
-    fn handleUdevRemove(self: *Self, devnode: []const u8) void {
-        for (self.session_devices.items, 0..) |dev, i| {
-            if (std.mem.eql(u8, dev.path, devnode)) {
-                _ = self.session_devices.swapRemove(i);
-                dev.deinit();
-                break;
-            }
-        }
+    fn handleUdevRemove(self: *Self, devnode: string) void {
+        const device = self.findKmsDeviceByPath(devnode) orelse return;
+        if (device.claimed) return;
+        self.releaseKmsDevice(device);
     }
 
-    fn handleUdevChange(self: *Self, devnode: []const u8) void {
-        cli.log.debug("Device changed: {s}", .{devnode});
-        const change_event = ChangeEvent{
+    /// Mark a KMS device as owned by a backend so udev remove will not close it.
+    pub fn claimKmsDevice(_: *Self, device: *Device) void {
+        device.claimed = true;
+    }
+
+    /// Drop a KMS device from the session list and close it.
+    pub fn releaseKmsDevice(self: *Self, device: *Device) void {
+        self.removeKmsDevice(device);
+        device.deinit();
+    }
+
+    fn removeKmsDevice(self: *Self, device: *Device) void {
+        const index = self.indexOfKmsDevice(device) orelse return;
+        _ = self.kms_devices.swapRemove(index);
+    }
+
+    fn indexOfKmsDevice(self: *Self, device: *Device) ?usize {
+        for (self.kms_devices.items, 0..) |item, index| {
+            if (item == device) return index;
+        }
+        return null;
+    }
+
+    fn findKmsDeviceByPath(self: *Self, path: string) ?*Device {
+        for (self.kms_devices.items) |device| {
+            if (std.mem.eql(u8, device.path, path)) return device;
+        }
+        return null;
+    }
+
+    fn handleSeatDisable(self: *Self) void {
+        self.active = false;
+        self.signal_seat_disable.emit({});
+        self.suspendLibinput();
+    }
+
+    fn handleSeatEnable(self: *Self) void {
+        self.active = true;
+        self.resumeLibinput();
+        self.signal_seat_enable.emit({});
+    }
+
+    fn suspendLibinput(self: *Self) void {
+        const handle = self.libinput_handle orelse return;
+        c.libinput_suspend(handle);
+    }
+
+    fn resumeLibinput(self: *Self) void {
+        const handle = self.libinput_handle orelse return;
+        _ = c.libinput_resume(handle);
+    }
+
+    fn handleUdevChange(self: *Self, device: *udev_device) void {
+        const connector_id = udevChangeConnectorId(device);
+        cli.log.debug("Device changed: connector_id={d}", .{connector_id});
+        self.signal_device_change.emit(.{
             .event_type = .hotplug,
             .hotplug = .{
-                .connector_id = 0, // Would need to parse from udev properties
+                .connector_id = connector_id,
                 .prop_id = 0,
             },
-        };
-        self.signal_device_change.emit(change_event);
+        });
     }
 
     fn dispatchLibinputEvents(self: *Self) void {
@@ -620,6 +892,7 @@ pub const Type = struct {
 
     fn dispatchLibseatEvents(self: *Self) void {
         const handle = self.libseat_handle orelse return;
+        if (c.libseat_get_fd(handle) < 0) return;
         _ = c.libseat_dispatch(handle, 0);
     }
 
@@ -785,6 +1058,7 @@ pub const Type = struct {
 
     fn emitPointerAxis(self: *Self, ptr_event: *c.struct_libinput_event_pointer, time_msec: u32, axis: u32, orientation: PointerAxisEvent.Orientation) void {
         const delta = c.libinput_event_pointer_get_axis_value(ptr_event, axis);
+        const discrete = c.libinput_event_pointer_get_axis_value_discrete(ptr_event, axis);
         const axis_source = c.libinput_event_pointer_get_axis_source(ptr_event);
 
         const source: PointerAxisEvent.AxisSource = switch (axis_source) {
@@ -802,7 +1076,7 @@ pub const Type = struct {
             .source = source,
             .orientation = orientation,
             .delta = delta,
-            .delta_discrete = 0,
+            .delta_discrete = @intFromFloat(discrete),
         });
     }
 
@@ -878,6 +1152,12 @@ pub const PollFd = struct {
     revents: i16 = 0,
 };
 
+/// Mapping from an opened fd to its libseat device id
+const SeatFd = struct {
+    fd: i32,
+    device_id: i32,
+};
+
 const testing = core.testing;
 
 // Tests
@@ -887,8 +1167,47 @@ test "Session - initialization" {
 
     try testing.expect(sess.active);
     try testing.expectEqual(@as(u32, 0), sess.vt);
-    try testing.expectEqual(@as(usize, 0), sess.session_devices.items.len);
+    try testing.expectEqual(@as(usize, 0), sess.kms_devices.items.len);
     try testing.expectEqual(@as(usize, 0), sess.libinput_devices.items.len);
+}
+
+test "Session - seat device tracking uses libseat ids not fds" {
+    var sess = try Type.init(testing.allocator);
+    defer sess.deinit();
+
+    try sess.trackSeatDevice(13, 2);
+    try sess.trackSeatDevice(14, 3);
+    try testing.expectEqual(@as(?i32, 2), sess.untrackSeatDevice(13));
+    try testing.expectEqual(@as(?i32, 3), sess.untrackSeatDevice(14));
+    try testing.expectEqual(@as(?i32, null), sess.untrackSeatDevice(13));
+    try testing.expectEqual(@as(usize, 0), sess.seat_fds.items.len);
+}
+
+test "Session - deinit with leftover seat fds is safe" {
+    var sess = try Type.init(testing.allocator);
+    try sess.trackSeatDevice(13, 2);
+    sess.deinit();
+}
+
+test "Device - openIfKms without a seat returns null" {
+    var sess = try Type.init(testing.allocator);
+    defer sess.deinit();
+
+    try testing.expectEqual(@as(?*Device, null), try Device.openIfKms(testing.allocator, sess, "/dev/dri/card0"));
+}
+
+test "Session - collectKmsDevices without udev fails" {
+    var sess = try Type.init(testing.allocator);
+    defer sess.deinit();
+
+    try testing.expectError(error.UdevNotInitialized, sess.collectKmsDevices(testing.allocator));
+}
+
+test "Device - open without a seat fails" {
+    var sess = try Type.init(testing.allocator);
+    defer sess.deinit();
+
+    try testing.expectError(error.NoSeat, Device.open(testing.allocator, sess, "/dev/dri/card0"));
 }
 
 test "Device - basic initialization" {
@@ -1129,4 +1448,139 @@ test "Session - device change signal emission" {
 
     try testing.expect(State.called);
     try testing.expectEqual(ChangeEventType.lease, State.event_type);
+}
+
+test "parseConnectorIdFromSysname - success and failure" {
+    try testing.expectEqual(@as(?u32, 1), parseConnectorIdFromSysname("card0-DP-1"));
+    try testing.expectEqual(@as(?u32, 1), parseConnectorIdFromSysname("card0-HDMI-A-1"));
+    try testing.expectEqual(@as(?u32, 2), parseConnectorIdFromSysname("card1-eDP-2"));
+    try testing.expectEqual(@as(?u32, 1), parseConnectorIdFromSysname("card10-DVI-D-1"));
+    try testing.expectEqual(@as(?u32, null), parseConnectorIdFromSysname(""));
+    try testing.expectEqual(@as(?u32, null), parseConnectorIdFromSysname("card0"));
+    try testing.expectEqual(@as(?u32, null), parseConnectorIdFromSysname("card0-"));
+    try testing.expectEqual(@as(?u32, null), parseConnectorIdFromSysname("DP-1"));
+    try testing.expectEqual(@as(?u32, null), parseConnectorIdFromSysname("renderD128"));
+    try testing.expectEqual(@as(?u32, null), parseConnectorIdFromSysname("card0-DP-"));
+    try testing.expectEqual(@as(?u32, null), parseConnectorIdFromSysname("card-DP-1"));
+    try testing.expectEqual(@as(?u32, null), parseConnectorIdFromSysname("cardX-DP-1"));
+}
+
+test "parseUdevConnectorId - prefers DRM_CONNECTOR then sysattr then sysname" {
+    try testing.expectEqual(@as(u32, 42), parseUdevConnectorId("card0-DP-1", "42", "7"));
+    try testing.expectEqual(@as(u32, 7), parseUdevConnectorId("card0-DP-1", null, "7"));
+    try testing.expectEqual(@as(u32, 1), parseUdevConnectorId("card0-DP-1", "not-a-number", null));
+    try testing.expectEqual(@as(u32, 0), parseUdevConnectorId(null, null, null));
+    try testing.expectEqual(@as(u32, 0), parseUdevConnectorId("card0", "", "x"));
+    try testing.expectEqual(@as(?u32, null), parseNumericConnectorId(""));
+    try testing.expectEqual(@as(?u32, 0), parseNumericConnectorId("0"));
+}
+
+test "Session - isSessionKmsNode accepts card nodes and seat rules" {
+    try testing.expect(isSessionKmsNode("/dev/dri/card0", "seat0", "seat0"));
+    try testing.expect(isSessionKmsNode("/dev/dri/card12", "seat0", "seat0"));
+    try testing.expect(!isSessionKmsNode("/dev/dri/renderD128", "seat0", "seat0"));
+    try testing.expect(!isSessionKmsNode("/dev/dri/controlD64", "seat0", "seat0"));
+    try testing.expect(!isSessionKmsNode("", "seat0", "seat0"));
+    try testing.expect(!isSessionKmsNode("control", "seat0", "seat0"));
+    try testing.expect(!isSessionKmsNode("/dev/dri/card0", "seat1", "seat0"));
+    try testing.expect(isSessionKmsNode("/dev/dri/card0", null, "seat0"));
+    try testing.expect(!isSessionKmsNode("/dev/dri/card0", null, "seat1"));
+    try testing.expect(isSessionKmsNode("/dev/dri/card0", "seat1", ""));
+    try testing.expect(!isSessionKmsNode("/dev/dri/renderD128", "seat1", ""));
+}
+
+test "Session - disable and enable handlers emit signals without enumerating" {
+    var sess = try Type.init(testing.allocator);
+    defer sess.deinit();
+
+    const State = struct {
+        var seq: [2]u8 = .{ 0, 0 };
+        var n: usize = 0;
+
+        fn onDisable(_: ?*anyopaque) void {
+            seq[n] = 1;
+            n += 1;
+        }
+
+        fn onEnable(_: ?*anyopaque) void {
+            seq[n] = 2;
+            n += 1;
+        }
+    };
+    State.seq = .{ 0, 0 };
+    State.n = 0;
+
+    var disable_listener = try sess.signal_seat_disable.listen(State.onDisable, null);
+    defer disable_listener.deinit();
+    var enable_listener = try sess.signal_seat_enable.listen(State.onEnable, null);
+    defer enable_listener.deinit();
+
+    try testing.expectEqual(@as(usize, 1), sess.signal_seat_disable.listeners.items.len);
+    try testing.expectEqual(@as(usize, 1), sess.signal_seat_enable.listeners.items.len);
+
+    libseatHandleDisable(null, @ptrCast(sess));
+    try testing.expectFalse(sess.active);
+    try testing.expectEqual(@as(usize, 1), State.n);
+    try testing.expectEqual(@as(u8, 1), State.seq[0]);
+    try testing.expectEqual(@as(usize, 0), sess.kms_devices.items.len);
+
+    libseatHandleEnable(null, @ptrCast(sess));
+    try testing.expect(sess.active);
+    try testing.expectEqual(@as(usize, 2), State.n);
+    try testing.expectEqual(@as(u8, 2), State.seq[1]);
+    try testing.expectEqual(@as(usize, 0), sess.kms_devices.items.len);
+}
+
+test "Session - claimed devices survive udev remove" {
+    var sess = try Type.init(testing.allocator);
+    defer sess.deinit();
+
+    const claimed = try Device.init(testing.allocator, sess, "/dev/dri/card0");
+    try sess.kms_devices.append(sess.allocator, claimed);
+    sess.claimKmsDevice(claimed);
+
+    const unclaimed = try Device.init(testing.allocator, sess, "/dev/dri/card1");
+    try sess.kms_devices.append(sess.allocator, unclaimed);
+
+    sess.handleUdevRemove("/dev/dri/card0");
+    try testing.expectEqual(@as(usize, 2), sess.kms_devices.items.len);
+    try testing.expect(claimed.claimed);
+
+    sess.handleUdevRemove("/dev/dri/card1");
+    try testing.expectEqual(@as(usize, 1), sess.kms_devices.items.len);
+    try testing.expectEqual(claimed, sess.kms_devices.items[0]);
+}
+
+test "Session - releaseKmsDevice removes from list and is safe if already gone" {
+    var sess = try Type.init(testing.allocator);
+    defer sess.deinit();
+
+    const device = try Device.init(testing.allocator, sess, "/dev/dri/card0");
+    try sess.kms_devices.append(sess.allocator, device);
+    sess.releaseKmsDevice(device);
+    try testing.expectEqual(@as(usize, 0), sess.kms_devices.items.len);
+
+    const orphan = try Device.init(testing.allocator, sess, "/dev/dri/card1");
+    sess.releaseKmsDevice(orphan);
+    try testing.expectEqual(@as(usize, 0), sess.kms_devices.items.len);
+}
+
+test "Session - dispatch after open is skipped without a seat handle" {
+    try testing.expect(shouldDispatchSeatAfterOpen(true));
+    try testing.expect(!shouldDispatchSeatAfterOpen(false));
+
+    var sess = try Type.init(testing.allocator);
+    defer sess.deinit();
+    sess.dispatchPendingEventsAsync();
+}
+
+test "Session - seatOpenFlags maps CLOEXEC and NONBLOCK" {
+    const both_bits = @as(u32, @bitCast(posix.O{ .CLOEXEC = true, .NONBLOCK = true }));
+    const both = seatOpenFlags(@bitCast(both_bits));
+    try testing.expect(both.CLOEXEC);
+    try testing.expect(both.NONBLOCK);
+
+    const none = seatOpenFlags(0);
+    try testing.expect(!none.CLOEXEC);
+    try testing.expect(!none.NONBLOCK);
 }

@@ -1,6 +1,7 @@
 //! Protocol implementation
 
 const std = @import("std");
+const string = @import("core.string").string;
 const core = @import("core");
 
 /// Current protocol version
@@ -40,7 +41,7 @@ pub const Type = enum(u8) {
     /// Generic protocol message, bidirectional (params: uint -> object ID, uint -> method ID, data...)
     generic_protocol_message = 100,
 
-    pub fn toString(self: Type) []const u8 {
+    pub fn toString(self: Type) string {
         return switch (self) {
             .invalid => "INVALID",
             .sup => "SUP",
@@ -101,14 +102,14 @@ pub const VarInt = struct {
 
 /// Protocol specification identifier
 pub const ProtocolSpec = struct {
-    name: []const u8,
+    name: string,
     version: u32,
 
     pub fn format(self: ProtocolSpec, allocator: std.mem.Allocator) ![]u8 {
         return try std.fmt.allocPrint(allocator, "{s}@{d}", .{ self.name, self.version });
     }
 
-    pub fn parse(spec_str: []const u8) !ProtocolSpec {
+    pub fn parse(spec_str: string) !ProtocolSpec {
         const at_pos = std.mem.indexOf(u8, spec_str, "@") orelse return error.InvalidProtocolSpec;
         const name = spec_str[0..at_pos];
         const version_str = spec_str[at_pos + 1 ..];

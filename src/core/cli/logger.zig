@@ -55,9 +55,13 @@ pub const Logger = struct {
 
     // Rolling log buffer
     rolling_log: std.ArrayList(u8),
+    append_sink: ?AppendSink = null,
+    append_sink_userdata: ?*anyopaque = null,
 
     const Self = @This();
-    const ROLLING_LOG_SIZE: usize = 4096;
+    pub const rolling_cap: usize = 4096;
+    pub const AppendSink = *const fn (?*anyopaque) void;
+    const ROLLING_LOG_SIZE: usize = rolling_cap;
 
     /// Initialize a new logger with default settings
     pub fn init(allocator: std.mem.Allocator) Self {
@@ -158,59 +162,69 @@ pub const Logger = struct {
         return self.rolling_log.items;
     }
 
-    /// Log a message at the specified level
-    pub fn log(self: *Self, level: LogLevel, comptime fmt: []const u8, args: anytype) void {
-        // Quick check without lock for optimization
-        if (@intFromEnum(level) < @intFromEnum(self.log_level)) {
-            return;
-        }
-        if (!self.stdout_enabled and !self.file_enabled and !self.rolling_enabled) {
-            return;
-        }
-
+    /// Copies the newest rolling bytes into dest. Safe after the lock drops.
+    pub fn copyRolling(self: *Self, dest: []u8) usize {
         self.mutex.lockUncancelable(std.Options.debug_io);
         defer self.mutex.unlock(std.Options.debug_io);
-
-        // Double-check with lock held
-        if (@intFromEnum(level) < @intFromEnum(self.log_level)) {
-            return;
+        const src = self.rolling_log.items;
+        if (src.len == 0 or dest.len == 0) return 0;
+        if (src.len <= dest.len) {
+            @memcpy(dest[0..src.len], src);
+            return src.len;
         }
+        @memcpy(dest, src[src.len - dest.len ..]);
+        return dest.len;
+    }
+
+    pub fn setAppendSink(self: *Self, sink: ?AppendSink, userdata: ?*anyopaque) void {
+        self.append_sink = sink;
+        self.append_sink_userdata = userdata;
+    }
+
+    /// Log a message at the specified level
+    pub fn log(self: *Self, level: LogLevel, comptime fmt: []const u8, args: anytype) void {
+        if (@intFromEnum(level) < @intFromEnum(self.log_level)) return;
+        if (!self.stdout_enabled and !self.file_enabled and !self.rolling_enabled) return;
+        if (!self.writeLocked(level, fmt, args)) return;
+        self.notifyAppend();
+    }
+
+    fn notifyAppend(self: *Self) void {
+        const sink = self.append_sink orelse return;
+        sink(self.append_sink_userdata);
+    }
+
+    fn writeLocked(self: *Self, level: LogLevel, comptime fmt: []const u8, args: anytype) bool {
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
+        if (@intFromEnum(level) < @intFromEnum(self.log_level)) return false;
 
         var buffer: std.Io.Writer.Allocating = .init(self.allocator);
         defer buffer.deinit();
-        const writer = &buffer.writer;
+        self.buildLogMessage(&buffer.writer, level, fmt, args) catch return false;
+        const message = buffer.writer.buffered();
 
-        // Build the log message
-        self.buildLogMessage(writer, level, fmt, args) catch return;
+        if (self.stdout_enabled) self.writeToStdout(level, message) catch {};
+        self.writeFile(level, message);
+        if (!self.rolling_enabled) return false;
 
-        const message = writer.buffered();
+        const prefix = level.toString();
+        var rolling_buffer: std.Io.Writer.Allocating = .init(self.allocator);
+        defer rolling_buffer.deinit();
+        rolling_buffer.writer.print("{s} ]: {s}", .{ prefix, message }) catch return false;
+        self.appendToRolling(rolling_buffer.writer.buffered()) catch {};
+        return @intFromEnum(level) >= @intFromEnum(LogLevel.info);
+    }
 
-        // Output to stdout
-        if (self.stdout_enabled) {
-            self.writeToStdout(level, message) catch {};
-        }
-
-        // Output to file
-        if (self.file_enabled) {
-            if (self.log_file) |file| {
-                const prefix = level.toString();
-                var file_buffer: [4096]u8 = undefined;
-                var file_writer = file.writer(std.Options.debug_io, &file_buffer);
-                var file_io = &file_writer.interface;
-                file_io.print("{s} ]: {s}\n", .{ prefix, message }) catch {};
-                file_io.flush() catch {};
-            }
-        }
-
-        // Append to rolling log
-        if (self.rolling_enabled) {
-            const prefix = level.toString();
-            var rolling_buffer: std.Io.Writer.Allocating = .init(self.allocator);
-            defer rolling_buffer.deinit();
-
-            rolling_buffer.writer.print("{s} ]: {s}", .{ prefix, message }) catch return;
-            self.appendToRolling(rolling_buffer.writer.buffered()) catch {};
-        }
+    fn writeFile(self: *Self, level: LogLevel, message: []const u8) void {
+        if (!self.file_enabled) return;
+        const file = self.log_file orelse return;
+        const prefix = level.toString();
+        var file_buffer: [4096]u8 = undefined;
+        var file_writer = file.writer(std.Options.debug_io, &file_buffer);
+        var file_io = &file_writer.interface;
+        file_io.print("{s} ]: {s}\n", .{ prefix, message }) catch {};
+        file_io.flush() catch {};
     }
 
     /// Build the formatted log message
@@ -500,6 +514,39 @@ test "Logger - rolling log size limit" {
     try testing.expect(rolling.len < Logger.ROLLING_LOG_SIZE);
     // Test that trimming is done correctly - should start with ERR
     try testing.expect(std.mem.startsWith(u8, rolling, "ERR"));
+}
+
+test "Logger - copyRolling returns a stable snapshot" {
+    const testing = std.testing;
+    var logger = Logger.init(testing.allocator);
+    defer logger.deinit();
+    logger.setEnableStdout(false);
+    logger.setEnableRolling(true);
+    logger.info("stable", .{});
+
+    var dest: [64]u8 = undefined;
+    const n = logger.copyRolling(&dest);
+    try testing.expect(std.mem.indexOf(u8, dest[0..n], "INFO ]: stable") != null);
+}
+
+test "Logger - append sink fires after info and not debug" {
+    const testing = std.testing;
+    const Counter = struct {
+        count: usize = 0,
+        fn onAppend(userdata: ?*anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            self.count += 1;
+        }
+    };
+    var logger = Logger.init(testing.allocator);
+    defer logger.deinit();
+    logger.setEnableStdout(false);
+    logger.setEnableRolling(true);
+    var counter = Counter{};
+    logger.setAppendSink(Counter.onAppend, &counter);
+    logger.debug("skip", .{});
+    logger.info("show", .{});
+    try testing.expectEqual(@as(usize, 1), counter.count);
 }
 
 test "LoggerConnection - basic usage" {

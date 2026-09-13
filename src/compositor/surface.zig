@@ -108,6 +108,8 @@ pub const Role = enum {
     xdg_popup,
     subsurface,
     cursor,
+    session_lock,
+    shell,
 };
 
 /// Main surface structure
@@ -183,10 +185,19 @@ pub const Surface = struct {
     viewport_resource: ?*c.wl_resource = null,
     /// XDG surface object, at most one per wl_surface.
     xdg_surface_resource: ?*c.wl_resource = null,
+    color_surface: ?*c.wl_resource = null,
+    color_representation: ?*c.wl_resource = null,
+    tearing_control: ?*c.wl_resource = null,
+    color_intent: @import("color.zig").Intent = .{},
+    pending_color_intent: ?@import("color.zig").Intent = null,
+    tearing_async: bool = false,
     map_handler: ?*const fn (*Surface, bool) void = null,
+    commit_handler: ?*const fn (*Surface) void = null,
     close_context: ?*anyopaque = null,
     close_handler: ?*const fn (*anyopaque) void = null,
     scene_geometry: ?struct { x: i32, y: i32, width: i32, height: i32 } = null,
+    /// When set, pointer hit-test skips this surface and keyboard focus is refused.
+    input_inert: bool = false,
 
     const Self = @This();
 
@@ -239,6 +250,18 @@ pub const Surface = struct {
         }
         if (self.fractional_scale_resource) |resource| {
             self.fractional_scale_resource = null;
+            c.wl_resource_destroy(resource);
+        }
+        if (self.color_surface) |resource| {
+            self.color_surface = null;
+            c.wl_resource_destroy(resource);
+        }
+        if (self.color_representation) |resource| {
+            self.color_representation = null;
+            c.wl_resource_destroy(resource);
+        }
+        if (self.tearing_control) |resource| {
+            self.tearing_control = null;
             c.wl_resource_destroy(resource);
         }
         if (self.subsurface_resource) |resource| {
@@ -605,6 +628,11 @@ pub const Surface = struct {
     }
 
     fn finishAppliedCommit(self: *Self) void {
+        if (self.pending_color_intent) |intent| {
+            self.color_intent = intent;
+            self.pending_color_intent = null;
+        }
+        if (self.commit_handler) |handler| handler(self);
         const was_mapped = self.mapped;
         self.mapped = self.current.buffer.buffer != null;
         if (was_mapped != self.mapped) {
@@ -1004,7 +1032,7 @@ pub const TestFixture = struct {
     logger: @import("core.cli").Logger,
     compositor: *Compositor,
 
-    pub fn setup(allocator: std.mem.Allocator) !TestFixture {
+    pub fn setup(allocator: std.mem.Allocator) !*TestFixture {
         const wayland = @import("wayland");
         const cli = @import("core.cli");
 
@@ -1014,7 +1042,9 @@ pub const TestFixture = struct {
         var server = try wayland.Server.init(allocator, null);
         errdefer server.deinit();
 
-        var fixture = TestFixture{
+        const fixture = try allocator.create(TestFixture);
+        errdefer allocator.destroy(fixture);
+        fixture.* = .{
             .allocator = allocator,
             .runtime = runtime,
             .server = server,
@@ -1037,6 +1067,7 @@ pub const TestFixture = struct {
         self.logger.deinit();
         self.server.deinit();
         self.runtime.cleanup();
+        self.allocator.destroy(self);
     }
 };
 
@@ -1070,6 +1101,24 @@ test "Surface - attach and commit" {
     try testing.expectEqual(dummy_buffer, surface.current.buffer.buffer);
     try testing.expectEqual(@as(?*c.wl_resource, null), surface.pending.buffer.buffer);
     try testing.expect(surface.mapped);
+    surface.current.buffer.needs_release = false;
+}
+
+test "Surface - color intent applies on commit" {
+    var fixture = try TestFixture.setup(testing.allocator);
+    defer fixture.cleanup();
+    var surface = try Surface.init(testing.allocator, fixture.compositor, 1);
+    defer surface.deinit();
+
+    const hdr = @import("color.zig");
+    surface.pending_color_intent = .{ .transfer = .pq, .bt2020 = true };
+    try testing.expect(!surface.color_intent.isHdr());
+    var dummy_resource: u32 = 2;
+    attachTestBuffer(surface, @ptrCast(@alignCast(&dummy_resource)));
+    surface.commit();
+    try testing.expect(surface.color_intent.isHdr());
+    try testing.expectEqual(hdr.Transfer.pq, surface.color_intent.transfer);
+    try testing.expectEqual(@as(?hdr.Intent, null), surface.pending_color_intent);
     surface.current.buffer.needs_release = false;
 }
 

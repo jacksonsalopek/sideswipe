@@ -15,21 +15,37 @@ pub const Geometry = struct {
     height: i32,
 };
 
-pub const Width = enum {
-    quarter,
-    third,
-    half,
-    two_thirds,
-    full,
+/// Viewport fraction. Any positive finite ratio is allowed.
+pub const Width = struct {
+    ratio: f64 = 0.5,
+
+    pub const zoom_step_units: f64 = 120;
+    pub const zoom_step: f64 = 1.0 / 12.0;
+
+    pub const quarter: Width = .{ .ratio = 0.25 };
+    pub const third: Width = .{ .ratio = 1.0 / 3.0 };
+    pub const half: Width = .{ .ratio = 0.5 };
+    pub const two_thirds: Width = .{ .ratio = 2.0 / 3.0 };
+    pub const full: Width = .{ .ratio = 1.0 };
 
     pub fn pixels(self: Width, viewport_width: i32) i32 {
-        return switch (self) {
-            .quarter => @divTrunc(viewport_width, 4),
-            .third => @divTrunc(viewport_width, 3),
-            .half => @divTrunc(viewport_width, 2),
-            .two_thirds => @divTrunc(viewport_width * 2, 3),
-            .full => viewport_width,
-        };
+        std.debug.assert(std.math.isFinite(self.ratio) and self.ratio > 0);
+        if (viewport_width <= 0) return 1;
+        const width = @as(f64, @floatFromInt(viewport_width)) * self.ratio;
+        return @max(1, @as(i32, @intFromFloat(@round(width))));
+    }
+
+    /// One width step per 120 zoom units (I1/I2). Positive widens.
+    pub fn stepsFromZoom(delta: f64) i32 {
+        if (!std.math.isFinite(delta)) return 0;
+        return @intFromFloat(@trunc(delta / zoom_step_units));
+    }
+
+    pub fn adjust(self: Width, steps: i32) Width {
+        if (steps == 0) return self;
+        const next = self.ratio + @as(f64, @floatFromInt(steps)) * zoom_step;
+        if (!std.math.isFinite(next) or next <= 0) return self;
+        return .{ .ratio = next };
     }
 };
 
@@ -210,4 +226,17 @@ test "strip layout is idempotent at fractional scales" {
 
     try testing.expectEqualSlices(Placement, first.placements.items, second.placements.items);
     try testing.expectEqual(first.viewport_x, second.viewport_x);
+}
+
+test "width zoom steps are 120 units and stay positive" {
+    try testing.expectEqual(@as(i32, 1), Width.stepsFromZoom(120));
+    try testing.expectEqual(@as(i32, -1), Width.stepsFromZoom(-120));
+    try testing.expectEqual(@as(i32, 2), Width.stepsFromZoom(240));
+    try testing.expectEqual(@as(i32, 0), Width.stepsFromZoom(119));
+    try testing.expectEqual(@as(i32, 0), Width.stepsFromZoom(std.math.nan(f64)));
+    try testing.expectApproxEqAbs(0.5 + Width.zoom_step, Width.half.adjust(1).ratio, 1e-12);
+    try testing.expectApproxEqAbs(0.5 - Width.zoom_step, Width.half.adjust(-1).ratio, 1e-12);
+    try testing.expectApproxEqAbs(1.0 + 3 * Width.zoom_step, Width.full.adjust(3).ratio, 1e-12);
+    const tiny: Width = .{ .ratio = Width.zoom_step / 2.0 };
+    try testing.expectEqual(tiny.ratio, tiny.adjust(-1).ratio);
 }

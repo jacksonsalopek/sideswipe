@@ -62,6 +62,18 @@ const GLuint = c.GLuint;
 const GLint = c.GLint;
 const GLenum = c.GLenum;
 
+/// DMA-BUF formats advertised for EGL import (8-bit plus H8 10-bit/float).
+pub const import_formats = [_]u32{
+    c.DRM_FORMAT_XRGB8888,
+    c.DRM_FORMAT_ARGB8888,
+    c.DRM_FORMAT_XBGR8888,
+    c.DRM_FORMAT_ABGR8888,
+    c.DRM_FORMAT_XRGB2101010,
+    c.DRM_FORMAT_XBGR2101010,
+    c.DRM_FORMAT_ARGB2101010,
+    c.DRM_FORMAT_ABGR16161616F,
+};
+
 /// OpenGL texture wrapper
 pub const GLTexture = struct {
     texid: GLuint = 0,
@@ -209,6 +221,10 @@ pub const Type = struct {
     formats: std.ArrayList(misc.GLFormat),
     primary_renderer: ?*Type = null, // For multi-GPU
     gbm_device: ?*c.struct_gbm_device = null,
+    compose_fb: ?MemoryFramebuffer = null,
+    compose_fb_width: i32 = 0,
+    compose_fb_height: i32 = 0,
+    compose_tex: GLTexture = .{},
 
     const Self = @This();
 
@@ -508,29 +524,20 @@ pub const Type = struct {
         // Query supported formats via EGL_EXT_image_dma_buf_import_modifiers
         const egl_formats = @import("egl_formats.zig");
 
-        // For now, add common formats that are widely supported
-        const common_formats = [_]struct { format: u32, modifier: u64 }{
-            .{ .format = @as(u32, @bitCast(@as(i32, 875713112))), .modifier = 0 }, // DRM_FORMAT_XRGB8888
-            .{ .format = @as(u32, @bitCast(@as(i32, 875713089))), .modifier = 0 }, // DRM_FORMAT_ARGB8888
-            .{ .format = @as(u32, @bitCast(@as(i32, 909199186))), .modifier = 0 }, // DRM_FORMAT_XBGR8888
-            .{ .format = @as(u32, @bitCast(@as(i32, 909199186))), .modifier = 0 }, // DRM_FORMAT_ABGR8888
-        };
-
-        for (common_formats) |fmt| {
-            // Verify format is in our pixel format database
-            if (egl_formats.getPixelFormatFromDRM(fmt.format)) |_| {
-                try self.formats.append(self.allocator, .{
-                    .drm_format = fmt.format,
-                    .modifier = fmt.modifier,
-                    .external = false,
-                });
-            }
+        for (import_formats) |format| {
+            if (egl_formats.getPixelFormatFromDRM(format) == null) continue;
+            try self.formats.append(self.allocator, .{
+                .drm_format = format,
+                .modifier = 0,
+                .external = false,
+            });
         }
 
         log.debug("Supported formats: {d}", .{self.formats.items.len});
     }
 
     pub fn deinit(self: *Self) void {
+        self.dropComposeScratch();
         self.shader.deinit();
         self.shader_ext.deinit();
         self.formats.deinit(self.allocator);
@@ -543,6 +550,51 @@ pub const Type = struct {
         const device = self.gbm_device orelse return;
         c.gbm_device_destroy(device);
         self.gbm_device = null;
+    }
+
+    fn ensureComposeFb(self: *Self, width: i32, height: i32) ?MemoryFramebuffer {
+        if (self.compose_fb) |fb| {
+            if (self.compose_fb_width == width and self.compose_fb_height == height) return fb;
+            fb.deinit();
+            self.compose_fb = null;
+        }
+        const fb = createMemoryFramebuffer(width, height) catch |err| {
+            log.err("Failed to create composition framebuffer: {}", .{err});
+            return null;
+        };
+        self.compose_fb = fb;
+        self.compose_fb_width = width;
+        self.compose_fb_height = height;
+        return fb;
+    }
+
+    fn dropComposeScratch(self: *Self) void {
+        if (self.compose_fb) |fb| fb.deinit();
+        self.compose_fb = null;
+        self.compose_fb_width = 0;
+        self.compose_fb_height = 0;
+        if (self.compose_tex.texid != 0 or self.compose_tex.image != null)
+            self.destroyTexture(self.compose_tex);
+        self.compose_tex = .{};
+    }
+
+    fn bindComposeTexture(self: *Self, attrs: buffer.DMABUFAttrs) !GLTexture {
+        if (self.compose_tex.texid == 0) {
+            self.compose_tex = try self.createTextureFromDMABUF(attrs);
+            return self.compose_tex;
+        }
+        const image = try self.createDmaImage(attrs);
+        if (self.compose_tex.image) |old| {
+            if (self.egl.display) |disp| destroyImage(disp, old);
+        }
+        bindImageToTexture(self.compose_tex.texid, self.compose_tex.target, image);
+        self.compose_tex.image = image;
+        return self.compose_tex;
+    }
+
+    fn createDmaImage(self: *Self, attrs: buffer.DMABUFAttrs) !EGLImage {
+        const display = self.egl.display orelse return error.NoEGLDisplay;
+        return createDmaImageOn(display, attrs);
     }
 
     /// Blit from one buffer to another (for multi-GPU or format conversion)
@@ -643,11 +695,7 @@ pub const Type = struct {
 
         var guard = ContextGuard.init(self);
         defer guard.deinit();
-        const framebuffer = createMemoryFramebuffer(width, height) catch |err| {
-            log.err("Failed to create composition framebuffer: {}", .{err});
-            return false;
-        };
-        defer framebuffer.deinit();
+        const framebuffer = self.ensureComposeFb(width, height) orelse return false;
 
         c.glBindFramebuffer(c.GL_FRAMEBUFFER, framebuffer.id);
         defer c.glBindFramebuffer(c.GL_FRAMEBUFFER, 0);
@@ -658,7 +706,7 @@ pub const Type = struct {
         c.glBlendFuncSeparate(c.GL_ONE, c.GL_ONE_MINUS_SRC_ALPHA, c.GL_ONE, c.GL_ONE_MINUS_SRC_ALPHA);
 
         for (layers) |layer| {
-            if (!self.drawLayer(layer, width, height)) return false;
+            if (!self.drawComposeLayer(layer, width, height)) return false;
         }
         c.glReadPixels(0, 0, width, height, c.GL_RGBA, c.GL_UNSIGNED_BYTE, out_rgba.ptr);
         return c.glGetError() == c.GL_NO_ERROR;
@@ -672,6 +720,20 @@ pub const Type = struct {
             return false;
         };
         defer self.destroyTexture(texture);
+        return self.submitLayer(layer, texture, target_width, target_height);
+    }
+
+    fn drawComposeLayer(self: *Self, layer: Layer, target_width: i32, target_height: i32) bool {
+        const attrs = layer.buffer.dmabuf();
+        if (!attrs.success or attrs.fds[0] < 0) return false;
+        const texture = self.bindComposeTexture(attrs) catch |err| {
+            log.err("Failed to import composition DMA-BUF: {}", .{err});
+            return false;
+        };
+        return self.submitLayer(layer, texture, target_width, target_height);
+    }
+
+    fn submitLayer(self: *Self, layer: Layer, texture: GLTexture, target_width: i32, target_height: i32) bool {
 
         const shader = if (texture.target == c.GL_TEXTURE_EXTERNAL_OES) &self.shader_ext else &self.shader;
         const projection = layerProjection(layer, target_width, target_height);
@@ -929,6 +991,53 @@ const MemoryFramebuffer = struct {
         c.glDeleteFramebuffers(1, &self.id);
     }
 };
+
+fn bindImageToTexture(texid: GLuint, target: GLenum, image: EGLImage) void {
+    c.glBindTexture(target, texid);
+    if (glImageTarget()) |bind| bind(target, image);
+    c.glTexParameteri(target, c.GL_TEXTURE_MIN_FILTER, c.GL_LINEAR);
+    c.glTexParameteri(target, c.GL_TEXTURE_MAG_FILTER, c.GL_LINEAR);
+    c.glTexParameteri(target, c.GL_TEXTURE_WRAP_S, c.GL_CLAMP_TO_EDGE);
+    c.glTexParameteri(target, c.GL_TEXTURE_WRAP_T, c.GL_CLAMP_TO_EDGE);
+    c.glBindTexture(target, 0);
+}
+
+fn glImageTarget() ?*const fn (c.GLenum, c.EGLImageKHR) callconv(.c) void {
+    return @ptrCast(c.eglGetProcAddress("glEGLImageTargetTexture2DOES"));
+}
+
+fn createDmaImageOn(display: EGLDisplay, attrs: buffer.DMABUFAttrs) !EGLImage {
+    const width: c.EGLint = @intFromFloat(attrs.size.getX());
+    const height: c.EGLint = @intFromFloat(attrs.size.getY());
+    const format: c.EGLint = @intCast(attrs.format);
+    if (attrs.planes <= 0 or attrs.planes > 4) return error.InvalidPlaneCount;
+    const plane_count: usize = @intCast(attrs.planes);
+    if (!planesReady(attrs, plane_count)) return error.InvalidPlane;
+    var image_attributes: [47]c.EGLAttrib = undefined;
+    var attribute_count: usize = 0;
+    appendAttribute(&image_attributes, &attribute_count, c.EGL_WIDTH, width);
+    appendAttribute(&image_attributes, &attribute_count, c.EGL_HEIGHT, height);
+    appendAttribute(&image_attributes, &attribute_count, c.EGL_LINUX_DRM_FOURCC_EXT, format);
+    for (0..plane_count) |plane| appendPlaneAttributes(&image_attributes, &attribute_count, attrs, plane);
+    image_attributes[attribute_count] = c.EGL_NONE;
+    const egl_create_image = @as(
+        ?*const fn (c.EGLDisplay, c.EGLContext, c.EGLenum, ?*anyopaque, [*c]const c.EGLAttrib) callconv(.c) c.EGLImageKHR,
+        @ptrCast(c.eglGetProcAddress("eglCreateImage")),
+    ) orelse return error.EGLExtensionNotSupported;
+    const image = egl_create_image(display, c.EGL_NO_CONTEXT, c.EGL_LINUX_DMA_BUF_EXT, null, &image_attributes);
+    if (image == null) {
+        log.err("eglCreateImage DMA-BUF import failed: EGL error 0x{x}", .{c.eglGetError()});
+        return error.EGLImageCreationFailed;
+    }
+    return image;
+}
+
+fn planesReady(attrs: buffer.DMABUFAttrs, plane_count: usize) bool {
+    for (0..plane_count) |plane| {
+        if (attrs.fds[plane] < 0 or attrs.strides[plane] == 0) return false;
+    }
+    return true;
+}
 
 fn createMemoryFramebuffer(width: i32, height: i32) !MemoryFramebuffer {
     var renderbuffer: GLuint = 0;
@@ -1192,6 +1301,13 @@ test "Renderer - layer projection maps logical rectangle to clip space" {
     try testing.expectEqual(@as(f32, -0.8), projection[4]);
     try testing.expectEqual(@as(f32, -0.8), projection[6]);
     try testing.expectEqual(@as(f32, 0.8), projection[7]);
+}
+
+test "Renderer - advertises 10-bit and float DMA-BUF import formats" {
+    try testing.expect(std.mem.indexOfScalar(u32, &import_formats, c.DRM_FORMAT_XRGB2101010) != null);
+    try testing.expect(std.mem.indexOfScalar(u32, &import_formats, c.DRM_FORMAT_XBGR2101010) != null);
+    try testing.expect(std.mem.indexOfScalar(u32, &import_formats, c.DRM_FORMAT_ARGB2101010) != null);
+    try testing.expect(std.mem.indexOfScalar(u32, &import_formats, c.DRM_FORMAT_ABGR16161616F) != null);
 }
 
 test "Renderer - DMA-BUF image attributes preserve modifier" {

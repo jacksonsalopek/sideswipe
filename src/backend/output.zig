@@ -222,8 +222,11 @@ pub const IOutput = struct {
         schedule_frame: *const fn (ptr: *anyopaque, reason: ScheduleReason) void,
         get_gamma_size: *const fn (ptr: *anyopaque) usize,
         get_degamma_size: *const fn (ptr: *anyopaque) usize,
+        set_buffer: *const fn (ptr: *anyopaque, buf: buffer.Interface) void,
         destroy: *const fn (ptr: *anyopaque) bool,
         deinit: *const fn (ptr: *anyopaque) void,
+        clear_frame_callback: *const fn (ptr: *anyopaque) void,
+        clear_destroy_callback: *const fn (ptr: *anyopaque) void,
     };
 
     const Self = @This();
@@ -280,12 +283,29 @@ pub const IOutput = struct {
         return self.base.vtable.get_degamma_size(self.base.ptr);
     }
 
+    pub fn setBuffer(self: Self, buf: buffer.Interface) void {
+        self.base.vtable.set_buffer(self.base.ptr, buf);
+    }
+
     pub fn destroy(self: Self) bool {
         return self.base.vtable.destroy(self.base.ptr);
     }
 
     pub fn deinit(self: Self) void {
         self.base.vtable.deinit(self.base.ptr);
+    }
+
+    pub fn clearFrameCallback(self: Self) void {
+        self.base.vtable.clear_frame_callback(self.base.ptr);
+    }
+
+    pub fn clearDestroyCallback(self: Self) void {
+        self.base.vtable.clear_destroy_callback(self.base.ptr);
+    }
+
+    pub fn clearCallbacks(self: Self) void {
+        self.clearFrameCallback();
+        self.clearDestroyCallback();
     }
 };
 
@@ -374,4 +394,124 @@ test "ScheduleReason - enum values" {
     try testing.expectEqual(@as(u32, 0), @intFromEnum(ScheduleReason.unknown));
     try testing.expectEqual(@as(u32, 6), @intFromEnum(ScheduleReason.damage));
     try testing.expectEqual(@as(u32, 11), @intFromEnum(ScheduleReason.animation_damage));
+}
+
+const CallbackProbe = struct {
+    frame: ?*const fn (userdata: ?*anyopaque) void = null,
+    frame_userdata: ?*anyopaque = null,
+    destroy: ?*const fn (userdata: ?*anyopaque) void = null,
+    destroy_userdata: ?*anyopaque = null,
+
+    fn iface(self: *@This()) IOutput {
+        return IOutput.init(self, &.{
+            .commit = stubCommit,
+            .test_commit = stubCommit,
+            .get_backend = stubBackend,
+            .get_render_formats = stubFormats,
+            .preferred_mode = stubMode,
+            .set_cursor = stubCursor,
+            .move_cursor = stubMove,
+            .set_cursor_visible = stubVisible,
+            .cursor_plane_size = stubSize,
+            .schedule_frame = stubSchedule,
+            .get_gamma_size = stubGamma,
+            .get_degamma_size = stubGamma,
+            .set_buffer = stubBuffer,
+            .destroy = destroyFn,
+            .deinit = stubDeinit,
+            .clear_frame_callback = clearFrameFn,
+            .clear_destroy_callback = clearDestroyFn,
+        });
+    }
+
+    fn invokeFrame(self: *const @This()) void {
+        const callback = self.frame orelse return;
+        callback(self.frame_userdata);
+    }
+
+    fn clearFrameFn(ptr: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        self.frame = null;
+        self.frame_userdata = null;
+    }
+
+    fn clearDestroyFn(ptr: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        self.destroy = null;
+        self.destroy_userdata = null;
+    }
+
+    fn destroyFn(ptr: *anyopaque) bool {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        const callback = self.destroy orelse return true;
+        callback(self.destroy_userdata);
+        return true;
+    }
+
+    fn stubCommit(_: *anyopaque) bool {
+        return true;
+    }
+
+    fn stubBackend(_: *anyopaque) ?*anyopaque {
+        return null;
+    }
+
+    fn stubFormats(_: *anyopaque) []const misc.DRMFormat {
+        return &.{};
+    }
+
+    fn stubMode(_: *anyopaque) ?*Mode {
+        return null;
+    }
+
+    fn stubCursor(_: *anyopaque, _: buffer.Interface, _: Vector2D) bool {
+        return false;
+    }
+
+    fn stubMove(_: *anyopaque, _: Vector2D, _: bool) void {}
+
+    fn stubVisible(_: *anyopaque, _: bool) void {}
+
+    fn stubSize(_: *anyopaque) Vector2D {
+        return .{};
+    }
+
+    fn stubSchedule(_: *anyopaque, _: ScheduleReason) void {}
+
+    fn stubGamma(_: *anyopaque) usize {
+        return 0;
+    }
+
+    fn stubBuffer(_: *anyopaque, _: buffer.Interface) void {}
+
+    fn stubDeinit(_: *anyopaque) void {}
+};
+
+fn markProbeFlag(userdata: ?*anyopaque) void {
+    const flag: *bool = @ptrCast(@alignCast(userdata orelse return));
+    flag.* = true;
+}
+
+test "IOutput - clearCallbacks is safe when no callback was set" {
+    var probe = CallbackProbe{};
+    probe.iface().clearCallbacks();
+    probe.invokeFrame();
+    try testing.expect(probe.iface().destroy());
+}
+
+test "IOutput - clearCallbacks drops frame and destroy userdata" {
+    var frame_fired = false;
+    var destroy_fired = false;
+    var probe = CallbackProbe{
+        .frame = markProbeFlag,
+        .frame_userdata = &frame_fired,
+        .destroy = markProbeFlag,
+        .destroy_userdata = &destroy_fired,
+    };
+
+    probe.iface().clearCallbacks();
+    probe.invokeFrame();
+    try testing.expect(probe.iface().destroy());
+    try testing.expect(!frame_fired);
+    try testing.expect(!destroy_fired);
 }

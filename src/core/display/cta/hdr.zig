@@ -68,7 +68,7 @@ pub const StaticMetadata = struct {
 
         // Desired content min luminance (optional, byte 4)
         if (data.len >= 5 and data[4] > 0) {
-            metadata.min_luminance_cdm2 = decodeMinLuminance(data[4]);
+            metadata.min_luminance_cdm2 = decodeMinLuminance(data[4], metadata.max_luminance_cdm2);
         }
 
         return metadata;
@@ -92,11 +92,11 @@ fn decodeLuminance(byte: u8) f32 {
     return 50.0 * std.math.pow(f32, 2.0, exponent);
 }
 
-/// Decode minimum luminance from byte
+/// Decode minimum luminance from byte (CTA-861-G 7.5.13)
 /// Formula: max_luminance * (byte/255)² / 100 cd/m²
-fn decodeMinLuminance(byte: u8) f32 {
+fn decodeMinLuminance(byte: u8, max_luminance_cdm2: f32) f32 {
     const normalized = @as(f32, @floatFromInt(byte)) / 255.0;
-    return normalized * normalized / 100.0;
+    return max_luminance_cdm2 * normalized * normalized / 100.0;
 }
 
 // Tests
@@ -132,6 +132,8 @@ test "HDR static metadata parsing - with luminance" {
     try testing.expect(hdr.max_luminance_cdm2 > 0);
     try testing.expect(hdr.max_frame_avg_luminance_cdm2 > 0);
     try testing.expect(hdr.min_luminance_cdm2 > 0);
+    const expected_min = hdr.max_luminance_cdm2 * (50.0 / 255.0) * (50.0 / 255.0) / 100.0;
+    try testing.expectApproxEqAbs(expected_min, hdr.min_luminance_cdm2, 0.0001);
 }
 
 test "HDR luminance decoding" {

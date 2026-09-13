@@ -1,0 +1,44 @@
+---
+description: DRM scanout — no alloc on flip, KMS asserts, batch to vblank
+globs: "src/backend/drm/**/*.zig,src/compositor/output.zig"
+alwaysApply: false
+---
+
+# Scanout Path
+
+Frame path is bounded and fail-fast. Do not grow `ArrayList`s on flip.
+
+## No malloc on flip
+
+- Fixed dumb slots. `ensureSlot` / preheat is **control plane** (mode change) only
+- Reuse `AtomicRequest` via `reset` (`drmModeAtomicSetCursor`). Do not `init`+`deinit` per `commit`
+- Composite targets: reuse a sized buffer; realloc only when mode or scale changes
+
+```zig
+// ❌ BAD — alloc every flip
+var request = AtomicRequest.init(gpa, backend);
+defer request.deinit();
+
+// ✅ GOOD — reset the scratch request
+self.atomic.reset();
+```
+
+## Batch to vblank
+
+- Never stack `NONBLOCK` flips. Gate with `canCommitScanout(waiting_flip, seat_paused)`
+- Keep `shouldWaitForFlip` / `canCommitScanout` behavior
+- `waiting_flip`, `modeset_done`, and `seat_paused` must stay in lockstep
+
+## Assert KMS invariants
+
+- Before commit: `crtc.primary != null`; fb/slot size matches mode
+- Before recycling the back slot: `!waiting_flip`
+- After page-flip: we were `waiting_flip`
+
+## Explicit IO
+
+Functions that touch `drm_fd` take it as a parameter or name the ioctl (dumb BO, mode blob, atomic commit, `drmHandleEvent`).
+
+## Comptime
+
+Format → bpc (and similar) are comptime tables, not runtime maps.

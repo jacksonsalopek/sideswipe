@@ -1,0 +1,46 @@
+---
+description: Zig naming, allocators, assertions, and C interop
+globs: "**/*.zig"
+alwaysApply: false
+---
+
+# Zig Style
+
+Do not restate `zig-nesting.mdc`, `zig-testing.mdc`, or `zig-arraylist-api.mdc`.
+
+## Naming
+
+- No redundant names in fully-qualified namespaces: `list.append`, not `list.appendToList`
+- `callconv(.c)` for C callbacks (Wayland, libdrm event handlers)
+- Prefer typed pointers over `*anyopaque` when the type is known
+
+## Allocators
+
+- Name by lifetime: `gpa` (general-purpose heap) vs `arena` (scoped bump)
+- Never `std.heap.page_allocator` in tests — see `zig-testing.mdc`
+
+```zig
+// ❌ BAD
+const allocator = std.heap.page_allocator;
+
+// ✅ GOOD
+const gpa = testing.allocator;
+var arena = std.heap.ArenaAllocator.init(gpa);
+defer arena.deinit();
+```
+
+## Assertions
+
+- `std.debug.assert` is for invariants; recoverable failures return errors
+- Pair asserts: **before write** (precondition) and **after read** (observed value)
+- Doc comments: **assume** = unchecked illegal behavior; **assert** = safety-checked
+- `unreachable` only when proven
+
+```zig
+// before write
+std.debug.assert(!self.waiting_flip);
+self.front = back;
+
+// after read
+std.debug.assert(user_data != null);
+```

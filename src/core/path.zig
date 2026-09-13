@@ -1,5 +1,5 @@
 const std = @import("std");
-const string = []const u8;
+const string = @import("core.string").string;
 const env = @import("env.zig");
 
 /// Check whether a config in the form basePath/hypr/programName.conf exists
@@ -81,7 +81,7 @@ pub fn findConfig(program_name: string, allocator: std.mem.Allocator) !ConfigPat
         if (try checkConfigExists(xdg_home, program_name, allocator)) {
             return .{
                 .config_path = try fullConfigPath(xdg_home, program_name, allocator),
-                .base_path = try allocator.dupe(string, xdg_home),
+                .base_path = try allocator.dupe(u8, xdg_home),
                 .allocator = allocator,
             };
         }
@@ -95,7 +95,7 @@ pub fn findConfig(program_name: string, allocator: std.mem.Allocator) !ConfigPat
         if (try checkConfigExists(h, program_name, allocator)) {
             return .{
                 .config_path = try fullConfigPath(h, program_name, allocator),
-                .base_path = try allocator.dupe(string, h),
+                .base_path = try allocator.dupe(u8, h),
                 .allocator = allocator,
             };
         }
@@ -133,7 +133,7 @@ pub fn findConfig(program_name: string, allocator: std.mem.Allocator) !ConfigPat
     if (xdg_config_home) |xdg_home| {
         return .{
             .config_path = null,
-            .base_path = try allocator.dupe(string, xdg_home),
+            .base_path = try allocator.dupe(u8, xdg_home),
             .allocator = allocator,
         };
     }
@@ -141,7 +141,7 @@ pub fn findConfig(program_name: string, allocator: std.mem.Allocator) !ConfigPat
     if (home) |h| {
         return .{
             .config_path = null,
-            .base_path = try allocator.dupe(string, h),
+            .base_path = try allocator.dupe(u8, h),
             .allocator = allocator,
         };
     }

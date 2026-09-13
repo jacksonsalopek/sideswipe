@@ -2,6 +2,7 @@
 //! Supports bool, int, float, and string argument types
 
 const std = @import("std");
+const string = @import("core.string").string;
 
 /// Type of command-line argument
 pub const ArgType = enum {
@@ -16,14 +17,14 @@ pub const ArgValue = union(ArgType) {
     bool: bool,
     int: i64,
     float: f64,
-    string: []const u8,
+    string: string,
 };
 
 /// Metadata for a registered argument option
 const ArgOption = struct {
-    name: []const u8,
-    abbrev: []const u8,
-    description: []const u8,
+    name: string,
+    abbrev: string,
+    description: string,
     arg_type: ArgType,
     value: ?ArgValue,
 };
@@ -31,7 +32,7 @@ const ArgOption = struct {
 /// Argument parser for command-line options
 pub const Parser = struct {
     allocator: std.mem.Allocator,
-    args: []const []const u8,
+    args: []const string,
     options: std.ArrayList(ArgOption),
 
     const Self = @This();
@@ -47,7 +48,7 @@ pub const Parser = struct {
     };
 
     /// Initialize a new argument parser with command-line arguments
-    pub fn init(allocator: std.mem.Allocator, args: []const []const u8) Self {
+    pub fn init(allocator: std.mem.Allocator, args: []const string) Self {
         return .{
             .allocator = allocator,
             .args = args,
@@ -71,27 +72,27 @@ pub const Parser = struct {
     }
 
     /// Register a boolean option (flag)
-    pub fn registerBoolOption(self: *Self, name: []const u8, abbrev: []const u8, description: []const u8) ParseError!void {
+    pub fn registerBoolOption(self: *Self, name: string, abbrev: string, description: string) ParseError!void {
         try self.registerOption(name, abbrev, description, .bool);
     }
 
     /// Register an integer option
-    pub fn registerIntOption(self: *Self, name: []const u8, abbrev: []const u8, description: []const u8) ParseError!void {
+    pub fn registerIntOption(self: *Self, name: string, abbrev: string, description: string) ParseError!void {
         try self.registerOption(name, abbrev, description, .int);
     }
 
     /// Register a float option
-    pub fn registerFloatOption(self: *Self, name: []const u8, abbrev: []const u8, description: []const u8) ParseError!void {
+    pub fn registerFloatOption(self: *Self, name: string, abbrev: string, description: string) ParseError!void {
         try self.registerOption(name, abbrev, description, .float);
     }
 
     /// Register a string option
-    pub fn registerStringOption(self: *Self, name: []const u8, abbrev: []const u8, description: []const u8) ParseError!void {
+    pub fn registerStringOption(self: *Self, name: string, abbrev: string, description: string) ParseError!void {
         try self.registerOption(name, abbrev, description, .string);
     }
 
     /// Internal method to register an option
-    fn registerOption(self: *Self, name: []const u8, abbrev: []const u8, description: []const u8, arg_type: ArgType) ParseError!void {
+    fn registerOption(self: *Self, name: string, abbrev: string, description: string, arg_type: ArgType) ParseError!void {
         if (name.len == 0) {
             return ParseError.EmptyName;
         }
@@ -127,7 +128,7 @@ pub const Parser = struct {
         while (i < self.args.len) : (i += 1) {
             const arg = self.args[i];
 
-            var option_name: []const u8 = undefined;
+            var option_name: string = undefined;
             var is_long = false;
 
             if (std.mem.startsWith(u8, arg, "--")) {
@@ -193,7 +194,7 @@ pub const Parser = struct {
     }
 
     /// Get a boolean option value
-    pub fn getBool(self: *Self, name: []const u8) ?bool {
+    pub fn getBool(self: *Self, name: string) ?bool {
         for (self.options.items) |opt| {
             if (std.mem.eql(u8, opt.name, name) or std.mem.eql(u8, opt.abbrev, name)) {
                 if (opt.value) |val| {
@@ -208,7 +209,7 @@ pub const Parser = struct {
     }
 
     /// Get an integer option value
-    pub fn getInt(self: *Self, name: []const u8) ?i64 {
+    pub fn getInt(self: *Self, name: string) ?i64 {
         for (self.options.items) |opt| {
             if (std.mem.eql(u8, opt.name, name) or std.mem.eql(u8, opt.abbrev, name)) {
                 if (opt.value) |val| {
@@ -223,7 +224,7 @@ pub const Parser = struct {
     }
 
     /// Get a float option value
-    pub fn getFloat(self: *Self, name: []const u8) ?f64 {
+    pub fn getFloat(self: *Self, name: string) ?f64 {
         for (self.options.items) |opt| {
             if (std.mem.eql(u8, opt.name, name) or std.mem.eql(u8, opt.abbrev, name)) {
                 if (opt.value) |val| {
@@ -238,7 +239,7 @@ pub const Parser = struct {
     }
 
     /// Get a string option value
-    pub fn getString(self: *Self, name: []const u8) ?[]const u8 {
+    pub fn getString(self: *Self, name: string) ?string {
         for (self.options.items) |opt| {
             if (std.mem.eql(u8, opt.name, name) or std.mem.eql(u8, opt.abbrev, name)) {
                 if (opt.value) |val| {
@@ -253,7 +254,7 @@ pub const Parser = struct {
     }
 
     /// Generate a formatted help description
-    pub fn getDescription(self: *Self, header: []const u8, max_width: ?usize) ![]const u8 {
+    pub fn getDescription(self: *Self, header: string, max_width: ?usize) !string {
         const width = max_width orelse 80;
         var output: std.Io.Writer.Allocating = .init(self.allocator);
         errdefer output.deinit();
@@ -325,7 +326,7 @@ pub const Parser = struct {
         return output.toOwnedSlice();
     }
 
-    fn getTypeString(arg_type: ArgType) []const u8 {
+    fn getTypeString(arg_type: ArgType) string {
         return switch (arg_type) {
             .bool => "",
             .int => "[int]",
@@ -345,7 +346,7 @@ pub const Parser = struct {
 // Tests (inspired by hyprutils test suite)
 test "Parser - basic parsing with bool and float" {
     const testing = std.testing;
-    const args = [_][]const u8{ "app", "--hello", "--value", "0.2" };
+    const args = [_]string{ "app", "--hello", "--value", "0.2" };
 
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
@@ -367,7 +368,7 @@ test "Parser - basic parsing with bool and float" {
 
 test "Parser - description generation format" {
     const testing = std.testing;
-    const args = [_][]const u8{"app"};
+    const args = [_]string{"app"};
 
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
@@ -390,7 +391,7 @@ test "Parser - description generation format" {
 
 test "Parser - parse fails on unknown argument" {
     const testing = std.testing;
-    const args = [_][]const u8{ "app", "--hello", "--value", "0.2" };
+    const args = [_]string{ "app", "--hello", "--value", "0.2" };
 
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
@@ -407,7 +408,7 @@ test "Parser - parse fails on unknown argument" {
 
 test "Parser - parse fails on missing value for option" {
     const testing = std.testing;
-    const args = [_][]const u8{ "app", "--hello", "--value" };
+    const args = [_]string{ "app", "--hello", "--value" };
 
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
@@ -423,7 +424,7 @@ test "Parser - parse fails on missing value for option" {
 
 test "Parser - string and int parsing with short forms" {
     const testing = std.testing;
-    const args = [_][]const u8{ "app", "--value", "hi", "-w", "2" };
+    const args = [_]string{ "app", "--value", "hi", "-w", "2" };
 
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
@@ -442,7 +443,7 @@ test "Parser - string and int parsing with short forms" {
 
 test "Parser - parse fails on invalid argument format" {
     const testing = std.testing;
-    const args = [_][]const u8{ "app", "e" }; // Missing - or --
+    const args = [_]string{ "app", "e" }; // Missing - or --
 
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
@@ -456,7 +457,7 @@ test "Parser - parse fails on invalid argument format" {
 
 test "Parser - duplicate name registration fails" {
     const testing = std.testing;
-    const args = [_][]const u8{"app"};
+    const args = [_]string{"app"};
 
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
@@ -469,7 +470,7 @@ test "Parser - duplicate name registration fails" {
 
 test "Parser - duplicate abbrev registration fails" {
     const testing = std.testing;
-    const args = [_][]const u8{"app"};
+    const args = [_]string{"app"};
 
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
@@ -482,7 +483,7 @@ test "Parser - duplicate abbrev registration fails" {
 
 test "Parser - empty name registration fails" {
     const testing = std.testing;
-    const args = [_][]const u8{"app"};
+    const args = [_]string{"app"};
 
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
@@ -494,7 +495,7 @@ test "Parser - empty name registration fails" {
 
 test "Parser - option without abbrev works" {
     const testing = std.testing;
-    const args = [_][]const u8{ "app", "--verbose" };
+    const args = [_]string{ "app", "--verbose" };
 
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
@@ -507,7 +508,7 @@ test "Parser - option without abbrev works" {
 
 test "Parser - mixed long and short forms" {
     const testing = std.testing;
-    const args = [_][]const u8{ "app", "-v", "--count", "42", "-o", "test.txt" };
+    const args = [_]string{ "app", "-v", "--count", "42", "-o", "test.txt" };
 
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
@@ -524,7 +525,7 @@ test "Parser - mixed long and short forms" {
 
 test "Parser - get by abbrev works" {
     const testing = std.testing;
-    const args = [_][]const u8{ "app", "-v" };
+    const args = [_]string{ "app", "-v" };
 
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
@@ -539,7 +540,7 @@ test "Parser - get by abbrev works" {
 
 test "Parser - invalid int value fails" {
     const testing = std.testing;
-    const args = [_][]const u8{ "app", "--count", "notanumber" };
+    const args = [_]string{ "app", "--count", "notanumber" };
 
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();
@@ -552,7 +553,7 @@ test "Parser - invalid int value fails" {
 
 test "Parser - invalid float value fails" {
     const testing = std.testing;
-    const args = [_][]const u8{ "app", "--ratio", "notafloat" };
+    const args = [_]string{ "app", "--ratio", "notafloat" };
 
     var parser = Parser.init(testing.allocator, &args);
     defer parser.deinit();

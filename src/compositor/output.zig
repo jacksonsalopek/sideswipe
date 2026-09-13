@@ -14,6 +14,9 @@ const Surface = @import("surface.zig").Surface;
 const FrameCallback = @import("surface.zig").FrameCallback;
 const scale_policy = @import("scale.zig");
 const Scene = @import("scene/scene.zig").Type;
+const hdr = @import("color.zig");
+const ring_geometry = @import("ring_geometry.zig");
+const strip = @import("layout/strip.zig");
 
 /// Compositor output state
 pub const Type = struct {
@@ -29,7 +32,21 @@ pub const Type = struct {
     logical_width: i32 = 1920,
     logical_height: i32 = 1080,
     scale_locked: bool = false,
+    software_cursor: bool = false,
     scene: Scene = .{},
+    composite: ?CompositeBuffer = null,
+    hdr_policy: hdr.Policy = .auto,
+    hdr_caps: hdr.Caps = .{},
+    hdr_engaged: bool = false,
+    blanked: bool = false,
+    dmabuf_scratch: DmabufBufferWrapper = .{
+        .allocator = undefined,
+        .width = 0,
+        .height = 0,
+        .format = 0,
+        .num_planes = 0,
+        .plane_data = [_]PlaneAttributes{.{}} ** 4,
+    },
 
     const Self = @This();
 
@@ -50,7 +67,8 @@ pub const Type = struct {
 
         const name_copy = try allocator.dupe(u8, name);
         errdefer allocator.free(name_copy);
-        const scale_override = readScaleOverride(allocator, name);
+        const settings = readOutputSettings(allocator, name);
+        const scale_override = settings.scale;
         const fractional_scale = scale_policy.preferred(
             .{ .override = scale_override },
             .{ .width = 1920, .height = 1080 },
@@ -64,6 +82,7 @@ pub const Type = struct {
             .name = name_copy,
             .fractional_scale = fractional_scale,
             .scale_locked = scale_override != null,
+            .hdr_policy = hdrPolicy(settings.hdr),
         };
 
         compositor.logger.info("Created compositor output: {s}", .{name});
@@ -90,6 +109,7 @@ pub const Type = struct {
 
     /// Destroys the output
     pub fn deinit(self: *Self) void {
+        if (self.composite) |*buf| buf.deinit();
         self.scene.deinit(self.allocator);
         self.allocator.free(self.name);
         self.allocator.destroy(self);
@@ -97,20 +117,31 @@ pub const Type = struct {
 
     /// Schedules a frame to be rendered
     pub fn scheduleFrame(self: *Self) void {
-        self.scene.output_damaged = true;
-        if (self.frame_pending) {
+        if (!self.requestFrame()) {
             self.compositor.logger.trace("Output {s}: Frame already pending, setting needs_frame flag", .{self.name});
-            self.needs_frame = true;
             return;
         }
 
         self.compositor.logger.debug("Output {s}: Scheduling frame", .{self.name});
         self.backend_output.scheduleFrame(.unknown);
+    }
+
+    /// Latches `frame_pending` before a backend `scheduleFrame` so a
+    /// synchronous DRM callback can clear it during this call.
+    fn requestFrame(self: *Self) bool {
+        self.scene.output_damaged = true;
+        if (self.frame_pending) {
+            self.needs_frame = true;
+            return false;
+        }
         self.frame_pending = true;
+        return true;
     }
 
     /// Renders all surfaces to this output
     pub fn render(self: *Self) Error!void {
+        self.compositor.painting_log = true;
+        defer self.compositor.painting_log = false;
         self.compositor.logger.debug("Output {s}: Begin render (frame_pending={}, needs_frame={})", .{ self.name, self.frame_pending, self.needs_frame });
 
         self.frame_pending = false;
@@ -134,23 +165,34 @@ pub const Type = struct {
 
         self.compositor.logger.debug("Output {s}: Found {d} mapped surface(s) with buffers (total surfaces: {d})", .{ self.name, surface_count, self.compositor.surfaces.items.len });
 
-        if (!self.scene.beginFrame()) {
+        if (!self.scene.beginFrame() and !self.blanked) {
             self.compositor.logger.trace("Output {s}: No damage, sending frame callbacks", .{self.name});
             try self.sendFrameCallbacks();
             return;
         }
 
+        if (self.blanked) {
+            try self.renderBlank();
+            return;
+        }
+
+        const hdr_surface = self.fullscreenHdrSurface();
+        const passthrough = hdr.decide(self.hdr_policy, self.hdr_caps, hdr_surface != null) == .hdr_passthrough;
+        if (passthrough) {
+            try self.renderHdrPassthrough(hdr_surface.?);
+            return;
+        }
+
         self.compositor.logger.debug("Output {s}: Rendering frame with {d} surface(s)", .{ self.name, surface_count });
-        var composite = try CompositeBuffer.init(
-            self.allocator,
-            @max(1, self.logical_width),
-            @max(1, self.logical_height),
-            self.fractional_scale,
-        );
-        defer composite.deinit();
+        const composite = try self.frameTarget();
         composite.fillOpaque(0, 0, 0);
-        try self.compositeToplevels(&composite);
-        self.compositeShellQuads(&composite);
+        composite.tone_map = true;
+        self.pushHdr(null, false);
+        try self.compositeToplevels(composite);
+        self.compositeShellQuads(composite);
+        try self.compositeShellSurfaces(composite);
+        self.compositeLog(composite);
+        self.compositeCursor(composite);
         try self.setBackendBuffer(composite.iface());
         if (!self.backend_output.commit()) return error.BackendError;
         self.scene.finishFrame();
@@ -166,6 +208,132 @@ pub const Type = struct {
         }
 
         self.compositor.logger.debug("Output {s}: Render complete", .{self.name});
+    }
+
+    fn renderBlank(self: *Self) Error!void {
+        const composite = try self.frameTarget();
+        composite.fillOpaque(0, 0, 0);
+        self.pushHdr(null, false);
+        try self.compositeLockSurfaces(composite);
+        try self.setBackendBuffer(composite.iface());
+        if (!self.backend_output.commit()) return error.BackendError;
+        self.scene.finishFrame();
+        try self.sendFrameCallbacks();
+        if (self.needs_frame) self.scheduleFrame();
+    }
+
+    /// DRM tries client-FB scanout. SHM fallback is an 8-bit opaque copy (no
+    /// linear blend); nested/parent Wayland stays 8-bit.
+    fn renderHdrPassthrough(self: *Self, surface: *Surface) Error!void {
+        self.pushHdr(surface, true);
+        if (self.tryClientScanout(surface)) {
+            if (!self.backend_output.commit()) return error.BackendError;
+            self.scene.finishFrame();
+            try self.sendFrameCallbacks();
+            if (self.needs_frame) self.scheduleFrame();
+            return;
+        }
+        const composite = try self.frameTarget();
+        composite.fillOpaque(0, 0, 0);
+        composite.tone_map = false;
+        const geometry = surfaceGeometry(surface, self);
+        try self.compositeSurface(composite, surface, geometry);
+        try self.setBackendBuffer(composite.iface());
+        if (!self.backend_output.commit()) return error.BackendError;
+        self.scene.finishFrame();
+        try self.sendFrameCallbacks();
+        if (self.needs_frame) self.scheduleFrame();
+    }
+
+    fn compositeLockSurfaces(self: *Self, target: *CompositeBuffer) Error!void {
+        for (self.compositor.surfaces.items) |surface| {
+            if (surface.role != .session_lock or !surface.mapped) continue;
+            try self.compositeTree(target, surface, surfaceGeometry(surface, self));
+        }
+    }
+
+    fn fullscreenHdrSurface(self: *const Self) ?*Surface {
+        for (self.compositor.toplevels.items) |entry| {
+            if (!entry.surface.mapped or !entry.surface.color_intent.isHdr()) continue;
+            if (!coversOutput(entry, self.logical_x, self.logical_y, self.logical_width, self.logical_height))
+                continue;
+            return entry.surface;
+        }
+        return null;
+    }
+
+    fn pushHdr(self: *Self, surface: ?*Surface, passthrough: bool) void {
+        self.hdr_engaged = passthrough;
+        const coord = self.compositor.coordinator orelse return;
+        const pending = hdrPending(surface, passthrough, self.hdr_caps);
+        for (coord.implementations.items) |impl| {
+            if (impl.backendType() != .drm) continue;
+            const drm_backend: *backend.drm.Backend = @ptrCast(@alignCast(impl.base.ptr));
+            for (drm_backend.outputs.items) |drm_out| {
+                const ptr: *anyopaque = @ptrCast(drm_out);
+                if (self.backend_output.base.ptr != ptr) continue;
+                drm_out.pending_hdr = pending;
+                drm_out.preheatHdr();
+            }
+        }
+    }
+
+    fn tryClientScanout(self: *Self, surface: *Surface) bool {
+        const resource = surface.current.buffer.buffer orelse return false;
+        if (!linux_dmabuf.isBuffer(resource)) return false;
+        const data: *linux_dmabuf.BufferData = @ptrCast(@alignCast(c.wl_resource_get_user_data(resource)));
+        const coord = self.compositor.coordinator orelse return false;
+        var planes = [_]backend.drm.Output.ClientPlane{.{}} ** 4;
+        const count = fillClientPlanes(data, &planes);
+        var bound = false;
+        for (coord.implementations.items) |impl| {
+            if (impl.backendType() != .drm) continue;
+            bound = self.bindDrmScanout(impl, resource, data, planes[0..count]) or bound;
+        }
+        return bound;
+    }
+
+    fn bindDrmScanout(
+        self: *Self,
+        impl: backend.Implementation,
+        resource: *c.wl_resource,
+        data: *linux_dmabuf.BufferData,
+        planes: []const backend.drm.Output.ClientPlane,
+    ) bool {
+        const drm_backend: *backend.drm.Backend = @ptrCast(@alignCast(impl.base.ptr));
+        const key: usize = @intFromPtr(resource);
+        var bound = false;
+        for (drm_backend.outputs.items) |drm_out| {
+            const ptr: *anyopaque = @ptrCast(drm_out);
+            if (self.backend_output.base.ptr != ptr) continue;
+            bound = drm_out.bindClientScanout(
+                key,
+                @intCast(@max(data.params_data.width, 1)),
+                @intCast(@max(data.params_data.height, 1)),
+                data.params_data.format,
+                planes,
+            ) or bound;
+        }
+        return bound;
+    }
+
+    fn hdrPending(
+        surface: ?*Surface,
+        passthrough: bool,
+        caps: hdr.Caps,
+    ) backend.drm.Output.PendingHdr {
+        const intent = if (passthrough) surface.?.color_intent else hdr.Intent.sdr();
+        if (!passthrough) return .{};
+        const meta = hdr.metadataFrom(intent, caps);
+        return .{
+            .enable = true,
+            .eotf = meta.eotf,
+            .max_cll = meta.max_cll,
+            .max_fall = meta.max_fall,
+            .max_mastering = meta.max_mastering,
+            .min_mastering = meta.min_mastering,
+            .tearing = surface.?.tearing_async,
+        };
     }
 
     /// Sends frame callbacks to all surfaces
@@ -202,20 +370,19 @@ pub const Type = struct {
         return @truncate(ms);
     }
 
+    fn frameTarget(self: *Self) !*CompositeBuffer {
+        return takeComposite(
+            &self.composite,
+            self.allocator,
+            @max(1, self.logical_width),
+            @max(1, self.logical_height),
+            self.fractional_scale,
+        );
+    }
+
     /// Sets a buffer in the backend output state for rendering
     fn setBackendBuffer(self: *Self, buf: backend.buffer.Interface) Error!void {
-        // Access the concrete output implementation through the interface
-        // The base.ptr contains the pointer to the actual Output structure
-        const output_ptr = self.backend_output.base.ptr;
-
-        // For now, we only support Wayland backend
-        // Cast to Wayland Output and set buffer in state
-        const wayland_backend = @import("backend").wayland;
-        const wl_output: *wayland_backend.Output = @ptrCast(@alignCast(output_ptr));
-
-        self.compositor.logger.debug("Output {s}: Before setBuffer - committed.buffer={}", .{ self.name, wl_output.state.committed.buffer });
-        wl_output.state.setBuffer(buf);
-        self.compositor.logger.debug("Output {s}: After setBuffer - committed.buffer={}", .{ self.name, wl_output.state.committed.buffer });
+        self.backend_output.setBuffer(buf);
     }
 
     /// Imports a wl_buffer resource as a backend buffer interface
@@ -309,6 +476,7 @@ pub const Type = struct {
                 .height = entry.height,
             });
         }
+        self.compositeSheetHandles(target);
         for (self.compositor.surfaces.items) |surface| {
             if (surface.role != .xdg_popup) continue;
             const geometry = surface.scene_geometry orelse continue;
@@ -321,8 +489,59 @@ pub const Type = struct {
         }
     }
 
+    fn compositeSheetHandles(self: *Self, target: *CompositeBuffer) void {
+        for (self.compositor.toplevels.items) |entry| {
+            if (!entry.ssd) continue;
+            const handle = entry.handle orelse continue;
+            target.fillRoundedQuad(handleChrome(handle));
+        }
+    }
+
+    fn handleChrome(handle: strip.Geometry) ring_geometry.Quad {
+        return .{
+            .x = @floatFromInt(handle.x),
+            .y = @floatFromInt(handle.y),
+            .width = @floatFromInt(handle.width),
+            .height = @floatFromInt(handle.height),
+            .radius = 4,
+            .color = .{ .red = 0x6a, .green = 0x6a, .blue = 0x70, .alpha = 0xf0 },
+        };
+    }
+
     fn compositeShellQuads(self: *Self, target: *CompositeBuffer) void {
         for (self.scene.shell_quads.items) |quad| target.fillRoundedQuad(quad);
+    }
+
+    fn compositeShellSurfaces(self: *Self, target: *CompositeBuffer) Error!void {
+        var index: usize = 0;
+        while (index < Compositor.shell_overlay_slots) : (index += 1) {
+            const surface = self.compositor.shellOverlay(index) orelse continue;
+            try self.compositeMappedOverlay(target, surface);
+        }
+    }
+
+    fn compositeMappedOverlay(self: *Self, target: *CompositeBuffer, surface: *Surface) Error!void {
+        const geometry = surface.scene_geometry orelse return;
+        try self.compositeTree(target, surface, .{
+            .x = geometry.x,
+            .y = geometry.y,
+            .width = geometry.width,
+            .height = geometry.height,
+        });
+    }
+
+    fn compositeLog(self: *Self, target: *CompositeBuffer) void {
+        const overlay = self.compositor.log_overlay orelse return;
+        if (!self.compositor.onscreen_log) return;
+        const text = overlay.capture(self.compositor.logger);
+        overlay.paint(target.pixels, target.stride, target.width, target.height, text);
+    }
+
+    fn compositeCursor(self: *Self, target: *CompositeBuffer) void {
+        if (!self.software_cursor) return;
+        const x = self.compositor.seat.pointer_x - @as(f64, @floatFromInt(self.logical_x));
+        const y = self.compositor.seat.pointer_y - @as(f64, @floatFromInt(self.logical_y));
+        target.blitCursor(x, y);
     }
 
     fn compositeTree(
@@ -376,7 +595,10 @@ pub const Type = struct {
             return;
         }
         if (c.wl_shm_buffer_get(resource)) |shm| {
+            const previous = target.tone_map;
+            target.tone_map = previous and surface.color_intent.isHdr();
             target.copyShm(shm, geometry, surface.current.buffer, surface.current.viewport);
+            target.tone_map = previous;
             return;
         }
         self.compositor.logger.warn("Output {s}: Unsupported wl_buffer for surface {d}", .{ self.name, surface.id });
@@ -389,8 +611,7 @@ pub const Type = struct {
         resource: *c.wl_resource,
         geometry: @import("layout/strip.zig").Geometry,
     ) Error!void {
-        const imported = try self.importDmabufBuffer(resource);
-        defer imported.deinit();
+        const imported = self.wrapDmabuf(resource) orelse return error.BackendError;
         const data: *linux_dmabuf.BufferData = @ptrCast(@alignCast(c.wl_resource_get_user_data(resource)));
         const crop = sourceCrop(
             data.params_data.width,
@@ -415,13 +636,27 @@ pub const Type = struct {
         };
         const coord = self.compositor.coordinator orelse return error.BackendError;
         const renderer = coord.primary_renderer orelse return error.BackendError;
-        const rgba = try self.allocator.alloc(u8, target.pixels.len);
-        defer self.allocator.free(rgba);
+        const rgba = try target.rgbaScratch();
         if (!renderer.composeDmabufs(&.{layer}, target.width, target.height, rgba)) {
             self.compositor.logger.err("Output {s}: DMA-BUF scene composition failed", .{self.name});
             return error.BackendError;
         }
         target.blendRgbaBottomUp(rgba);
+    }
+
+    fn wrapDmabuf(self: *Self, resource: *c.wl_resource) ?backend.buffer.Interface {
+        const user_data = c.wl_resource_get_user_data(resource) orelse return null;
+        const buffer_data: *linux_dmabuf.BufferData = @ptrCast(@alignCast(user_data));
+        const params = buffer_data.params_data;
+        self.dmabuf_scratch = .{
+            .allocator = self.allocator,
+            .width = params.width,
+            .height = params.height,
+            .format = params.format,
+            .num_planes = params.num_planes,
+            .plane_data = params.plane_data,
+        };
+        return backend.buffer.Interface.init(&self.dmabuf_scratch, &dmabuf_scratch_vtable);
     }
 };
 
@@ -504,6 +739,23 @@ fn surfaceLogicalSize(surface: *Surface) struct { width: i32, height: i32 } {
     return .{ .width = surface.current.width, .height = surface.current.height };
 }
 
+fn surfaceGeometry(surface: *Surface, output: *const Type) strip.Geometry {
+    if (surface.scene_geometry) |geometry| {
+        return .{
+            .x = geometry.x,
+            .y = geometry.y,
+            .width = geometry.width,
+            .height = geometry.height,
+        };
+    }
+    return .{
+        .x = output.logical_x,
+        .y = output.logical_y,
+        .width = output.logical_width,
+        .height = output.logical_height,
+    };
+}
+
 fn isVisible(surface: *const Surface) bool {
     if (!surface.mapped) return false;
     var root = surface;
@@ -511,7 +763,21 @@ fn isVisible(surface: *const Surface) bool {
         if (!parent.mapped) return false;
         root = parent;
     }
-    return root.role == .xdg_toplevel or root.role == .xdg_popup;
+    return root.role == .xdg_toplevel or root.role == .xdg_popup or root.role == .session_lock;
+}
+
+fn fillClientPlanes(data: *linux_dmabuf.BufferData, planes: *[4]backend.drm.Output.ClientPlane) usize {
+    const count = @min(data.params_data.num_planes, planes.len);
+    for (0..count) |index| {
+        const plane = data.params_data.plane_data[index];
+        planes[index] = .{
+            .fd = plane.fd,
+            .stride = plane.stride,
+            .offset = plane.offset,
+            .modifier = (@as(u64, plane.modifier_hi) << 32) | plane.modifier_lo,
+        };
+    }
+    return count;
 }
 
 const SourceCrop = struct {
@@ -621,9 +887,50 @@ fn shmByteLength(width: i32, height: i32, stride: i32) ?usize {
     return std.math.cast(usize, length);
 }
 
+const cursor_width: u32 = 12;
+const cursor_height: u32 = 16;
+const cursor_outline = [_]u8{ 0, 0, 0 };
+const cursor_fill = [_]u8{ 255, 255, 255 };
+const cursor_mask = [_]u8{
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    1, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+    1, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0,
+    1, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0,
+    1, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0,
+    1, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0,
+    1, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0,
+    1, 2, 2, 2, 2, 1, 1, 1, 1, 0, 0, 0,
+    1, 2, 2, 1, 2, 1, 0, 0, 0, 0, 0, 0,
+    1, 2, 1, 0, 1, 2, 1, 0, 0, 0, 0, 0,
+    1, 1, 0, 0, 1, 2, 1, 0, 0, 0, 0, 0,
+    1, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0,
+};
+
+fn takeComposite(
+    slot: *?CompositeBuffer,
+    gpa: std.mem.Allocator,
+    logical_width: i32,
+    logical_height: i32,
+    scale: f32,
+) !*CompositeBuffer {
+    if (slot.*) |*buf| {
+        if (buf.matches(logical_width, logical_height, scale)) return buf;
+        buf.deinit();
+        slot.* = null;
+    }
+    slot.* = try CompositeBuffer.init(gpa, logical_width, logical_height, scale);
+    return &(slot.*.?);
+}
+
 const CompositeBuffer = struct {
     allocator: std.mem.Allocator,
+    tone_map: bool = false,
     pixels: []u8,
+    rgba_scratch: []u8 = &.{},
     logical_width: i32,
     width: i32,
     height: i32,
@@ -657,6 +964,19 @@ const CompositeBuffer = struct {
 
     fn deinit(self: *CompositeBuffer) void {
         self.allocator.free(self.pixels);
+        if (self.rgba_scratch.len != 0) self.allocator.free(self.rgba_scratch);
+    }
+
+    fn rgbaScratch(self: *CompositeBuffer) ![]u8 {
+        if (self.rgba_scratch.len >= self.pixels.len) return self.rgba_scratch[0..self.pixels.len];
+        self.rgba_scratch = try self.allocator.realloc(self.rgba_scratch, self.pixels.len);
+        return self.rgba_scratch;
+    }
+
+    fn matches(self: *const CompositeBuffer, logical_width: i32, logical_height: i32, scale: f32) bool {
+        const width: i32 = @intFromFloat(@round(@as(f32, @floatFromInt(logical_width)) * scale));
+        const height: i32 = @intFromFloat(@round(@as(f32, @floatFromInt(logical_height)) * scale));
+        return self.logical_width == logical_width and self.width == width and self.height == height;
     }
 
     const PhysicalGeometry = struct {
@@ -724,6 +1044,34 @@ const CompositeBuffer = struct {
         var y: i32 = 0;
         while (y < physical.height) : (y += 1)
             self.fillRoundedRow(physical, y);
+    }
+
+    fn blitCursor(self: *CompositeBuffer, logical_x: f64, logical_y: f64) void {
+        const scale = @as(f32, @floatFromInt(self.width)) /
+            @as(f32, @floatFromInt(self.logical_width));
+        const origin_x: i32 = @intFromFloat(@round(logical_x * @as(f64, scale)));
+        const origin_y: i32 = @intFromFloat(@round(logical_y * @as(f64, scale)));
+        var row: u32 = 0;
+        while (row < cursor_height) : (row += 1)
+            self.blitCursorRow(origin_x, origin_y, row);
+    }
+
+    fn blitCursorRow(self: *CompositeBuffer, origin_x: i32, origin_y: i32, row: u32) void {
+        const output_y = origin_y + @as(i32, @intCast(row));
+        if (output_y < 0 or output_y >= self.height) return;
+        var col: u32 = 0;
+        while (col < cursor_width) : (col += 1) {
+            const output_x = origin_x + @as(i32, @intCast(col));
+            if (output_x < 0 or output_x >= self.width) continue;
+            const cell = cursor_mask[row * cursor_width + col];
+            if (cell == 0) continue;
+            const offset: usize = @intCast(output_y * self.stride + output_x * 4);
+            const color = if (cell == 1) cursor_outline else cursor_fill;
+            self.pixels[offset] = color[0];
+            self.pixels[offset + 1] = color[1];
+            self.pixels[offset + 2] = color[2];
+            self.pixels[offset + 3] = 255;
+        }
     }
 
     fn fillRoundedRow(
@@ -810,13 +1158,21 @@ const CompositeBuffer = struct {
             if (source_point.x < 0 or source_point.x >= src_width or source_point.y < 0 or source_point.y >= src_height) continue;
             const source_offset: usize = @intCast(source_point.y * src_stride + source_point.x * 4);
             const output_offset: usize = @intCast(output_y * self.stride + output_x * 4);
-            const source_pixel = source[source_offset .. source_offset + 4];
-            if (format == c.WL_SHM_FORMAT_XRGB8888) {
-                blendShmBgra(self.pixels[output_offset .. output_offset + 4], source_pixel, 255);
-            } else {
-                blendShmBgra(self.pixels[output_offset .. output_offset + 4], source_pixel, source_pixel[3]);
-            }
+            const source_pixel = mappedPixel(self.tone_map, source[source_offset .. source_offset + 4]);
+            self.writeShmPixel(self.pixels[output_offset .. output_offset + 4], source_pixel, format);
         }
+    }
+
+    fn writeShmPixel(self: *const CompositeBuffer, dest: []u8, source_pixel: [4]u8, format: u32) void {
+        const alpha: u8 = if (format == c.WL_SHM_FORMAT_XRGB8888) 255 else source_pixel[3];
+        if (!self.tone_map and alpha == 255) {
+            dest[0] = source_pixel[0];
+            dest[1] = source_pixel[1];
+            dest[2] = source_pixel[2];
+            dest[3] = 255;
+            return;
+        }
+        blendShmBgra(dest, &source_pixel, alpha);
     }
 
     fn iface(self: *CompositeBuffer) backend.buffer.Interface {
@@ -889,11 +1245,32 @@ fn blendPremultipliedBgra(destination: []u8, source_rgba: []const u8) void {
 }
 
 fn blendShmBgra(destination: []u8, source_bgra: []const u8, alpha: u8) void {
-    const inverse_alpha = 255 - @as(u16, alpha);
-    destination[0] = blendChannel(source_bgra[0], destination[0], inverse_alpha);
-    destination[1] = blendChannel(source_bgra[1], destination[1], inverse_alpha);
-    destination[2] = blendChannel(source_bgra[2], destination[2], inverse_alpha);
-    destination[3] = blendChannel(alpha, destination[3], inverse_alpha);
+    destination[0] = hdr.blendLinear(destination[0], source_bgra[0], alpha);
+    destination[1] = hdr.blendLinear(destination[1], source_bgra[1], alpha);
+    destination[2] = hdr.blendLinear(destination[2], source_bgra[2], alpha);
+    destination[3] = blendChannel(alpha, destination[3], 255 - @as(u16, alpha));
+}
+
+fn mappedPixel(tone_map: bool, source_bgra: []const u8) [4]u8 {
+    if (!tone_map) return .{ source_bgra[0], source_bgra[1], source_bgra[2], source_bgra[3] };
+    return .{
+        hdr.reinhard(source_bgra[0]),
+        hdr.reinhard(source_bgra[1]),
+        hdr.reinhard(source_bgra[2]),
+        source_bgra[3],
+    };
+}
+
+fn coversOutput(
+    entry: Compositor.Toplevel,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) bool {
+    return entry.x <= x and entry.y <= y and
+        entry.x + entry.width >= x + width and
+        entry.y + entry.height >= y + height;
 }
 
 fn blendColor(destination: []u8, color: @import("ring_geometry.zig").Color) void {
@@ -932,49 +1309,31 @@ fn blendChannel(source: u8, destination: u8, inverse_alpha: u16) u8 {
     return @intCast(@min(value, 255));
 }
 
-fn readScaleOverride(allocator: std.mem.Allocator, output_name: []const u8) ?f32 {
-    if (core.env.get("SIDESWIPE_SCALE")) |value| {
-        return std.fmt.parseFloat(f32, value) catch null;
-    }
-    const config_home = core.env.get("XDG_CONFIG_HOME") orelse return null;
-    const path = std.fmt.allocPrint(allocator, "{s}/sideswipe/config.toml", .{config_home}) catch return null;
-    defer allocator.free(path);
-    const contents = std.Io.Dir.cwd().readFileAlloc(
+fn readOutputSettings(gpa: std.mem.Allocator, output_name: []const u8) core.config.schema.ResolvedOutput {
+    var cfg = core.config.schema.loadUser(
+        gpa,
         std.Options.debug_io,
-        path,
-        allocator,
-        .limited(64 * 1024),
-    ) catch return null;
-    defer allocator.free(contents);
-    return parseScaleOverride(contents, output_name);
+        core.env.get("XDG_CONFIG_HOME"),
+        core.env.get("HOME"),
+    ) catch return applyScaleOverride(.{}, core.env.get("SIDESWIPE_SCALE"));
+    defer cfg.deinit();
+    return applyScaleOverride(cfg.output(output_name), core.env.get("SIDESWIPE_SCALE"));
 }
 
-fn parseScaleOverride(contents: []const u8, output_name: []const u8) ?f32 {
-    var matching_section = false;
-    var lines = std.mem.splitScalar(u8, contents, '\n');
-    while (lines.next()) |raw_line| {
-        const line = std.mem.trim(u8, raw_line, " \t\r");
-        if (line.len == 0 or line[0] == '#') continue;
-        if (line[0] == '[') {
-            matching_section = isOutputSection(line, output_name);
-            continue;
-        }
-        if (!matching_section) continue;
-        const separator = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-        const key = std.mem.trim(u8, line[0..separator], " \t");
-        if (!std.mem.eql(u8, key, "scale")) continue;
-        const value = std.mem.trim(u8, line[separator + 1 ..], " \t");
-        return std.fmt.parseFloat(f32, value) catch null;
-    }
-    return null;
+fn applyScaleOverride(settings: core.config.schema.ResolvedOutput, raw: ?[]const u8) core.config.schema.ResolvedOutput {
+    const text = raw orelse return settings;
+    const scale = std.fmt.parseFloat(f32, text) catch return settings;
+    var overridden = settings;
+    overridden.scale = scale;
+    return overridden;
 }
 
-fn isOutputSection(line: []const u8, output_name: []const u8) bool {
-    if (line.len < 10 or line[line.len - 1] != ']') return false;
-    const section = line[1 .. line.len - 1];
-    if (!std.mem.startsWith(u8, section, "output.")) return false;
-    const name = std.mem.trim(u8, section["output.".len..], "\"");
-    return std.mem.eql(u8, name, output_name);
+fn hdrPolicy(policy: core.config.schema.HdrPolicy) hdr.Policy {
+    return switch (policy) {
+        .auto => .auto,
+        .on => .on,
+        .off => .off,
+    };
 }
 
 const linux_dmabuf = @import("protocols/linux_dmabuf.zig");
@@ -1056,6 +1415,25 @@ const DmabufBufferWrapper = struct {
         const self: *DmabufBufferWrapper = @ptrCast(@alignCast(ptr));
         self.allocator.destroy(self);
     }
+
+    fn deinitScratch(_: *anyopaque) void {}
+};
+
+const dmabuf_scratch_vtable = backend.buffer.Interface.VTableDef{
+    .caps = DmabufBufferWrapper.caps,
+    .type = DmabufBufferWrapper.bufferType,
+    .update = DmabufBufferWrapper.update,
+    .is_synchronous = DmabufBufferWrapper.isSynchronous,
+    .good = DmabufBufferWrapper.good,
+    .dmabuf = DmabufBufferWrapper.dmabuf,
+    .shm = DmabufBufferWrapper.shm,
+    .begin_data_ptr = DmabufBufferWrapper.beginDataPtr,
+    .end_data_ptr = DmabufBufferWrapper.endDataPtr,
+    .send_release = DmabufBufferWrapper.sendRelease,
+    .lock = DmabufBufferWrapper.lock,
+    .unlock = DmabufBufferWrapper.unlock,
+    .locked = DmabufBufferWrapper.locked,
+    .deinit = DmabufBufferWrapper.deinitScratch,
 };
 
 const dmabuf_buffer_vtable = backend.buffer.Interface.VTableDef{
@@ -1214,22 +1592,69 @@ test "Output - init and deinit" {
     // Just verify the structures compile
 }
 
-test "Output - scheduleFrame sets pending flag" {
-    // This test would require a mock backend output
-    // Skipping for now as it needs more infrastructure
+test "Output - requestFrame latches until the in-flight frame completes" {
+    var output = Type{
+        .allocator = testing.allocator,
+        .compositor = undefined,
+        .backend_output = undefined,
+        .name = "DRM-1",
+    };
+    try testing.expect(output.requestFrame());
+    try testing.expect(output.frame_pending);
+    try testing.expect(output.scene.output_damaged);
+    try testing.expect(!output.requestFrame());
+    try testing.expect(output.needs_frame);
+}
+
+test "Output - requestFrame dispatches again after a sync DRM frame" {
+    var output = Type{
+        .allocator = testing.allocator,
+        .compositor = undefined,
+        .backend_output = undefined,
+        .name = "DRM-1",
+    };
+    try testing.expect(output.requestFrame());
+    output.frame_pending = false;
+    try testing.expect(output.requestFrame());
+    try testing.expect(output.frame_pending);
+    try testing.expect(!output.needs_frame);
 }
 
 test "Output - parses connector scale override" {
-    const config =
+    var cfg = try core.config.Config.parse(testing.allocator,
         \\[output."DP-1"]
         \\scale = 1.5
         \\
         \\[output.HDMI-A-1]
         \\scale = 2.0
-    ;
-    try testing.expectEqual(@as(?f32, 1.5), parseScaleOverride(config, "DP-1"));
-    try testing.expectEqual(@as(?f32, 2.0), parseScaleOverride(config, "HDMI-A-1"));
-    try testing.expectNull(parseScaleOverride(config, "eDP-1"));
+    );
+    defer cfg.deinit();
+    try testing.expectEqual(@as(?f32, 1.5), cfg.output("DP-1").scale);
+    try testing.expectEqual(@as(?f32, 2.0), cfg.output("HDMI-A-1").scale);
+    try testing.expectNull(cfg.output("eDP-1").scale);
+}
+
+test "Output - SIDESWIPE_SCALE wins over file scale" {
+    const file = core.config.schema.ResolvedOutput{ .scale = 1.5, .hdr = .on };
+    const overridden = applyScaleOverride(file, "2.0");
+    try testing.expectEqual(@as(?f32, 2.0), overridden.scale);
+    try testing.expectEqual(core.config.schema.HdrPolicy.on, overridden.hdr);
+    try testing.expectEqual(@as(?f32, 1.5), applyScaleOverride(file, "nope").scale);
+    try testing.expectEqual(@as(?f32, 1.5), applyScaleOverride(file, null).scale);
+}
+
+test "Output - hdr policy prefers named section over [output]" {
+    var cfg = try core.config.Config.parse(testing.allocator,
+        \\[output]
+        \\hdr = on
+        \\
+        \\[output."DP-1"]
+        \\hdr = off
+    );
+    defer cfg.deinit();
+    try testing.expectEqual(hdr.Policy.off, hdrPolicy(cfg.output("DP-1").hdr));
+    try testing.expectEqual(hdr.Policy.on, hdrPolicy(cfg.output("HDMI-A-1").hdr));
+    try testing.expectEqual(hdr.Scanout.sdr, hdr.decide(.auto, .{}, true));
 }
 
 test "Output - applyGeometry updates size and unlocked scale" {
@@ -1250,6 +1675,38 @@ test "Output - applyGeometry updates size and unlocked scale" {
     try testing.expect(output.applyGeometry(1920, 1080, 2));
     try testing.expectEqual(@as(f32, 1.5), output.fractional_scale);
     try testing.expect(!output.applyGeometry(1920, 1080, 2));
+}
+
+test "CompositeBuffer - blitCursor writes an outlined arrow" {
+    var composite = try CompositeBuffer.init(testing.allocator, 16, 16, 1);
+    defer composite.deinit();
+    composite.fillOpaque(16, 32, 64);
+    composite.blitCursor(0, 0);
+    try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 255 }, composite.pixels[0..4]);
+    try testing.expectEqualSlices(u8, &.{ 255, 255, 255, 255 }, composite.pixels[2 * 16 * 4 + 4 ..][0..4]);
+    try testing.expectEqualSlices(u8, &.{ 16, 32, 64, 255 }, composite.pixels[4..8]);
+}
+
+test "takeComposite - reuses a matching buffer" {
+    var slot: ?CompositeBuffer = null;
+    defer if (slot) |*buf| buf.deinit();
+
+    const first = try takeComposite(&slot, testing.allocator, 8, 8, 1);
+    const pixels = first.pixels.ptr;
+    const second = try takeComposite(&slot, testing.allocator, 8, 8, 1);
+    try testing.expectEqual(pixels, second.pixels.ptr);
+}
+
+test "takeComposite - reallocates when mode or scale changes" {
+    var slot: ?CompositeBuffer = null;
+    defer if (slot) |*buf| buf.deinit();
+
+    const first = try takeComposite(&slot, testing.allocator, 8, 8, 1);
+    const pixels = first.pixels.ptr;
+    const second = try takeComposite(&slot, testing.allocator, 16, 8, 1);
+    try testing.expect(pixels != second.pixels.ptr);
+    try testing.expectEqual(@as(i32, 16), second.logical_width);
+    try testing.expect(!second.matches(8, 8, 1));
 }
 
 test "CompositeBuffer - fillOpaque writes solid BGRA" {
@@ -1294,7 +1751,21 @@ test "Output - alpha blends premultiplied SHM BGRA" {
     var destination = [_]u8{ 10, 20, 30, 255 };
     const source = [_]u8{ 50, 25, 10, 128 };
     blendShmBgra(&destination, &source, source[3]);
-    try testing.expectEqualSlices(u8, &.{ 55, 35, 25, 255 }, &destination);
+    try testing.expectEqual(hdr.blendLinear(10, 50, 128), destination[0]);
+    try testing.expectEqual(hdr.blendLinear(20, 25, 128), destination[1]);
+    try testing.expectEqual(hdr.blendLinear(30, 10, 128), destination[2]);
+    try testing.expectEqual(@as(u8, 255), destination[3]);
+    try testing.expect(destination[0] != 55);
+}
+
+test "CompositeBuffer - sheet handle chrome paints the grab bar" {
+    var composite = try CompositeBuffer.init(testing.allocator, 40, 40, 1);
+    defer composite.deinit();
+    const quad = Type.handleChrome(.{ .x = 0, .y = 0, .width = 40, .height = 8 });
+    composite.fillRoundedQuad(quad);
+    const center: usize = @intCast(4 * composite.stride + 20 * 4);
+    try testing.expect(composite.pixels[center + 3] != 0);
+    try testing.expect(composite.pixels[center] != 0);
 }
 
 test "CompositeBuffer - rounded shell quad scales and leaves corners clear" {
@@ -1312,6 +1783,28 @@ test "CompositeBuffer - rounded shell quad scales and leaves corners clear" {
     const center: usize = @intCast(9 * composite.stride + 9 * 4);
     try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, composite.pixels[corner .. corner + 4]);
     try testing.expectEqualSlices(u8, &.{ 0, 0, 255, 255 }, composite.pixels[center .. center + 4]);
+}
+
+test "Output - opaque SHM passthrough writes without linear blend" {
+    var composite = try CompositeBuffer.init(testing.allocator, 1, 1, 1);
+    defer composite.deinit();
+    composite.fillOpaque(10, 20, 30);
+    composite.tone_map = false;
+    const source = [_]u8{ 40, 50, 60, 255 };
+    composite.blitNearest(
+        &source,
+        1,
+        1,
+        4,
+        c.WL_SHM_FORMAT_XRGB8888,
+        .{ .x = 0, .y = 0, .width = 1, .height = 1 },
+        c.WL_OUTPUT_TRANSFORM_NORMAL,
+        0,
+        0,
+        1,
+        1,
+    );
+    try testing.expectEqualSlices(u8, &.{ 40, 50, 60, 255 }, composite.pixels[0..4]);
 }
 
 test "Output - SHM blit crops the committed viewport source" {
@@ -1442,4 +1935,14 @@ test "Output - descendants require every ancestor to remain mapped" {
     root.mapped = true;
     root.role = .none;
     try testing.expectFalse(isVisible(&grandchild));
+}
+
+test "Output - session lock surfaces are visible" {
+    var lock_surf: Surface = undefined;
+    lock_surf.role = .session_lock;
+    lock_surf.parent = null;
+    lock_surf.mapped = true;
+    try testing.expect(isVisible(&lock_surf));
+    lock_surf.mapped = false;
+    try testing.expectFalse(isVisible(&lock_surf));
 }

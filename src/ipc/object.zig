@@ -1,6 +1,7 @@
 //! Wire object abstraction for RPC-style method calls
 
 const std = @import("std");
+const string = @import("core.string").string;
 const core = @import("core");
 const protocol = @import("protocol.zig");
 const message = @import("message.zig");
@@ -10,14 +11,14 @@ const Magic = message.Magic;
 /// Wire object interface
 pub const Wire = struct {
     id: u32,
-    protocol_name: []const u8,
+    protocol_name: string,
     version: u32,
     allocator: std.mem.Allocator,
     listeners: std.ArrayList(?*const anyopaque),
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, id: u32, protocol_name: []const u8, version: u32) Self {
+    pub fn init(allocator: std.mem.Allocator, id: u32, protocol_name: string, version: u32) Self {
         return .{
             .id = id,
             .protocol_name = protocol_name,
@@ -97,7 +98,7 @@ pub const Call = struct {
     }
 
     /// Add string parameter
-    pub fn addString(self: *Call, value: []const u8) !void {
+    pub fn addString(self: *Call, value: string) !void {
         try self.builder.addString(value);
     }
 
@@ -115,7 +116,7 @@ pub const Call = struct {
     }
 
     /// Add array of strings
-    pub fn addStringArray(self: *Call, values: []const []const u8) !void {
+    pub fn addStringArray(self: *Call, values: []const string) !void {
         try self.builder.addStringArray(values);
     }
 
@@ -173,7 +174,7 @@ pub const ParsedCall = struct {
     }
 
     /// Parse next string parameter
-    pub fn nextString(self: *ParsedCall) ![]const u8 {
+    pub fn nextString(self: *ParsedCall) !string {
         return try message.Parser.parseString(self.payload, &self.offset);
     }
 

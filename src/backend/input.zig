@@ -1338,7 +1338,7 @@ test "EventQueue - event timestamp ordering validation" {
 pub const IKeyboard = blk: {
     const VTableDef = struct {
         get_libinput_handle: *const fn (ptr: *anyopaque) ?*libinput.Device,
-        get_name: *const fn (ptr: *anyopaque) []const u8,
+        get_name: *const fn (ptr: *anyopaque) string,
         update_leds: *const fn (ptr: *anyopaque, leds: u32) void,
         deinit: *const fn (ptr: *anyopaque) void,
     };
@@ -1359,7 +1359,7 @@ pub const IKeyboard = blk: {
             return self.base.vtable.get_libinput_handle(self.base.ptr);
         }
 
-        pub fn getName(self: Self) []const u8 {
+        pub fn getName(self: Self) string {
             return self.base.vtable.get_name(self.base.ptr);
         }
 
@@ -1400,7 +1400,7 @@ pub const ISwitch = blk: {
             return self.base.getLibinputHandle();
         }
 
-        pub fn getName(self: Self) []const u8 {
+        pub fn getName(self: Self) string {
             return self.base.getName();
         }
 
@@ -1441,7 +1441,7 @@ pub const ITabletTool = blk: {
             return self.base.getLibinputHandle();
         }
 
-        pub fn getName(self: Self) []const u8 {
+        pub fn getName(self: Self) string {
             return self.base.getName();
         }
 
@@ -1456,7 +1456,7 @@ pub const ITabletPad = core.vtable.DeviceInterface("ITabletPad");
 // Tests for device interfaces
 test "IKeyboard - interface creation and methods" {
     const MockKeyboard = struct {
-        name: []const u8,
+        name: string,
         leds_state: u32 = 0,
 
         fn getLibinputHandle(ptr: *anyopaque) ?*libinput.Device {
@@ -1464,7 +1464,7 @@ test "IKeyboard - interface creation and methods" {
             return null;
         }
 
-        fn getName(ptr: *anyopaque) []const u8 {
+        fn getName(ptr: *anyopaque) string {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             return self.name;
         }
@@ -1498,14 +1498,14 @@ test "IKeyboard - interface creation and methods" {
 
 test "IPointer - interface creation" {
     const MockPointer = struct {
-        name: []const u8,
+        name: string,
 
         fn getLibinputHandle(ptr: *anyopaque) ?*anyopaque {
             _ = ptr;
             return null;
         }
 
-        fn getName(ptr: *anyopaque) []const u8 {
+        fn getName(ptr: *anyopaque) string {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             return self.name;
         }
@@ -1530,14 +1530,14 @@ test "IPointer - interface creation" {
 
 test "ITouch - interface creation" {
     const MockTouch = struct {
-        name: []const u8,
+        name: string,
 
         fn getLibinputHandle(ptr: *anyopaque) ?*anyopaque {
             _ = ptr;
             return null;
         }
 
-        fn getName(ptr: *anyopaque) []const u8 {
+        fn getName(ptr: *anyopaque) string {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             return self.name;
         }
@@ -1561,14 +1561,14 @@ test "ITouch - interface creation" {
 
 test "ISwitch - interface with SwitchType enum" {
     const MockSwitch = struct {
-        name: []const u8,
+        name: string,
 
         fn getLibinputHandle(ptr: *anyopaque) ?*anyopaque {
             _ = ptr;
             return null;
         }
 
-        fn getName(ptr: *anyopaque) []const u8 {
+        fn getName(ptr: *anyopaque) string {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             return self.name;
         }
@@ -1597,14 +1597,14 @@ test "ISwitch - interface with SwitchType enum" {
 
 test "ITablet - interface creation" {
     const MockTablet = struct {
-        name: []const u8,
+        name: string,
 
         fn getLibinputHandle(ptr: *anyopaque) ?*anyopaque {
             _ = ptr;
             return null;
         }
 
-        fn getName(ptr: *anyopaque) []const u8 {
+        fn getName(ptr: *anyopaque) string {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             return self.name;
         }
@@ -1628,7 +1628,7 @@ test "ITablet - interface creation" {
 
 test "ITabletTool - interface with ToolType enum" {
     const MockTabletTool = struct {
-        name: []const u8,
+        name: string,
         type: ITabletTool.Type,
 
         fn getLibinputHandle(ptr: *anyopaque) ?*anyopaque {
@@ -1636,7 +1636,7 @@ test "ITabletTool - interface with ToolType enum" {
             return null;
         }
 
-        fn getName(ptr: *anyopaque) []const u8 {
+        fn getName(ptr: *anyopaque) string {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             return self.name;
         }
@@ -1666,14 +1666,14 @@ test "ITabletTool - interface with ToolType enum" {
 
 test "ITabletPad - interface creation" {
     const MockTabletPad = struct {
-        name: []const u8,
+        name: string,
 
         fn getLibinputHandle(ptr: *anyopaque) ?*anyopaque {
             _ = ptr;
             return null;
         }
 
-        fn getName(ptr: *anyopaque) []const u8 {
+        fn getName(ptr: *anyopaque) string {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             return self.name;
         }
@@ -1697,14 +1697,14 @@ test "ITabletPad - interface creation" {
 
 test "Multiple device interfaces - different types" {
     const MockKeyboard = struct {
-        name: []const u8,
+        name: string,
 
         fn getLibinputHandle(ptr: *anyopaque) ?*libinput.Device {
             _ = ptr;
             return null;
         }
 
-        fn getName(ptr: *anyopaque) []const u8 {
+        fn getName(ptr: *anyopaque) string {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             return self.name;
         }
@@ -1727,14 +1727,14 @@ test "Multiple device interfaces - different types" {
     };
 
     const MockPointer = struct {
-        name: []const u8,
+        name: string,
 
         fn getLibinputHandle(ptr: *anyopaque) ?*anyopaque {
             _ = ptr;
             return null;
         }
 
-        fn getName(ptr: *anyopaque) []const u8 {
+        fn getName(ptr: *anyopaque) string {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             return self.name;
         }

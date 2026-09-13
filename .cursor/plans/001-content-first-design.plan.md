@@ -10,19 +10,19 @@ todos:
     status: completed
   - id: d0053de7-c13b-416f-81ec-7e423e13cff6
     content: "M2 Gesture recognizer + mouse translator + fallback ring: adjacent-column switch, back, scale-aware placeholder"
-    status: in_progress
+    status: completed
   - id: d6c7e1c0-764a-4da8-a15f-58ee45ab1c47
     content: "M3 Shell client ring + switcher over sideswipe_shell_v1: internal thumbnails, wp_presentation latency path"
-    status: pending
+    status: in_progress
   - id: 29e66c3a-f86d-4129-9b4b-be97f942fc3c
     content: "M4 Sheets + xdg_dialog + overrides + animation with early-swap: 10-bit/float renderer import"
-    status: pending
+    status: completed
   - id: 1bbecdf3-d718-4e12-bf94-c18e7ec1651b
     content: "M5 Shade + edit menu + tile HUD + OLED/idle policy: bridged notifications, clock+battery"
     status: pending
   - id: 0ce57d09-1c51-4baf-8bef-881ed5318715
     content: "M6 Trackpad/touch translators + DRM atomic + HDR passthrough + session lock + I8 accelerators: HDR matrix green"
-    status: pending
+    status: completed
   - id: 2023e1ac-8d64-414f-9342-64d6d1cc996f
     content: "M7 (v2, tracked) Full HDR scene composition for mixed strips: keep v1 SDR-container down-map passing"
     status: pending
@@ -30,6 +30,8 @@ isProject: true
 ---
 
 > Source: `docs/rfcs/001-content-first-design.md` (Status: Draft rev 3, Target: sideswipe `master`, Zig 0.16.0). This plan is the executable rendering of that RFC; requirement IDs (W/I/S/R/H/P/C/A) are stable and trace back to it.
+
+> Follow-ons (do not start until the named dependency is ready): [000](000-distribution-roadmap.plan.md) sequences them. [002](002-unified-config-store.plan.md) amends C1. [004](004-orbit-radial-menu.plan.md) amends S1/S2 after M3. [005](005-lollipop-text-toolbar.plan.md) amends S6 after M3. [003](003-app-sdk.plan.md) is the toolkit for first-party apps.
 
 ## Requirements Summary
 
@@ -69,7 +71,7 @@ Sideswipe is a Wayland compositor with no persistent bar, dock, or panel. All sh
 ### Input model (I)
 
 - **I1** Device-independent primitives: `hold`, `flick(direction)`, `drag(direction, progress)`, `release`, `back`, `forward`, `zoom(delta)`. `zoom` continuous, quantized to width steps. Per-device translators receive finger counts/edge sources where available.
-- **I2** Mouse: configurable shell button (default `BTN_SIDE`, fallback `BTN_EXTRA`, never `BTN_MIDDLE`). Hold = press + 400 ms within 6 px dead zone. Flick = press, move past dead zone, release within 300 ms. Sustained motion = drag with progress. Press deferred until disambiguation, else replayed with original timestamp. `BTN_BACK`/`BTN_FORWARD` only when no shell gesture in progress. `Ctrl+wheel` zooms only while shell button held or over tile gap, else passthrough.
+- **I2** Mouse: configurable shell button (default `BTN_MIDDLE` hold; `BTN_SIDE`/`BTN_EXTRA` are explicit overrides only). Hold = press + 250 ms within 6 px dead zone. Flick = press, move past dead zone, release within 300 ms. Sustained motion = drag with progress. Press deferred until disambiguation, else replayed with original timestamp. Overlay grab (I5) must consume the summoning middle-click so clients do not see primary-selection paste. `BTN_BACK`/`BTN_FORWARD` only when no shell gesture in progress. `Ctrl+wheel` zooms only while shell button held or over tile gap, else passthrough.
 - **I3** Trackpad: 3-finger swipe = drag/flick; 3-finger tap-and-hold (second tap held 300 ms) = hold; pinch = zoom; 2-finger horizontal swipe = drag(left|right) for column switch (no edge requirement).
 - **I4** Touch: bottom-edge (outer 24 logical px) swipe = drag/flick up/sideways; top-edge swipe = drag down; long-press (500 ms, 10 px slop) = hold; left-edge swipe = back; pinch = zoom. Edge swipes claimed, touch sequence not delivered once threshold crossed. Non-edge long-press also delivered unless overlay opens, then `touch_cancel`.
 - **I5** Shell-button events consumed per I2 before client delivery. All else passthrough unless overlay open (compositor grab). While overlay open, `pointer_constraints` locks suspended and `relative_pointer` paused; resumed on close.
@@ -202,13 +204,13 @@ Requests shell to compositor:
 
 | # | Task | Phase | Milestone | Parallel | Status |
 |---|---|---|---|---|---|
-| 1 | M0 Input dispatch: real `wl_seat` + focus, pointer/keyboard delivery, `wl_subcompositor`, xkbcommon keymap, nested only | foundation | M0 | A1 | pending |
-| 2 | M1 Strip layout + complete popups + fractional-scale HiDPI: columns, logical/physical split, `ceil` scale, DRM smoke + HDR caps log | layout+hidpi | M1 | A2 | pending |
-| 3 | M2 Gesture recognizer + mouse translator + fallback ring: axis lock, press replay, adjacent-column switch, back | input | M2 | A3 | pending |
-| 4 | M3 Shell client ring + switcher over private socket: presentational shell, internal thumbnails, placeholder latency path | shell | M3 | A4 | pending |
-| 5 | M4 Sheets + dialog + overrides + animation: height resolution, decorations, early-swap, 10-bit/float import | windows | M4 | A5 | pending |
+| 1 | M0 Input dispatch: real `wl_seat` + focus, pointer/keyboard delivery, `wl_subcompositor`, xkbcommon keymap, nested only | foundation | M0 | A1 | completed |
+| 2 | M1 Strip layout + complete popups + fractional-scale HiDPI: columns, logical/physical split, `ceil` scale, DRM smoke + HDR caps log | layout+hidpi | M1 | A2 | completed |
+| 3 | M2 Gesture recognizer + mouse translator + fallback ring: axis lock, press replay, adjacent-column switch, back | input | M2 | A3 | completed |
+| 4 | M3 Shell client ring + switcher over private socket: presentational shell, internal thumbnails, placeholder latency path | shell | M3 | A4 | in_progress |
+| 5 | M4 Sheets + dialog + overrides + animation: height resolution, decorations, early-swap, 10-bit/float import | windows | M4 | A5 | completed |
 | 6 | M5 Shade + edit menu + HUD + OLED/idle: D-Bus bridge, UPower clock/battery, primary-selection trigger | shell-ui | M5 | A6 | pending |
-| 7 | M6 Trackpad/touch + DRM atomic + HDR passthrough + lock + accelerators: metadata commit/clear, A1 floor | hardware+hdr | M6 | A7 | pending |
+| 7 | M6 Trackpad/touch + DRM atomic + HDR passthrough + lock + accelerators: metadata commit/clear, A1 floor | hardware+hdr | M6 | A7 | completed |
 | 8 | M7 (v2, tracked) Full HDR scene composition: operator + container choice, keep SDR down-map passing | hdr-v2 | M7 | A8 | pending |
 
 ### M0 acceptance
@@ -296,6 +298,6 @@ Primary loop once M3 lands: `zig build run-nested` (compositor nested with shell
 - Tree today: nested backend, GLES 3.0 + DMA-BUF import, `wl_compositor` v6 double-buffered + damage, basic `xdg_shell` (toplevel only, popup ignores parent/positioner, states prepared not driven), stub `wl_seat`/`wl_output`/`wl_data_device_manager`, no `wl_subcompositor`, libinput pointer/motion/axis/key only (gesture/touch/tablet/switch dropped, single `DeviceType` enum misclassifies multi-capability devices), display-info EDID/DisplayID/CTA with SIMD, custom IPC. No scene graph, focus, layout, input dispatch (per-surface commits), shell layer, or gestures.
 - Current tree has no reliable OLED bit in EDID/DisplayID; config is source of truth (R3).
 - Fractional scale must land before color; color must not land without fractional scale working.
-- `BTN_MIDDLE` never reserved (primary-selection paste).
+- `BTN_MIDDLE` is the default shell hold button; I5 overlay grab must not replay that press to clients.
 - Shell surfaces double-buffered, mapped only while open live; unknown thumbnail handles and commit-without-open are protocol errors.
 - Execution: implement milestone by milestone (M0 to M6, M7 tracked); keep matrix green; measure S1 latency via `wp_presentation` in nested mode from M3.

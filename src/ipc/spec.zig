@@ -1,6 +1,7 @@
 //! Protocol specification system
 
 const std = @import("std");
+const string = @import("core.string").string;
 const core = @import("core");
 const VTable = core.vtable.Interface;
 const message = @import("message.zig");
@@ -10,7 +11,7 @@ const Magic = message.Magic;
 pub const Method = struct {
     idx: u32 = 0,
     params: []const Magic,
-    returns_type: []const u8 = "",
+    returns_type: string = "",
     since: u32 = 1,
 };
 
@@ -19,7 +20,7 @@ pub const Object = struct {
     base: VTable(VTableDef),
 
     pub const VTableDef = struct {
-        object_name: *const fn (ptr: *anyopaque) []const u8,
+        object_name: *const fn (ptr: *anyopaque) string,
         /// Client-to-server methods
         c2s: *const fn (ptr: *anyopaque) []const Method,
         /// Server-to-client methods
@@ -33,7 +34,7 @@ pub const Object = struct {
         return .{ .base = VTable(VTableDef).init(ptr, vtable) };
     }
 
-    pub fn objectName(self: Self) []const u8 {
+    pub fn objectName(self: Self) string {
         return self.base.vtable.object_name(self.base.ptr);
     }
 
@@ -55,7 +56,7 @@ pub const Protocol = struct {
     base: VTable(VTableDef),
 
     pub const VTableDef = struct {
-        spec_name: *const fn (ptr: *anyopaque) []const u8,
+        spec_name: *const fn (ptr: *anyopaque) string,
         spec_ver: *const fn (ptr: *anyopaque) u32,
         objects: *const fn (ptr: *anyopaque) []const Object,
         deinit: *const fn (ptr: *anyopaque) void,
@@ -67,7 +68,7 @@ pub const Protocol = struct {
         return .{ .base = VTable(VTableDef).init(ptr, vtable) };
     }
 
-    pub fn specName(self: Self) []const u8 {
+    pub fn specName(self: Self) string {
         return self.base.vtable.spec_name(self.base.ptr);
     }
 
@@ -92,7 +93,7 @@ pub const Protocol = struct {
 /// Instance with user data and lifecycle management
 pub const Instance = struct {
     id: u32,
-    protocol_name: []const u8,
+    protocol_name: string,
     version: u32,
     user_data: ?*anyopaque = null,
     on_destroy: ?*const fn (*anyopaque) void = null,
@@ -100,7 +101,7 @@ pub const Instance = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, id: u32, protocol_name: []const u8, version: u32) Self {
+    pub fn init(allocator: std.mem.Allocator, id: u32, protocol_name: string, version: u32) Self {
         return .{
             .id = id,
             .protocol_name = protocol_name,
@@ -185,11 +186,11 @@ test "Instance - destroy callback" {
 
 test "ObjectSpec - interface" {
     const MockObjectSpec = struct {
-        name: []const u8,
+        name: string,
         c2s_methods: []const Method,
         s2c_methods: []const Method,
 
-        fn objectNameFn(ptr: *anyopaque) []const u8 {
+        fn objectNameFn(ptr: *anyopaque) string {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             return self.name;
         }
@@ -238,11 +239,11 @@ test "ObjectSpec - interface" {
 
 test "Protocol - interface" {
     const MockProtocolSpec = struct {
-        name: []const u8,
+        name: string,
         version: u32,
         object_specs: []const Object,
 
-        fn specNameFn(ptr: *anyopaque) []const u8 {
+        fn specNameFn(ptr: *anyopaque) string {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             return self.name;
         }

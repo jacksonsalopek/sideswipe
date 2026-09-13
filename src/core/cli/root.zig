@@ -38,6 +38,21 @@ pub fn configureGlobalLogger(level: LogLevel, time_enabled: bool, color_enabled:
     }
 }
 
+pub fn enableGlobalRolling() void {
+    if (!global_logger_initialized) return;
+    global_logger.setEnableRolling(true);
+}
+
+pub fn copyGlobalRolling(dest: []u8) usize {
+    if (!global_logger_initialized) return 0;
+    return global_logger.copyRolling(dest);
+}
+
+pub fn setGlobalAppendSink(sink: ?Logger.AppendSink, userdata: ?*anyopaque) void {
+    if (!global_logger_initialized) return;
+    global_logger.setAppendSink(sink, userdata);
+}
+
 /// Global log interface
 pub const log = struct {
     pub fn trace(comptime fmt: []const u8, args_: anytype) void {
